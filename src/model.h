@@ -13,6 +13,7 @@ struct Clip {
     std::wstring sourcePath;        // original file on disk, if any
     AudioBufferPtr buffer;
     PeakCachePtr peaks;
+    float gain = 1.0f;             // linear volume multiplier
 
     int64_t frames() const { return buffer ? buffer->frames() : 0; }
     int sampleRate() const { return buffer ? buffer->sampleRate : 48000; }
@@ -32,6 +33,7 @@ struct Track {
     std::wstring name;
     std::vector<PlacedClip> clips;  // kept sorted by startFrame, never overlapping
     bool muted = false;
+    float gain = 1.0f;             // linear volume multiplier
 
     void sortClips() {
         std::sort(clips.begin(), clips.end(),

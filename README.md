@@ -27,6 +27,24 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   clip's title bar onto a track to place it; drag placed clips to move them.
   Clips **snap** to butt up against neighbours and **can't overlap** on a track.
 - **Prominent Play All** button plays every track together from the playhead.
+- **Per-clip and per-track volume.** Every card and every track header has a
+  volume slider (0–200%). Gain is applied live to preview, timeline mixing, and
+  export, and each change is a single undo step.
+- **Speech-aware normalize.** Right-click a clip to **normalize it to match the
+  other clips**, or **normalize every clip on every track** to a common level.
+  Loudness is measured over speech only — relatively silent gaps are ignored — so
+  quiet talkers get pulled up without amplifying room tone.
+- **Voice cleaner (noise reduction).** Right-click → *Voice cleaner* runs an STFT
+  denoiser to strip steady background noise. Choose the **algorithm** (spectral
+  subtraction or Wiener filter) and how **aggressively** to clean (light / medium
+  / aggressive). The result replaces the clip's audio (undoable).
+- **Save / load projects.** Projects are saved as a single `.acep` file with the
+  whole library and timeline (audio embedded), so a project is fully
+  self-contained. `Ctrl+S` saves; the File menu has Open / Save / Save As.
+- **Export the mixdown.** *File → Export Mixdown* renders all tracks together and
+  saves through the same audio dialog (format, bitrate, mono/stereo).
+- **Menu bar** (File / Edit / Track / Help) mirrors the toolbar and adds project
+  I/O, mixdown export, and a Controls reference.
 
 ## Building
 
@@ -53,8 +71,11 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Play / pause a clip | green button on the card, or `Space` on the active clip |
 | Seek within a clip | click the waveform |
 | Make a selection | drag across the waveform |
-| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, rename, delete, add to a track |
+| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, normalize, voice cleaner, rename, delete, add to a track |
 | Rename a clip | right-click → Rename, or double-click the card title |
+| Set clip / track volume | drag the volume slider on the card or track header |
+| Normalize volume | right-click a card → *Normalize to match other clips* / *Normalize all clips* |
+| Clean up noise | right-click a card → *Voice cleaner…* |
 | Add a track | **+ Add Track** |
 | Place a clip on a track | drag the card's **title bar** into a track lane, or right-click → Add to timeline |
 | Move a placed clip | drag it (snaps to neighbours; drag vertically to change tracks) |
@@ -63,6 +84,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Play all tracks | **▶ Play All** (`Space` when nothing is being previewed) |
 | Stop | **■ Stop** |
 | Undo / Redo | `Ctrl+Z` / `Ctrl+Shift+Z` (or the toolbar buttons) |
+| Add files / Save project | `Ctrl+O` / `Ctrl+S` |
+| Open / Save / Export | **File** menu |
 | Scroll library | mouse wheel over the clip area |
 | Scroll / zoom timeline | wheel = scroll, `Ctrl`+wheel = zoom, `Shift`+wheel = scroll tracks |
 
@@ -78,9 +101,10 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `undo.h` | Snapshot-based undo **tree** with branching redo |
 | `document.{h,cpp}` | Owns the project + undo tree; every edit commits a snapshot |
 | `waveform.{h,cpp}` | GDI filled volume-graph rendering |
-| `dialogs.{h,cpp}` | Text prompt + export-options modal + open/save file dialogs |
-| `ui.cpp` | Main window: layout, painting, hit-testing, all interaction |
-| `selftest.cpp` | `--selftest` backend round-trip checks |
+| `dsp.{h,cpp}` | FFT, speech-aware loudness, STFT noise reduction (spectral subtraction / Wiener) |
+| `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, open/save file & project dialogs |
+| `ui.cpp` | Main window: menu bar, layout, painting, hit-testing, all interaction |
+| `selftest.cpp` | `--selftest` backend round-trip checks (decode/encode/peaks/DSP) |
 
 All audio is decoded to the output device's mix sample rate and stereo float, so
 playback needs no resampling. Channel/format conversion (mono downmix, bitrate,

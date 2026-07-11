@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include "encoder.h"
+#include "dsp.h"
 
 namespace dlg {
 
@@ -16,5 +17,12 @@ std::vector<std::wstring> openAudioFiles(HWND parent);
 // Fills opts + outPath. Returns true on OK.
 bool exportOptions(HWND parent, mfio::ExportOptions& opts, std::wstring& outPath,
                    const std::wstring& suggestedName);
+
+// Voice cleaner (noise reduction) options modal. Returns true on Apply.
+bool voiceCleaner(HWND parent, dsp::NROptions& opts);
+
+// Project open/save file dialogs (.acep). Return empty string on cancel.
+std::wstring openProject(HWND parent);
+std::wstring saveProject(HWND parent, const std::wstring& suggested);
 
 } // namespace dlg

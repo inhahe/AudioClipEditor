@@ -21,6 +21,21 @@ public:
     void removeClip(int id);
     void replaceClipBuffer(int id, AudioBufferPtr newBuf, const std::wstring& desc);
 
+    // --- Volume ---
+    void setClipGain(int id, float g, const std::wstring& desc);
+    void setTrackGain(int id, float g, const std::wstring& desc);
+    // Speech-aware normalization (ignores silent gaps). matchTarget from either
+    // the other clips only, or every clip. Returns number of clips changed.
+    int normalizeClips(int onlyClipId /* -1 = all */, bool acrossAll);
+
+    // --- Project I/O and mixdown ---
+    bool saveProject(const std::wstring& path);
+    bool loadProject(const std::wstring& path);
+    AudioBufferPtr renderMix() const;   // all tracks mixed to one stereo buffer
+
+    // Commit a snapshot after direct live edits (e.g. dragging a volume slider).
+    void commitEdit(const std::wstring& desc) { commit(desc); }
+
     // --- Track operations ---
     int  addTrack();
     void removeTrack(int id);

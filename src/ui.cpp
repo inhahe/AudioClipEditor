@@ -5,6 +5,7 @@
 #include "encoder.h"
 #include "waveform.h"
 #include "dialogs.h"
+#include "dsp.h"
 #include <commctrl.h>
 #include <shlwapi.h>
 #include <windowsx.h>
@@ -45,16 +46,25 @@ enum TB { TB_ADD, TB_TRACK, TB_PLAYALL, TB_STOP, TB_UNDO, TB_REDO, TB_COUNT };
 // ----------------------------------------------------------------- context menu ids
 enum {
     IDM_PLAY = 100, IDM_PLAYSEL, IDM_CLEARSEL, IDM_SAVESEL, IDM_CROP,
-    IDM_RENAME, IDM_DELETE, IDM_ADDTL_BASE = 200,   // + track index
+    IDM_RENAME, IDM_DELETE,
+    IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE,
+    IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
     IDM_REDO_BASE = 400
 };
 
-struct CardLayout { int clipId; RECT card, top, play, del, wave; };
-struct PlacedLayout { int trackId, index, clipId; RECT rc; };
-struct TrackLayout { int trackId; RECT header, lane; RECT nameRc, addRc, delRc; };
+// Menu bar command ids
+enum {
+    IDC_ADDFILES = 1000, IDC_OPENPROJ, IDC_SAVEPROJ, IDC_SAVEPROJAS,
+    IDC_EXPORTMIX, IDC_EXIT,
+    IDC_UNDO, IDC_REDO, IDC_ADDTRACK, IDC_CONTROLS
+};
 
-enum class Mode { None, WaveSelect, CardDrag, ClipMove, TimelineSeek };
+struct CardLayout { int clipId; RECT card, top, play, del, wave, vol; };
+struct PlacedLayout { int trackId, index, clipId; RECT rc; };
+struct TrackLayout { int trackId; RECT header, lane; RECT nameRc, delRc, volRc; };
+
+enum class Mode { None, WaveSelect, CardDrag, ClipMove, TimelineSeek, ClipVolume, TrackVolume };
 
 struct App {
     HWND hwnd = nullptr;
@@ -66,6 +76,8 @@ struct App {
 
     RECT rcTransport{}, rcLibrary{}, rcTimeline{};
     RECT tbRects[TB_COUNT]{};
+
+    std::wstring projectPath;      // current .acep path (empty = unsaved)
 
     // scroll / zoom
     int libScroll = 0, libContentH = 0;
@@ -94,6 +106,7 @@ struct App {
     POINT downPt{};
     bool dragged = false;
     int dragClipId = -1;           // CardDrag / ClipMove source clip
+    int volTrackId = -1;           // TrackVolume drag target
     int moveTrackId = -1, moveIndex = -1;
     int64_t moveGrabOffset = 0;    // frames from clip start to grab point
     int hotTB = -1;
@@ -172,7 +185,8 @@ struct App {
             cl.top = { x, y, x + cardW, y + S(24) };
             cl.play = { x + S(6), y + S(4), x + S(6) + S(16), y + S(4) + S(16) };
             cl.del = { x + cardW - S(20), y + S(4), x + cardW - S(4), y + S(20) };
-            cl.wave = { x + S(8), y + S(28), x + cardW - S(8), y + cardH - S(8) };
+            cl.wave = { x + S(8), y + S(28), x + cardW - S(8), y + cardH - S(30) };
+            cl.vol  = { x + S(40), y + cardH - S(24), x + cardW - S(44), y + cardH - S(8) };
             cards.push_back(cl);
             x += cardW + pad;
         }
@@ -195,7 +209,7 @@ struct App {
             tl.header = { rcTimeline.left, y, laneLeft, y + laneH };
             tl.lane = { laneLeft, y, rcTimeline.right, y + laneH };
             tl.nameRc = { tl.header.left + S(8), y + S(6), tl.header.right - S(8), y + S(24) };
-            tl.addRc = { tl.header.left + S(8), y + laneH - S(26), tl.header.left + S(70), y + laneH - S(6) };
+            tl.volRc = { tl.header.left + S(34), y + laneH - S(24), tl.header.right - S(10), y + laneH - S(8) };
             tl.delRc = { tl.header.right - S(28), y + S(6), tl.header.right - S(8), y + S(24) };
             trackLays.push_back(tl);
             for (int ci = 0; ci < (int)t.clips.size(); ++ci) {
@@ -252,6 +266,32 @@ struct App {
                 bool hot, HFONT f) {
         roundFill(h, r, hot ? col::btnHot : bg, col::cardEdge, S(6));
         textOut(h, r, label, fg, f, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    // Volume slider: track range is linear gain 0..2 (1.0 at the midpoint).
+    static float gainToFrac(float g) { float f = g * 0.5f; return f < 0 ? 0 : (f > 1 ? 1 : f); }
+    float sliderGainAt(const RECT& r, int x) const {
+        float f = (float)(x - r.left) / std::max(1, (int)(r.right - r.left));
+        f = std::max(0.0f, std::min(1.0f, f));
+        return f * 2.0f;
+    }
+    // Slightly expanded hit rect so the thin slider is easy to grab.
+    RECT sliderHit(const RECT& r) const { return { r.left - S(6), r.top - S(6), r.right + S(6), r.bottom + S(6) }; }
+
+    void drawSlider(HDC h, const RECT& r, float gain) {
+        int cy = (r.top + r.bottom) / 2;
+        RECT trk = { r.left, cy - S(2), r.right, cy + S(2) };
+        roundFill(h, trk, col::btn, col::cardEdge, S(2));
+        float frac = gainToFrac(gain);
+        int kx = r.left + (int)((r.right - r.left) * frac);
+        RECT fillr = { r.left, cy - S(2), kx, cy + S(2) };
+        HBRUSH b = CreateSolidBrush(col::accent); FillRect(h, &fillr, b); DeleteObject(b);
+        RECT knob = { kx - S(4), cy - S(6), kx + S(4), cy + S(6) };
+        roundFill(h, knob, col::text, col::accentDk, S(3));
+    }
+
+    static std::wstring gainLabel(float g) {
+        wchar_t b[16]; swprintf(b, 16, L"%d%%", (int)(g * 100.0f + 0.5f)); return b;
     }
 
     void paintTransport(HDC h) {
@@ -339,9 +379,16 @@ struct App {
                     SelectObject(h, op); DeleteObject(pen);
                 }
             }
-            // duration bottom-right
-            RECT dr = { cl.wave.left, cl.card.bottom - S(16), cl.wave.right, cl.card.bottom - S(2) };
+            // duration inside the wave, bottom-right
+            RECT dr = { cl.wave.left, cl.wave.bottom - S(15), cl.wave.right - S(3), cl.wave.bottom - S(2) };
             textOut(h, dr, fmtTime(c->durationSec()), col::dim, fSmall, DT_RIGHT | DT_BOTTOM | DT_SINGLELINE);
+
+            // volume slider row
+            RECT spk = { cl.card.left + S(8), cl.vol.top - S(2), cl.vol.left - S(2), cl.vol.bottom + S(2) };
+            textOut(h, spk, L"\U0001F509", col::dim, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            drawSlider(h, cl.vol, c->gain);
+            RECT pct = { cl.vol.right + S(4), cl.vol.top - S(2), cl.card.right - S(6), cl.vol.bottom + S(2) };
+            textOut(h, pct, gainLabel(c->gain), col::dim, fSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         }
         RestoreDC(h, -1);
     }
@@ -381,7 +428,10 @@ struct App {
             RECT edge = { tl.header.right - 1, tl.header.top, tl.header.right, tl.header.bottom };
             fill(h, edge, col::cardEdge);
             textOut(h, tl.nameRc, t ? t->name : L"", col::text, fBold, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            button(h, tl.addRc, L"drop here", col::panel, col::dim, false, fSmall);
+            // track volume slider
+            RECT tspk = { tl.header.left + S(8), tl.volRc.top - S(3), tl.volRc.left - S(2), tl.volRc.bottom + S(3) };
+            textOut(h, tspk, L"\U0001F509", col::dim, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            drawSlider(h, tl.volRc, t ? t->gain : 1.0f);
             if (doc.project().tracks.size() > 1)
                 textOut(h, tl.delRc, L"\u2715", col::dim, fSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             // lane bg
@@ -521,7 +571,7 @@ struct App {
         if (startFrame < 0 || startFrame >= c->frames()) startFrame = 0;  // restart if at end
         timelinePlaying = false;
         previewClipId = clipId; previewIsSel = false; previewCursor = startFrame;
-        engine.play(std::make_shared<BufferSource>(c->buffer, 0, c->frames()), startFrame);
+        engine.play(std::make_shared<BufferSource>(c->buffer, 0, c->frames(), c->gain), startFrame);
     }
     void playSelection() {
         if (!hasSel()) return;
@@ -529,14 +579,15 @@ struct App {
         if (!c || !c->buffer) return;
         timelinePlaying = false;
         previewClipId = selClipId; previewIsSel = true; previewCursor = selStart;
-        engine.play(std::make_shared<BufferSource>(c->buffer, selStart, selEnd), 0);
+        engine.play(std::make_shared<BufferSource>(c->buffer, selStart, selEnd, c->gain), 0);
         refresh();
     }
     void seekClip(int clipId, int64_t frame) {
         previewClipId = clipId; previewIsSel = false; previewCursor = frame; timelinePlaying = false;
-        if (engine.hasSource() && engine.isPlaying())
-            engine.play(std::make_shared<BufferSource>(doc.project().findClip(clipId)->buffer, 0,
-                        doc.project().findClip(clipId)->frames()), frame);
+        if (engine.hasSource() && engine.isPlaying()) {
+            const Clip* c = doc.project().findClip(clipId);
+            if (c) engine.play(std::make_shared<BufferSource>(c->buffer, 0, c->frames(), c->gain), frame);
+        }
         refresh();
     }
 
@@ -619,6 +670,92 @@ struct App {
         if (dlg::promptText(hwnd, L"Rename clip", L"Clip name:", name)) { doc.renameClip(id, name); refresh(); }
     }
 
+    void normalizeClip(int clipId, bool all) {
+        int n = doc.normalizeClips(all ? -1 : clipId, all);
+        refresh();
+        if (n == 0)
+            MessageBoxW(hwnd, L"Nothing to normalize \u2014 clips are silent or already matched.",
+                        L"Normalize", MB_ICONINFORMATION);
+    }
+
+    void voiceCleanClip(int clipId) {
+        Clip* c = doc.project().findClip(clipId);
+        if (!c || !c->buffer) return;
+        std::wstring name = c->name;
+        dsp::NROptions opts;
+        opts.algorithm = dsp::NRAlgorithm::SpectralSubtraction;
+        opts.strength = dsp::NRStrength::Medium;
+        if (!dlg::voiceCleaner(hwnd, opts)) return;
+        HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+        auto cleaned = dsp::denoise(*c->buffer, opts);
+        SetCursor(old);
+        if (!cleaned) { MessageBoxW(hwnd, L"Voice cleaner failed.", L"Voice cleaner", MB_ICONWARNING); return; }
+        if (previewClipId == clipId) stopAll();
+        doc.replaceClipBuffer(clipId, cleaned, L"Voice cleaner on '" + name + L"'");
+        refresh();
+    }
+
+    // --------------------------------------------------------- project I/O
+    void setTitle() {
+        std::wstring t = L"Audio Clip Editor";
+        if (!projectPath.empty()) t += std::wstring(L" \u2014 ") + PathFindFileNameW(projectPath.c_str());
+        SetWindowTextW(hwnd, t.c_str());
+    }
+    void openProjectFile() {
+        std::wstring path = dlg::openProject(hwnd);
+        if (path.empty()) return;
+        if (!doc.loadProject(path)) { MessageBoxW(hwnd, L"Could not open project.", L"Open", MB_ICONWARNING); return; }
+        stopAll();
+        projectPath = path;
+        selClipId = -1; selStart = selEnd = 0; previewClipId = -1; timelinePlaying = false; playheadFrame = 0;
+        libScroll = tlScrollX = tlScrollY = 0;
+        setTitle(); clampScroll(); refresh();
+    }
+    bool saveProjectAs() {
+        std::wstring suggested = projectPath.empty() ? L"Untitled" : PathFindFileNameW(projectPath.c_str());
+        std::wstring path = dlg::saveProject(hwnd, suggested);
+        if (path.empty()) return false;
+        if (!doc.saveProject(path)) { MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING); return false; }
+        projectPath = path; setTitle(); return true;
+    }
+    void saveProjectFile() {
+        if (projectPath.empty()) { saveProjectAs(); return; }
+        if (!doc.saveProject(projectPath))
+            MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING);
+    }
+    void exportMix() {
+        auto mix = doc.renderMix();
+        if (!mix || mix->frames() == 0) {
+            MessageBoxW(hwnd, L"Nothing to export \u2014 place some clips on the timeline first.",
+                        L"Export mixdown", MB_ICONINFORMATION);
+            return;
+        }
+        mfio::ExportOptions o; o.sampleRate = rate; o.channels = 2; o.format = mfio::ExportFormat::WAV; o.bitrateKbps = 192;
+        std::wstring outPath;
+        if (!dlg::exportOptions(hwnd, o, outPath, L"Mixdown")) return;
+        HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+        std::wstring err; bool ok = mfio::encodeFile(outPath, *mix, o, &err);
+        SetCursor(old);
+        if (!ok) MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING);
+    }
+
+    void showControls() {
+        MessageBoxW(hwnd,
+            L"Library clips:\n"
+            L"  \u2022 Click the \u25B6 button to play/pause a clip\n"
+            L"  \u2022 Click-drag across the waveform to select a section\n"
+            L"  \u2022 Drag the title bar down onto a track to place it\n"
+            L"  \u2022 Right-click for save-selection, crop, normalize, voice cleaner\u2026\n"
+            L"  \u2022 Drag the volume slider to change a clip's level\n\n"
+            L"Timeline:\n"
+            L"  \u2022 Drag placed clips to move them (snaps to neighbours)\n"
+            L"  \u2022 Drag a track's volume slider to change the track level\n"
+            L"  \u2022 Click a lane or the ruler to move the playhead\n"
+            L"  \u2022 Ctrl+wheel zooms, Shift+wheel scrolls vertically\n\n"
+            L"Keys:  Space = play/pause   Ctrl+Z = undo   Ctrl+Shift+Z = redo",
+            L"Controls", MB_ICONINFORMATION);
+    }
+
     void playAll() {
         if (timelinePlaying && engine.isPlaying()) { engine.pause(); refresh(); return; }
         if (timelinePlaying && engine.isPaused()) { engine.resume(); refresh(); return; }
@@ -630,6 +767,7 @@ struct App {
                 const Clip* c = doc.project().findClip(pc.clipId);
                 if (!c || !c->buffer) continue;
                 TimelineSegment s; s.buf = c->buffer; s.timelineStart = pc.startFrame; s.length = pc.lengthFrames;
+                s.gain = c->gain * t.gain;
                 segs.push_back(s);
             }
         }
@@ -696,6 +834,12 @@ struct App {
             if (!cl) { return; }
             if (PtInRect(&cl->play, p)) { togglePlayClip(cl->clipId); return; }
             if (PtInRect(&cl->del, p)) { deleteClipConfirm(cl->clipId); return; }
+            { RECT vh = sliderHit(cl->vol);
+              if (PtInRect(&vh, p)) {
+                mode = Mode::ClipVolume; dragClipId = cl->clipId;
+                if (Clip* c = doc.project().findClip(cl->clipId)) c->gain = sliderGainAt(cl->vol, p.x);
+                SetCapture(hwnd); refresh(); return;
+              } }
             if (PtInRect(&cl->wave, p)) {
                 // begin selection / seek
                 mode = Mode::WaveSelect; dragClipId = cl->clipId;
@@ -720,6 +864,12 @@ struct App {
                 if (PtInRect(&tl.delRc, p) && doc.project().tracks.size() > 1) {
                     doc.removeTrack(tl.trackId); afterHistory(); return;
                 }
+                { RECT vh = sliderHit(tl.volRc);
+                  if (PtInRect(&vh, p) && p.x < tl.header.right) {
+                    mode = Mode::TrackVolume; volTrackId = tl.trackId;
+                    if (Track* t = doc.project().findTrack(tl.trackId)) t->gain = sliderGainAt(tl.volRc, p.x);
+                    SetCapture(hwnd); refresh(); return;
+                  } }
                 if (PtInRect(&tl.nameRc, p) && dbl) {
                     const Track* t=nullptr; for(auto&tt:doc.project().tracks) if(tt.id==tl.trackId)t=&tt;
                     std::wstring nm = t?t->name:L""; if (dlg::promptText(hwnd,L"Rename track",L"Track name:",nm)){doc.renameTrack(tl.trackId,nm);refresh();} return;
@@ -765,6 +915,12 @@ struct App {
                 int64_t f = waveFrameAt(*cl, c ? c->frames() : 0, p.x);
                 selEnd = f; refresh();
             }
+        } else if (mode == Mode::ClipVolume) {
+            const CardLayout* cl = nullptr; for (auto& c : cards) if (c.clipId == dragClipId) cl = &c;
+            if (cl) if (Clip* c = doc.project().findClip(dragClipId)) { c->gain = sliderGainAt(cl->vol, p.x); refresh(); }
+        } else if (mode == Mode::TrackVolume) {
+            const TrackLayout* tl = nullptr; for (auto& t : trackLays) if (t.trackId == volTrackId) tl = &t;
+            if (tl) if (Track* t = doc.project().findTrack(volTrackId)) { t->gain = sliderGainAt(tl->volRc, p.x); refresh(); }
         } else if (mode == Mode::CardDrag || mode == Mode::ClipMove || mode == Mode::TimelineSeek) {
             if (mode == Mode::TimelineSeek) { playheadFrame = xToFrame(p.x); if (timelinePlaying) engine.seek(playheadFrame); }
             refresh();
@@ -810,6 +966,10 @@ struct App {
                 doc.moveClip(moveTrackId, moveIndex, tid, newStart, L"Move clip");
                 afterPlaceRefresh();
             }
+        } else if (m == Mode::ClipVolume) {
+            doc.commitEdit(L"Set clip volume"); refresh();
+        } else if (m == Mode::TrackVolume) {
+            doc.commitEdit(L"Set track volume"); refresh();
         }
         refresh();
     }
@@ -849,6 +1009,10 @@ struct App {
             AppendMenuW(sub, MF_STRING, IDM_ADDTL_BASE + i, tracks[i].name.c_str());
         AppendMenuW(m, MF_POPUP, (UINT_PTR)sub, L"Add to timeline");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(m, MF_STRING, IDM_NORM_MATCH, L"Normalize to match other clips");
+        AppendMenuW(m, MF_STRING, IDM_NORM_ALL, L"Normalize all clips (all tracks)");
+        AppendMenuW(m, MF_STRING, IDM_DENOISE, L"Voice cleaner (reduce noise)\u2026");
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_RENAME, L"Rename\u2026");
         AppendMenuW(m, MF_STRING, IDM_DELETE, L"Delete clip");
 
@@ -861,6 +1025,9 @@ struct App {
         else if (cmd == IDM_SAVESEL) { selClipId = clipId; saveSelectionAsClip(); }
         else if (cmd == IDM_CROP) { selClipId = clipId; cropSelection(); }
         else if (cmd == IDM_CLEARSEL) { selClipId = -1; selStart = selEnd = 0; refresh(); }
+        else if (cmd == IDM_NORM_MATCH) normalizeClip(clipId, false);
+        else if (cmd == IDM_NORM_ALL) normalizeClip(clipId, true);
+        else if (cmd == IDM_DENOISE) voiceCleanClip(clipId);
         else if (cmd == IDM_RENAME) renameClip(clipId);
         else if (cmd == IDM_DELETE) deleteClipConfirm(clipId);
         else if (cmd >= IDM_ADDTL_BASE && cmd < IDM_TL_REMOVE) {
@@ -896,12 +1063,60 @@ struct App {
         }
     }
 
+    // --------------------------------------------------------- menu bar
+    void buildMenu() {
+        HMENU bar = CreateMenu();
+        HMENU file = CreatePopupMenu();
+        AppendMenuW(file, MF_STRING, IDC_ADDFILES, L"Add Files\u2026\tCtrl+O");
+        AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(file, MF_STRING, IDC_OPENPROJ, L"Open Project\u2026");
+        AppendMenuW(file, MF_STRING, IDC_SAVEPROJ, L"Save Project\tCtrl+S");
+        AppendMenuW(file, MF_STRING, IDC_SAVEPROJAS, L"Save Project As\u2026");
+        AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(file, MF_STRING, IDC_EXPORTMIX, L"Export Mixdown\u2026");
+        AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(file, MF_STRING, IDC_EXIT, L"Exit");
+        AppendMenuW(bar, MF_POPUP, (UINT_PTR)file, L"File");
+
+        HMENU edit = CreatePopupMenu();
+        AppendMenuW(edit, MF_STRING, IDC_UNDO, L"Undo\tCtrl+Z");
+        AppendMenuW(edit, MF_STRING, IDC_REDO, L"Redo\tCtrl+Shift+Z");
+        AppendMenuW(bar, MF_POPUP, (UINT_PTR)edit, L"Edit");
+
+        HMENU track = CreatePopupMenu();
+        AppendMenuW(track, MF_STRING, IDC_ADDTRACK, L"Add Track");
+        AppendMenuW(bar, MF_POPUP, (UINT_PTR)track, L"Track");
+
+        HMENU help = CreatePopupMenu();
+        AppendMenuW(help, MF_STRING, IDC_CONTROLS, L"Controls\u2026");
+        AppendMenuW(bar, MF_POPUP, (UINT_PTR)help, L"Help");
+
+        SetMenu(hwnd, bar);
+    }
+
+    void onCommand(int id) {
+        switch (id) {
+        case IDC_ADDFILES: addFiles(); break;
+        case IDC_OPENPROJ: openProjectFile(); break;
+        case IDC_SAVEPROJ: saveProjectFile(); break;
+        case IDC_SAVEPROJAS: saveProjectAs(); break;
+        case IDC_EXPORTMIX: exportMix(); break;
+        case IDC_EXIT: DestroyWindow(hwnd); break;
+        case IDC_UNDO: doUndo(); break;
+        case IDC_REDO: doRedo(); break;
+        case IDC_ADDTRACK: doc.addTrack(); afterPlaceRefresh(); break;
+        case IDC_CONTROLS: showControls(); break;
+        }
+    }
+
     // --------------------------------------------------------- keyboard
     void onKey(WPARAM k) {
         bool ctrl = GetKeyState(VK_CONTROL) & 0x8000;
         bool shift = GetKeyState(VK_SHIFT) & 0x8000;
         if (ctrl && (k == 'Z')) { if (shift) doRedo(); else doUndo(); return; }
         if (ctrl && (k == 'Y')) { doRedo(); return; }
+        if (ctrl && (k == 'S')) { saveProjectFile(); return; }
+        if (ctrl && (k == 'O')) { addFiles(); return; }
         if (k == VK_SPACE) {
             if (previewClipId >= 0 && !timelinePlaying) togglePlayClip(previewClipId);
             else playAll();
@@ -966,6 +1181,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         UINT dpi = GetDpiForWindow(hwnd);
         a->sc = dpi / 96.0f;
         a->makeFonts();
+        a->buildMenu();
+        a->setTitle();
         a->computeLayout();
         SetTimer(hwnd, 1, 33, nullptr);
         return 0;
@@ -998,6 +1215,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                    (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT) != 0);
         return 0;
     case WM_KEYDOWN: a->onKey(wp); return 0;
+    case WM_COMMAND: if (HIWORD(wp) == 0 && lp == 0) { a->onCommand(LOWORD(wp)); return 0; } break;
     case WM_TIMER: a->onTimer(); return 0;
     case WM_APP_PLAYEND: a->onPlayEnd(); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;

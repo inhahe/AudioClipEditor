@@ -234,4 +234,108 @@ bool exportOptions(HWND parent, mfio::ExportOptions& opts, std::wstring& outPath
     return st.ok;
 }
 
+// ------------------------------------------------------------------ voice cleaner
+struct VCState {
+    dsp::NROptions* opts;
+    HWND cbAlgo, cbStrength;
+    bool ok = false;
+};
+
+static LRESULT CALLBACK VCProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    auto* st = (VCState*)GetWindowLongPtrW(h, GWLP_USERDATA);
+    switch (m) {
+    case WM_COMMAND:
+        if (LOWORD(w) == IDCANCEL) { st->ok = false; DestroyWindow(h); return 0; }
+        if (LOWORD(w) == IDOK) {
+            int ai = (int)SendMessageW(st->cbAlgo, CB_GETCURSEL, 0, 0);
+            int si = (int)SendMessageW(st->cbStrength, CB_GETCURSEL, 0, 0);
+            st->opts->algorithm = (ai == 1) ? dsp::NRAlgorithm::Wiener : dsp::NRAlgorithm::SpectralSubtraction;
+            st->opts->strength = si == 0 ? dsp::NRStrength::Light : si == 2 ? dsp::NRStrength::Aggressive : dsp::NRStrength::Medium;
+            st->ok = true; DestroyWindow(h); return 0;
+        }
+        break;
+    case WM_CLOSE: st->ok = false; DestroyWindow(h); return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+bool voiceCleaner(HWND parent, dsp::NROptions& opts) {
+    static bool reg = false;
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    if (!reg) {
+        WNDCLASSW wc{}; wc.lpfnWndProc = VCProc; wc.hInstance = hInst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"ACE_VC"; RegisterClassW(&wc); reg = true;
+    }
+    VCState st; st.opts = &opts;
+    RECT pr; GetWindowRect(parent, &pr);
+    int W = 380, H = 210;
+    int x = pr.left + ((pr.right - pr.left) - W) / 2;
+    int y = pr.top + ((pr.bottom - pr.top) - H) / 2;
+    HWND h = CreateWindowExW(WS_EX_DLGMODALFRAME, L"ACE_VC", L"Voice Cleaner",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, W, H, parent, nullptr, hInst, nullptr);
+    SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
+
+    HWND info = CreateWindowW(L"STATIC",
+        L"Reduces steady background noise (hum, hiss, fans).\nNoise profile is auto-detected from quiet gaps.",
+        WS_CHILD | WS_VISIBLE, 16, 12, 344, 36, h, nullptr, hInst, nullptr);
+    auto label = [&](const wchar_t* t, int yy) {
+        HWND c = CreateWindowW(L"STATIC", t, WS_CHILD | WS_VISIBLE, 16, yy, 90, 20, h, nullptr, hInst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+    };
+    auto combo = [&](int yy) {
+        HWND c = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+            116, yy, 240, 160, h, nullptr, hInst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+        return c;
+    };
+    label(L"Algorithm:", 62);  st.cbAlgo = combo(60);
+    label(L"Strength:", 98);   st.cbStrength = combo(96);
+    SendMessageW(info, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+
+    SendMessageW(st.cbAlgo, CB_ADDSTRING, 0, (LPARAM)L"Spectral subtraction");
+    SendMessageW(st.cbAlgo, CB_ADDSTRING, 0, (LPARAM)L"Wiener filter");
+    for (auto* s : { L"Light", L"Medium", L"Aggressive" })
+        SendMessageW(st.cbStrength, CB_ADDSTRING, 0, (LPARAM)s);
+    SendMessageW(st.cbAlgo, CB_SETCURSEL, opts.algorithm == dsp::NRAlgorithm::Wiener ? 1 : 0, 0);
+    int si = opts.strength == dsp::NRStrength::Light ? 0 : opts.strength == dsp::NRStrength::Aggressive ? 2 : 1;
+    SendMessageW(st.cbStrength, CB_SETCURSEL, si, 0);
+
+    HWND ok = CreateWindowW(L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        168, 138, 88, 30, h, (HMENU)IDOK, hInst, nullptr);
+    HWND cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        264, 138, 88, 30, h, (HMENU)IDCANCEL, hInst, nullptr);
+    SendMessageW(ok, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+    SendMessageW(cancel, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+
+    SetFocus(st.cbStrength);
+    runModal(h, parent);
+    return st.ok;
+}
+
+// ------------------------------------------------------------------ project files
+std::wstring openProject(HWND parent) {
+    wchar_t buf[1024] = { 0 };
+    OPENFILENAMEW ofn{}; ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = parent;
+    ofn.lpstrFilter = L"Audio Clip Editor project (*.acep)\0*.acep\0All files\0*.*\0";
+    ofn.lpstrFile = buf; ofn.nMaxFile = 1024;
+    ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+    if (GetOpenFileNameW(&ofn)) return buf;
+    return L"";
+}
+
+std::wstring saveProject(HWND parent, const std::wstring& suggested) {
+    wchar_t buf[1024] = { 0 };
+    std::wstring s = suggested + L".acep";
+    wcsncpy(buf, s.c_str(), 1023);
+    OPENFILENAMEW ofn{}; ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = parent;
+    ofn.lpstrFilter = L"Audio Clip Editor project (*.acep)\0*.acep\0";
+    ofn.lpstrFile = buf; ofn.nMaxFile = 1024;
+    ofn.lpstrDefExt = L"acep";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (GetSaveFileNameW(&ofn)) return buf;
+    return L"";
+}
+
 } // namespace dlg

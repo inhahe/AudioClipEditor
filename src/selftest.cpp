@@ -4,6 +4,7 @@
 #include "audio_buffer.h"
 #include "decoder.h"
 #include "encoder.h"
+#include "dsp.h"
 #include <windows.h>
 #include <shlwapi.h>
 #include <string>
@@ -98,6 +99,31 @@ int runSelfTest() {
             out(L"       decode " + std::wstring(F.name) + L": " +
                 (dec ? (L"frames=" + std::to_wstring(dec->frames())) : (L"failed - " + e2)));
         }
+    }
+
+    // DSP: speech loudness + noise reduction
+    {
+        double loud = dsp::speechLoudness(*sine);
+        check(loud > 0.05, L"speechLoudness on sine", L"loud=" + std::to_wstring(loud));
+
+        // sine + white noise
+        auto noisy = makeSine(rate, 1.0, 300.0);
+        unsigned seed = 12345u;
+        for (auto& s : noisy->samples) {
+            seed = seed * 1103515245u + 12345u;
+            float n = (float)((int)((seed >> 16) & 0x7fff)) / 32768.0f - 0.5f;
+            s += n * 0.15f;
+        }
+        dsp::NROptions nro; nro.algorithm = dsp::NRAlgorithm::SpectralSubtraction; nro.strength = dsp::NRStrength::Medium;
+        auto clean = dsp::denoise(*noisy, nro);
+        bool ok = clean && clean->channels == noisy->channels &&
+                  std::llabs(clean->frames() - noisy->frames()) < rate / 10;
+        check(ok, L"denoise spectral-subtraction",
+              clean ? (L"frames=" + std::to_wstring(clean->frames()) + L" rms=" + std::to_wstring(rms(*clean))) : L"null");
+
+        dsp::NROptions nrw; nrw.algorithm = dsp::NRAlgorithm::Wiener; nrw.strength = dsp::NRStrength::Aggressive;
+        auto clean2 = dsp::denoise(*noisy, nrw);
+        check(clean2 && clean2->frames() > 0, L"denoise wiener", clean2 ? L"" : L"null");
     }
 
     // Slicing (crop) sanity
