@@ -11,7 +11,8 @@ of clips, audition them, trim/crop, and arrange them on tracks.
 
 - **Load any number of audio files as clips.** Supports every format Media
   Foundation can decode (WAV, MP3, M4A/AAC, FLAC, WMA, …). Clips show in a
-  word-wrapped grid of cards, each with a **volume-graph waveform**. Card widths
+  word-wrapped grid of cards, each with an **oscilloscope waveform** (a min/max
+  envelope that turns into a real sample-accurate scope trace as you zoom in). Card widths
   are **proportional to clip length** at the same scale as the timeline, and a
   global **Scale** slider in the toolbar zooms both together.
 - **Play any clip** with a per-card play/pause button. Click the waveform to
@@ -125,14 +126,14 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 
 | File | Role |
 |---|---|
-| `audio_buffer.h` | Canonical float PCM buffer + peak (volume-graph) cache |
+| `audio_buffer.h` | Canonical float PCM buffer + min/max (oscilloscope) bucket cache |
 | `model.h` | `Clip`, `Track`, `PlacedClip`, `Project` |
 | `decoder.{h,cpp}` | Media Foundation Source Reader → stereo float at the device rate |
 | `encoder.{h,cpp}` | WAV (manual RIFF, 16/24-bit PCM or 32-bit float) + Media Foundation Sink Writer (MP3/AAC/WMA); resamples to the chosen output rate |
 | `engine.{h,cpp}` | WASAPI render engine; `BufferSource` (preview) + `TimelineSource` (mix all tracks); linear-resamples the project rate to the device rate on the audio thread |
 | `undo.h` | Snapshot-based undo **tree** with branching redo |
 | `document.{h,cpp}` | Owns the project + undo tree; every edit commits a snapshot |
-| `waveform.{h,cpp}` | GDI filled volume-graph rendering |
+| `waveform.{h,cpp}` | GDI oscilloscope rendering: min/max envelope zoomed out, sample line zoomed in |
 | `dsp.{h,cpp}` | FFT, speech-aware loudness, STFT noise reduction (spectral subtraction / Wiener) |
 | `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, open/save file & project dialogs |
 | `ui.cpp` | Main window: menu bar, layout, painting, hit-testing, all interaction |

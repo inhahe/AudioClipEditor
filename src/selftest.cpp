@@ -55,7 +55,7 @@ int runSelfTest() {
 
     // PeakCache
     PeakCache pc; pc.build(*sine);
-    check(!pc.peaks.empty() && pc.peakInRange(0, sine->frames()) > 0.3f, L"PeakCache build",
+    check(!pc.empty() && pc.peakInRange(0, sine->frames()) > 0.3f, L"PeakCache build",
           L"peak=" + std::to_wstring(pc.peakInRange(0, sine->frames())));
 
     // WAV round-trip

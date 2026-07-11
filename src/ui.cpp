@@ -512,13 +512,13 @@ struct App {
 
         // main waveform
         fill(h, edMain, col::waveBg);
-        if (c->peaks) wf::draw(h, edMain, *c->peaks, 0, cf, col::wave);
+        if (c->buffer && c->peaks) wf::draw(h, edMain, *c->buffer, *c->peaks, 0, cf, col::wave);
         if (sel) {
             int sx0 = edMainX(selStart), sx1 = edMainX(selEnd);
             RECT sr = { sx0, edMain.top, sx1, edMain.bottom };
             fill(h, sr, col::selRect);
             SaveDC(h); IntersectClipRect(h, sr.left, sr.top, sr.right, sr.bottom);
-            if (c->peaks) wf::draw(h, edMain, *c->peaks, 0, cf, col::waveSel);
+            if (c->buffer && c->peaks) wf::draw(h, edMain, *c->buffer, *c->peaks, 0, cf, col::waveSel);
             RestoreDC(h, -1);
             drawVLine(h, sx0, edMain.top, edMain.bottom, col::waveSel);
             drawVLine(h, sx1, edMain.top, edMain.bottom, col::waveSel);
@@ -561,7 +561,7 @@ struct App {
         fill(h, wv, col::waveBg);
         int w = std::max(1, (int)(wv.right - wv.left));
         auto fx = [&](int64_t f) { return wv.left + (int)((double)(f - ws) / span * w); };
-        if (c->peaks) wf::draw(h, wv, *c->peaks, ws, we, col::wave);
+        if (c->buffer && c->peaks) wf::draw(h, wv, *c->buffer, *c->peaks, ws, we, col::wave);
         // shade the selected side (left strip: right of edge is inside selection;
         // right strip: left of edge is inside selection)
         int ex = fx(edge);
@@ -714,9 +714,9 @@ struct App {
 
             // waveform
             fill(h, cl.wave, col::waveBg);
-            if (c->peaks) {
+            if (c->buffer && c->peaks) {
                 int64_t nf = c->frames();
-                wf::draw(h, cl.wave, *c->peaks, 0, nf, col::wave);
+                wf::draw(h, cl.wave, *c->buffer, *c->peaks, 0, nf, col::wave);
                 // selection overlay
                 if (hasSel() && selClipId == cl.clipId) {
                     int wl = cl.wave.left, ww = cl.wave.right - cl.wave.left;
@@ -726,7 +726,7 @@ struct App {
                     // highlight rect + waveform redrawn in accent within it
                     fill(h, sr, col::selRect);
                     SaveDC(h); IntersectClipRect(h, sr.left, sr.top, sr.right, sr.bottom);
-                    wf::draw(h, cl.wave, *c->peaks, 0, nf, col::waveSel);
+                    wf::draw(h, cl.wave, *c->buffer, *c->peaks, 0, nf, col::waveSel);
                     RestoreDC(h, -1);
                     HPEN pen = CreatePen(PS_SOLID, 1, col::waveSel); HGDIOBJ op = SelectObject(h, pen);
                     MoveToEx(h, sx0, cl.wave.top, nullptr); LineTo(h, sx0, cl.wave.bottom);
@@ -829,9 +829,9 @@ struct App {
             bool moving = (mode == Mode::ClipMove && moveTrackId == pl.trackId && moveIndex == pl.index);
             roundFill(h, pl.rc, moving ? col::clipBlkSel : col::clipBlk, col::cardEdge, S(6));
             RECT wv = { pl.rc.left + S(3), pl.rc.top + S(18), pl.rc.right - S(3), pl.rc.bottom - S(4) };
-            if (c && c->peaks && wv.right > wv.left) {
+            if (c && c->buffer && c->peaks && wv.right > wv.left) {
                 SaveDC(h); IntersectClipRect(h, wv.left, wv.top, wv.right, wv.bottom);
-                wf::draw(h, wv, *c->peaks, 0, c->frames(), RGB(180, 210, 245));
+                wf::draw(h, wv, *c->buffer, *c->peaks, 0, c->frames(), RGB(180, 210, 245));
                 RestoreDC(h, -1);
             }
             RECT nm = { pl.rc.left + S(6), pl.rc.top + S(2), pl.rc.right - S(4), pl.rc.top + S(18) };
@@ -1779,6 +1779,7 @@ int runApp(HINSTANCE hInst, int nCmdShow) {
     app.doc.init(app.rate);
 
     WNDCLASSEXW wc{}; wc.cbSize = sizeof(wc);
+    wc.style = CS_DBLCLKS;   // deliver WM_LBUTTONDBLCLK (needed for the clip editor)
     wc.lpfnWndProc = WndProc; wc.hInstance = hInst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.lpszClassName = L"AudioClipEditorMain";
