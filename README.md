@@ -23,7 +23,7 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   before committing).
 - **Save selection as a new clip** — the **Save sel** button (or right-click →
   Save selection) slices the selection into a new clip you name (rename any time).
-- **Full-window clip editor.** Double-click a clip card's waveform (or right-click
+- **Full-window clip editor.** Double-click a clip card (or right-click
   → *Open in editor*) to blow the clip up to a full-window view for precise work.
   It has its own toolbar (play, play selection, crop, save selection, clear, done)
   and — because dragging a pixel-precise edge on a zoomed-out waveform is fiddly —
@@ -98,12 +98,12 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Play / pause a clip | green button on the card, or `Space` on the active clip (plays only the selection when one is active) |
 | Seek within a clip | click the waveform |
 | Make a selection | drag across the waveform |
-| Open the full-window editor | **double-click** a clip's waveform, or right-click → *Open in editor* |
+| Open the full-window editor | **double-click** a clip card, or right-click → *Open in editor* |
 | Fine-tune selection edges | in the editor, drag the **Start edge** / **End edge** strip knobs (wheel over a strip to zoom); toggle with **Fine-tune edges** |
 | Close the full-window editor | `Esc` or the **Done** button |
 | Crop / save a selection | **Crop** and **Save sel** buttons on the card while a selection is active |
 | Clip actions | **right-click a card**: play selection, save selection as new clip, crop, normalize, voice cleaner, rename, delete, add to a track |
-| Rename a clip | right-click → Rename, or double-click the card title |
+| Rename a clip | right-click → Rename |
 | Set clip / track volume | drag the volume slider on the card or track header |
 | Normalize volume | right-click a card → *Normalize to match other clips* / *Normalize all clips* |
 | Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |

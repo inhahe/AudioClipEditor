@@ -1341,7 +1341,7 @@ struct App {
                 SetCapture(hwnd); refresh(); return;
             }
             if (PtInRect(&cl->top, p)) {
-                if (dbl) { renameClip(cl->clipId); return; }
+                if (dbl) { openClipEditor(cl->clipId); return; }
                 // start drag-to-timeline
                 mode = Mode::CardDrag; dragClipId = cl->clipId; moveGrabOffset = 0;
                 SetCapture(hwnd); return;
