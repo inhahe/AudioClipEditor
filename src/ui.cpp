@@ -631,9 +631,18 @@ struct App {
         wchar_t b[32]; swprintf(b, 32, L"%d:%05.2f", m, s); return b;
     }
 
+    // Hover highlight: lighten the button's own colour so coloured buttons
+    // (green Play All, red Stop, accent Crop/Save) stay their colour on hover
+    // instead of turning grey.
+    static COLORREF lighten(COLORREF c, int amt) {
+        int r = std::min(255, GetRValue(c) + amt);
+        int g = std::min(255, GetGValue(c) + amt);
+        int b = std::min(255, GetBValue(c) + amt);
+        return RGB(r, g, b);
+    }
     void button(HDC h, const RECT& r, const std::wstring& label, COLORREF bg, COLORREF fg,
                 bool hot, HFONT f) {
-        roundFill(h, r, hot ? col::btnHot : bg, col::cardEdge, S(6));
+        roundFill(h, r, hot ? lighten(bg, 22) : bg, col::cardEdge, S(6));
         textOut(h, r, label, fg, f, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
@@ -760,12 +769,10 @@ struct App {
             }
             // selection-action buttons (crop / save selection as new clip)
             if (hasSel() && selClipId == cl.clipId) {
-                button(h, cl.crop, L"Crop",
-                       hotSelClip == cl.clipId && hotSelBtn == 1 ? col::btnHot : col::accentDk,
-                       col::text, false, fSmall);
-                button(h, cl.savesel, L"Save sel",
-                       hotSelClip == cl.clipId && hotSelBtn == 2 ? col::btnHot : col::accentDk,
-                       col::text, false, fSmall);
+                button(h, cl.crop, L"Crop", col::accentDk, col::text,
+                       hotSelClip == cl.clipId && hotSelBtn == 1, fSmall);
+                button(h, cl.savesel, L"Save sel", col::accentDk, col::text,
+                       hotSelClip == cl.clipId && hotSelBtn == 2, fSmall);
             }
             // duration inside the wave, bottom-right
             RECT dr = { cl.wave.left, cl.wave.bottom - S(15), cl.wave.right - S(3), cl.wave.bottom - S(2) };
