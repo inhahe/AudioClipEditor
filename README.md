@@ -11,7 +11,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
 
 - **Load any number of audio files as clips.** Supports every format Media
   Foundation can decode (WAV, MP3, M4A/AAC, FLAC, WMA, …). Clips show in a
-  word-wrapped grid of cards, each with a **volume-graph waveform**.
+  word-wrapped grid of cards, each with a **volume-graph waveform**. Card widths
+  are **proportional to clip length** at the same scale as the timeline, and a
+  global **Scale** slider in the toolbar zooms both together.
 - **Play any clip** with a per-card play/pause button. Click the waveform to
   seek / skip around. Playback is real, mixed, low-latency WASAPI.
 - **Select a section** of any clip by dragging across its waveform. While a
@@ -101,6 +103,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Open / Save / Export | **File** menu |
 | Scroll library | mouse wheel over the clip area |
 | Scroll / zoom timeline | wheel = scroll, `Ctrl`+wheel = zoom, `Shift`+wheel = scroll tracks |
+| Time scale (zoom) | the **Scale** slider in the toolbar sets pixels-per-second for both the timeline *and* the clip cards |
 
 ## Architecture
 

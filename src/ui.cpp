@@ -64,7 +64,7 @@ struct CardLayout { int clipId; RECT card, top, play, del, wave, vol, crop, save
 struct PlacedLayout { int trackId, index, clipId; RECT rc; };
 struct TrackLayout { int trackId; RECT header, lane; RECT nameRc, delRc, volRc; };
 
-enum class Mode { None, WaveSelect, CardDrag, ClipMove, TimelineSeek, ClipVolume, TrackVolume };
+enum class Mode { None, WaveSelect, CardDrag, ClipMove, TimelineSeek, ClipVolume, TrackVolume, ZoomDrag };
 
 struct App {
     HWND hwnd = nullptr;
@@ -76,6 +76,7 @@ struct App {
 
     RECT rcTransport{}, rcLibrary{}, rcTimeline{};
     RECT tbRects[TB_COUNT]{};
+    RECT zoomRc{};                 // global time-scale slider (transport bar)
 
     std::wstring projectPath;      // current .acep path (empty = unsaved)
 
@@ -126,6 +127,18 @@ struct App {
         };
         fNorm = mk(14, FW_NORMAL); fSmall = mk(12, FW_NORMAL);
         fBold = mk(14, FW_SEMIBOLD); fBig = mk(17, FW_SEMIBOLD);
+    }
+
+    // Global time scale (pixels per second) bounds + log mapping for the slider.
+    static constexpr double kZoomMin = 8.0, kZoomMax = 2000.0;
+    float zoomToFrac() const {
+        double lo = std::log(kZoomMin), hi = std::log(kZoomMax);
+        return (float)((std::log(pxPerSec) - lo) / (hi - lo));
+    }
+    void setZoomFrac(float f) {
+        f = std::max(0.0f, std::min(1.0f, f));
+        double lo = std::log(kZoomMin), hi = std::log(kZoomMax);
+        pxPerSec = std::exp(lo + f * (hi - lo));
     }
 
     // frames <-> timeline pixel x (client coords)
@@ -179,21 +192,30 @@ struct App {
         // undo/redo on the right
         int rx = rcTransport.right - S(12);
         tbRects[TB_REDO] = { rx - S(70), y, rx, y + h }; rx -= S(78);
-        tbRects[TB_UNDO] = { rx - S(70), y, rx, y + h };
+        tbRects[TB_UNDO] = { rx - S(70), y, rx, y + h }; rx -= S(78);
+        // global time-scale slider (with a "Scale" label drawn to its left)
+        int zsW = S(120);
+        zoomRc = { rx - zsW, y + h / 2 - S(7), rx, y + h / 2 + S(7) };
     }
 
     void layoutCards() {
         cards.clear();
         const auto& lib = doc.project().library;
         int pad = S(12);
-        int cardW = S(300), cardH = S(120);
+        int cardH = S(120);
+        // Card widths are proportional to clip duration at the shared timeline
+        // scale (pxPerSec), so a clip is drawn the same length here as it is on a
+        // track. Floored so the controls stay usable, capped to the viewport.
+        int minW = S(120);
+        int maxRight = rcLibrary.right - pad;
+        int maxW = std::max(minW, (int)(rcLibrary.right - rcLibrary.left) - 2 * pad);
         int x = rcLibrary.left + pad;
         int y = rcLibrary.top + pad - libScroll;
         int rowH = cardH + pad;
-        int maxRight = rcLibrary.right - pad;
-        int startY = rcLibrary.top + pad - libScroll;
-        int rows = 1;
+        int rows = lib.empty() ? 0 : 1;
         for (const auto& c : lib) {
+            int cardW = (int)(c.durationSec() * pxPerSec + 0.5);
+            cardW = std::max(minW, std::min(cardW, maxW));
             if (x + cardW > maxRight && x > rcLibrary.left + pad) {
                 x = rcLibrary.left + pad; y += rowH; rows++;
             }
@@ -210,15 +232,13 @@ struct App {
               int savW = S(58), crpW = S(42), inset = S(4), gap2 = S(4);
               int bx1 = cl.wave.right - inset;
               cl.savesel = { bx1 - savW, by0, bx1, by0 + bh };
-              cl.crop    = { cl.savesel.left - gap2 - crpW, by0, cl.savesel.left - gap2, by0 + bh }; }
+              cl.crop    = { cl.savesel.left - gap2 - crpW, by0, cl.savesel.left - gap2, by0 + bh };
+              if (cl.crop.left < cl.wave.left) cl.crop.left = cl.wave.left; }
             cards.push_back(cl);
             x += cardW + pad;
         }
         // content height for scroll clamp
-        int used = (int)lib.size();
-        int perRow = std::max(1, (int)(rcLibrary.right - 2 * pad) / (cardW + pad));
-        int numRows = (used + perRow - 1) / perRow;
-        libContentH = pad + numRows * rowH;
+        libContentH = rows > 0 ? pad + rows * rowH : 0;
     }
 
     void layoutTracks() {
@@ -319,11 +339,12 @@ struct App {
     // Slightly expanded hit rect so the thin slider is easy to grab.
     RECT sliderHit(const RECT& r) const { return { r.left - S(6), r.top - S(6), r.right + S(6), r.bottom + S(6) }; }
 
-    void drawSlider(HDC h, const RECT& r, float gain) {
+    void drawSlider(HDC h, const RECT& r, float gain) { drawSliderFrac(h, r, gainToFrac(gain)); }
+    void drawSliderFrac(HDC h, const RECT& r, float frac) {
         int cy = (r.top + r.bottom) / 2;
         RECT trk = { r.left, cy - S(2), r.right, cy + S(2) };
         roundFill(h, trk, col::btn, col::cardEdge, S(2));
-        float frac = gainToFrac(gain);
+        frac = std::max(0.0f, std::min(1.0f, frac));
         int kx = r.left + (int)((r.right - r.left) * frac);
         RECT fillr = { r.left, cy - S(2), kx, cy + S(2) };
         HBRUSH b = CreateSolidBrush(col::accent); FillRect(h, &fillr, b); DeleteObject(b);
@@ -353,7 +374,12 @@ struct App {
             const Clip* c = doc.project().findClip(previewClipId);
             totSec = c ? c->durationSec() : 0;
         } else { posSec = (double)playheadFrame / rate; totSec = (double)doc.project().timelineLengthFrames() / rate; }
-        RECT tr = { tbRects[TB_STOP].right + S(16), rcTransport.top, tbRects[TB_UNDO].left - S(12), rcTransport.bottom };
+        // global time-scale slider ("Scale" label + slider)
+        RECT zlab = { zoomRc.left - S(46), rcTransport.top, zoomRc.left - S(4), rcTransport.bottom };
+        textOut(h, zlab, L"Scale", col::dim, fSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        drawSliderFrac(h, zoomRc, zoomToFrac());
+
+        RECT tr = { tbRects[TB_STOP].right + S(16), rcTransport.top, zlab.left - S(8), rcTransport.bottom };
         textOut(h, tr, fmtTime(posSec) + L"  /  " + fmtTime(totSec), col::text, fBig, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         COLORREF uf = doc.canUndo() ? col::text : col::dim;
@@ -901,7 +927,16 @@ struct App {
         SetFocus(hwnd);
         downPt = p; dragged = false;
         int tb = tbAt(p);
-        if (PtInRect(&rcTransport, p)) { if (tb >= 0) handleTB(tb); return; }
+        if (PtInRect(&rcTransport, p)) {
+            RECT zh = sliderHit(zoomRc);
+            if (PtInRect(&zh, p)) {
+                mode = Mode::ZoomDrag;
+                setZoomFrac((float)(p.x - zoomRc.left) / std::max(1, (int)(zoomRc.right - zoomRc.left)));
+                SetCapture(hwnd); clampScroll(); refresh(); return;
+            }
+            if (tb >= 0) handleTB(tb);
+            return;
+        }
 
         // library
         if (PtInRect(&rcLibrary, p)) {
@@ -1019,6 +1054,9 @@ struct App {
         } else if (mode == Mode::TrackVolume) {
             const TrackLayout* tl = nullptr; for (auto& t : trackLays) if (t.trackId == volTrackId) tl = &t;
             if (tl) if (Track* t = doc.project().findTrack(volTrackId)) { t->gain = sliderGainAt(tl->volRc, p.x); refresh(); }
+        } else if (mode == Mode::ZoomDrag) {
+            setZoomFrac((float)(p.x - zoomRc.left) / std::max(1, (int)(zoomRc.right - zoomRc.left)));
+            clampScroll(); refresh();
         } else if (mode == Mode::CardDrag || mode == Mode::ClipMove || mode == Mode::TimelineSeek) {
             if (mode == Mode::TimelineSeek) { playheadFrame = xToFrame(p.x); if (timelinePlaying) engine.seek(playheadFrame); }
             refresh();
