@@ -130,6 +130,8 @@ struct App {
     // ------------------------------------------------------------- helpers
     int S(int v) const { return (int)(v * sc + 0.5f); }
     bool hasSel() const { return selClipId >= 0 && selEnd > selStart; }
+    // Play All has something to play only when clips are on the timeline.
+    bool timelineHasContent() const { return doc.project().timelineLengthFrames() > 0; }
 
     void makeFonts() {
         if (fNorm) { DeleteObject(fNorm); DeleteObject(fSmall); DeleteObject(fBold); DeleteObject(fBig); }
@@ -669,7 +671,11 @@ struct App {
 
         bool tlPlaying = timelinePlaying && engine.isPlaying();
         std::wstring pa = tlPlaying ? L"\u275A\u275A  Pause" : L"\u25B6  Play All";
-        button(h, tbRects[TB_PLAYALL], pa, col::accentDk, col::text, hotTB == TB_PLAYALL, fBig);
+        bool canPlayAll = tlPlaying || timelineHasContent();
+        if (canPlayAll)
+            button(h, tbRects[TB_PLAYALL], pa, col::accentDk, col::text, hotTB == TB_PLAYALL, fBig);
+        else   // nothing on the timeline yet -> show disabled rather than a dead green button
+            button(h, tbRects[TB_PLAYALL], pa, col::btn, col::dim, false, fBig);
         button(h, tbRects[TB_STOP], L"\u25A0 Stop", col::btn, col::text, hotTB == TB_STOP, fNorm);
 
         // time readout
