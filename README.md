@@ -14,12 +14,16 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   word-wrapped grid of cards, each with a **volume-graph waveform**.
 - **Play any clip** with a per-card play/pause button. Click the waveform to
   seek / skip around. Playback is real, mixed, low-latency WASAPI.
-- **Select a section** of any clip by dragging across its waveform. Preview the
-  selection (▶ Play selection) before committing, then **Save selection as a new
-  clip** (you name it; rename any time).
-- **Crop a clip** to the selection. You're asked whether to **overwrite the
-  original file**, **save as a new file** (a Save-As dialog with file type,
-  bitrate, and mono/stereo), or just trim it in the editor.
+- **Select a section** of any clip by dragging across its waveform. While a
+  selection is active the card shows **Crop** and **Save sel** buttons, and the
+  card's play button auditions **only the selected part** (so you can preview
+  before committing).
+- **Save selection as a new clip** — the **Save sel** button (or right-click →
+  Save selection) slices the selection into a new clip you name (rename any time).
+- **Crop a clip** to the selection — the **Crop** button (or right-click → Crop).
+  You're asked whether to **overwrite the original file**, **save as a new file**
+  (a Save-As dialog with file type, bitrate, and mono/stereo), or just trim it in
+  the editor.
 - **Undo/redo tree.** `Ctrl+Z` undoes anything. `Ctrl+Shift+Z` redoes — and when
   the history has branched, it pops up a menu of the redo branches with
   descriptions so you can pick which future to walk into.
@@ -76,9 +80,10 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Action | How |
 |---|---|
 | Add clips | **+ Add Files** (multi-select) |
-| Play / pause a clip | green button on the card, or `Space` on the active clip |
+| Play / pause a clip | green button on the card, or `Space` on the active clip (plays only the selection when one is active) |
 | Seek within a clip | click the waveform |
 | Make a selection | drag across the waveform |
+| Crop / save a selection | **Crop** and **Save sel** buttons on the card while a selection is active |
 | Clip actions | **right-click a card**: play selection, save selection as new clip, crop, normalize, voice cleaner, rename, delete, add to a track |
 | Rename a clip | right-click → Rename, or double-click the card title |
 | Set clip / track volume | drag the volume slider on the card or track header |

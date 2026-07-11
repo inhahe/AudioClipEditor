@@ -60,7 +60,7 @@ enum {
     IDC_UNDO, IDC_REDO, IDC_ADDTRACK, IDC_CONTROLS
 };
 
-struct CardLayout { int clipId; RECT card, top, play, del, wave, vol; };
+struct CardLayout { int clipId; RECT card, top, play, del, wave, vol, crop, savesel; };
 struct PlacedLayout { int trackId, index, clipId; RECT rc; };
 struct TrackLayout { int trackId; RECT header, lane; RECT nameRc, delRc, volRc; };
 
@@ -110,6 +110,8 @@ struct App {
     int moveTrackId = -1, moveIndex = -1;
     int64_t moveGrabOffset = 0;    // frames from clip start to grab point
     int hotTB = -1;
+    int hotSelClip = -1;           // card whose selection-action button is hovered
+    int hotSelBtn = 0;             // 0 none, 1 crop, 2 save-selection
 
     // ------------------------------------------------------------- helpers
     int S(int v) const { return (int)(v * sc + 0.5f); }
@@ -202,6 +204,13 @@ struct App {
             cl.del = { x + cardW - S(20), y + S(4), x + cardW - S(4), y + S(20) };
             cl.wave = { x + S(8), y + S(28), x + cardW - S(8), y + cardH - S(30) };
             cl.vol  = { x + S(40), y + cardH - S(24), x + cardW - S(44), y + cardH - S(8) };
+            // Selection-action buttons overlaid at the top-right of the waveform;
+            // only drawn / hit-tested while this clip has an active selection.
+            { int bh = S(17), by0 = cl.wave.top + S(3);
+              int savW = S(58), crpW = S(42), inset = S(4), gap2 = S(4);
+              int bx1 = cl.wave.right - inset;
+              cl.savesel = { bx1 - savW, by0, bx1, by0 + bh };
+              cl.crop    = { cl.savesel.left - gap2 - crpW, by0, cl.savesel.left - gap2, by0 + bh }; }
             cards.push_back(cl);
             x += cardW + pad;
         }
@@ -394,6 +403,15 @@ struct App {
                     SelectObject(h, op); DeleteObject(pen);
                 }
             }
+            // selection-action buttons (crop / save selection as new clip)
+            if (hasSel() && selClipId == cl.clipId) {
+                button(h, cl.crop, L"Crop",
+                       hotSelClip == cl.clipId && hotSelBtn == 1 ? col::btnHot : col::accentDk,
+                       col::text, false, fSmall);
+                button(h, cl.savesel, L"Save sel",
+                       hotSelClip == cl.clipId && hotSelBtn == 2 ? col::btnHot : col::accentDk,
+                       col::text, false, fSmall);
+            }
             // duration inside the wave, bottom-right
             RECT dr = { cl.wave.left, cl.wave.bottom - S(15), cl.wave.right - S(3), cl.wave.bottom - S(2) };
             textOut(h, dr, fmtTime(c->durationSec()), col::dim, fSmall, DT_RIGHT | DT_BOTTOM | DT_SINGLELINE);
@@ -571,12 +589,22 @@ struct App {
     }
 
     void togglePlayClip(int clipId) {
+        // When this clip has an active selection, the play button auditions only
+        // the selected part.
+        if (hasSel() && selClipId == clipId) {
+            if (previewClipId == clipId && previewIsSel) {
+                if (engine.isPlaying())     { engine.pause();  refresh(); return; }
+                if (engine.isPaused())      { engine.resume(); refresh(); return; }
+            }
+            playSelection();   // (re)start from selection start
+            return;
+        }
         if (previewClipId == clipId && !previewIsSel) {
             if (engine.isPlaying()) engine.pause();
             else if (engine.isPaused()) engine.resume();
             else startClipPreview(clipId, previewCursor);
         } else {
-            startClipPreview(clipId, (selClipId == clipId ? 0 : 0));
+            startClipPreview(clipId, 0);
         }
         refresh();
     }
@@ -850,6 +878,11 @@ struct App {
         if (PtInRect(&rcLibrary, p)) {
             const CardLayout* cl = cardAt(p);
             if (!cl) { return; }
+            // selection-action buttons (overlay the top of the waveform)
+            if (hasSel() && selClipId == cl->clipId) {
+                if (PtInRect(&cl->crop, p))    { cropSelection(); return; }
+                if (PtInRect(&cl->savesel, p)) { saveSelectionAsClip(); return; }
+            }
             if (PtInRect(&cl->play, p)) { togglePlayClip(cl->clipId); return; }
             if (PtInRect(&cl->del, p)) { deleteClipConfirm(cl->clipId); return; }
             { RECT vh = sliderHit(cl->vol);
@@ -922,7 +955,17 @@ struct App {
         hotTB = PtInRect(&rcTransport, p) ? tbAt(p) : -1;
         if (hotTB != oldHot) refresh();
 
-        if (mode == Mode::None) return;
+        if (mode == Mode::None) {
+            int hc = -1, hw = 0;
+            if (PtInRect(&rcLibrary, p) && hasSel()) {
+                for (auto& c : cards) if (c.clipId == selClipId) {
+                    if (PtInRect(&c.crop, p))         { hc = c.clipId; hw = 1; }
+                    else if (PtInRect(&c.savesel, p)) { hc = c.clipId; hw = 2; }
+                }
+            }
+            if (hc != hotSelClip || hw != hotSelBtn) { hotSelClip = hc; hotSelBtn = hw; refresh(); }
+            return;
+        }
         if (!dragged) {
             if (std::abs(p.x - downPt.x) > S(4) || std::abs(p.y - downPt.y) > S(4)) dragged = true;
         }
