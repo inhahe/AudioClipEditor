@@ -651,6 +651,7 @@ struct App {
     float sliderGainAt(const RECT& r, int x) const {
         float f = (float)(x - r.left) / std::max(1, (int)(r.right - r.left));
         f = std::max(0.0f, std::min(1.0f, f));
+        if (std::fabs(f - 0.5f) < 0.04f) f = 0.5f;   // snap to 100% (gain 1.0)
         return f * 2.0f;
     }
     // Slightly expanded hit rect so the thin slider is easy to grab.
