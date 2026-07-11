@@ -260,9 +260,26 @@ struct App {
         paintLibrary(mem);
         paintTimeline(mem);
         paintTransport(mem);
+        paintDragOverlay(mem);
 
         BitBlt(hdc, 0, 0, client.right, client.bottom, mem, 0, 0, SRCCOPY);
         SelectObject(mem, oldb); DeleteObject(bmp); DeleteDC(mem);
+    }
+
+    // Floating ghost of a library clip being dragged toward the timeline. Drawn
+    // unclipped so it follows the cursor across panels; once the cursor is over a
+    // track lane the in-lane snap preview (in paintTimeline) takes over instead.
+    void paintDragOverlay(HDC h) {
+        if (mode != Mode::CardDrag || !dragged) return;
+        POINT p; GetCursorPos(&p); ScreenToClient(hwnd, &p);
+        int tid; if (trackAtPoint(p, tid)) return;   // snapping into a lane takes over
+        const Clip* c = doc.project().findClip(dragClipId);
+        if (!c) return;
+        int w = S(150), ht = S(30);
+        RECT g = { p.x - w / 2, p.y - ht / 2, p.x + w / 2, p.y + ht / 2 };
+        roundFill(h, g, col::accentDk, col::text, S(6));
+        RECT nm = { g.left + S(8), g.top, g.right - S(8), g.bottom };
+        textOut(h, nm, c->name, col::text, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
     static void fill(HDC h, const RECT& r, COLORREF c) {
@@ -451,6 +468,18 @@ struct App {
         fill(h, rlh, col::transport);
         textOut(h, rlh, L"Tracks", col::dim, fSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         paintRulerTicks(h, rr);
+        // playhead handle on the ruler (makes the vertical line read as a playhead)
+        if (timelinePlaying || (!engine.isPlaying() && previewClipId < 0)) {
+            int px = frameToX(playheadFrame);
+            int laneLeft = rcTimeline.left + trackHeaderW;
+            if (px >= laneLeft && px <= rcTimeline.right) {
+                POINT tri[3] = { { px - S(5), rr.top }, { px + S(5), rr.top }, { px, rr.bottom } };
+                HBRUSH b = CreateSolidBrush(col::playhead); HPEN pen = CreatePen(PS_SOLID, 1, col::playhead);
+                HGDIOBJ ob = SelectObject(h, b), op = SelectObject(h, pen);
+                Polygon(h, tri, 3);
+                SelectObject(h, ob); SelectObject(h, op); DeleteObject(b); DeleteObject(pen);
+            }
+        }
 
         SaveDC(h); IntersectClipRect(h, rcTimeline.left, rcTimeline.top + rulerH, rcTimeline.right, rcTimeline.bottom);
         for (const auto& tl : trackLays) {
