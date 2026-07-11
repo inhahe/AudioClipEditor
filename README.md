@@ -54,7 +54,10 @@ of clips, audition them, trim/crop, and arrange them on tracks.
 - **Voice cleaner (noise reduction).** Right-click → *Voice cleaner* runs an STFT
   denoiser to strip steady background noise. Choose the **algorithm** (spectral
   subtraction or Wiener filter) and how **aggressively** to clean (light / medium
-  / aggressive). The result replaces the clip's audio (undoable).
+  / aggressive). You can clean at three **scopes** — a single clip, **every clip on
+  one track** (right-click the track header → *Voice cleaner — this track*), or
+  **every clip in the whole project** (clip menu → *Voice cleaner → All clips*).
+  A track/project clean uses one set of options and lands as a single undo step.
 - **Save / load projects.** Projects are saved as a single `.acep` file with the
   whole library and timeline (audio embedded), so a project is fully
   self-contained. `Ctrl+S` saves; the File menu has Open / Save / Save As.
@@ -102,7 +105,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Rename a clip | right-click → Rename, or double-click the card title |
 | Set clip / track volume | drag the volume slider on the card or track header |
 | Normalize volume | right-click a card → *Normalize to match other clips* / *Normalize all clips* |
-| Clean up noise | right-click a card → *Voice cleaner…* |
+| Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |
+| Track actions | **right-click a track header/lane**: voice-clean the track, rename, remove |
 | Add a track | **+ Add Track** |
 | Place a clip on a track | drag a clip card up into a track lane (drops at any time offset, snaps to a neighbouring clip), or right-click → Add to timeline |
 | Move a placed clip | drag it (snaps to neighbours; drag vertically to change tracks) |

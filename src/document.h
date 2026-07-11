@@ -2,6 +2,8 @@
 #include "model.h"
 #include "undo.h"
 #include <string>
+#include <vector>
+#include <utility>
 
 // Owns the project state and the undo/redo tree. Every mutation goes through a
 // method here that records a snapshot, so Ctrl+Z can undo anything.
@@ -20,6 +22,9 @@ public:
     void renameClip(int id, const std::wstring& name);
     void removeClip(int id);
     void replaceClipBuffer(int id, AudioBufferPtr newBuf, const std::wstring& desc);
+    // Replace several clip buffers in one undo step (e.g. denoise a whole track).
+    void replaceClipBuffers(const std::vector<std::pair<int, AudioBufferPtr>>& updates,
+                            const std::wstring& desc);
 
     // --- Volume ---
     void setClipGain(int id, float g, const std::wstring& desc);

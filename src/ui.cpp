@@ -47,9 +47,10 @@ enum TB { TB_ADD, TB_TRACK, TB_PLAYALL, TB_STOP, TB_UNDO, TB_REDO, TB_COUNT };
 enum {
     IDM_PLAY = 100, IDM_PLAYSEL, IDM_CLEARSEL, IDM_SAVESEL, IDM_CROP,
     IDM_EDIT, IDM_RENAME, IDM_DELETE,
-    IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE,
+    IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE, IDM_DENOISE_ALL,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
+    IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE,
     IDM_REDO_BASE = 400
 };
 
@@ -1071,21 +1072,68 @@ struct App {
                         L"Normalize", MB_ICONINFORMATION);
     }
 
+    // Run the voice cleaner over one clip.
     void voiceCleanClip(int clipId) {
-        Clip* c = doc.project().findClip(clipId);
-        if (!c || !c->buffer) return;
-        std::wstring name = c->name;
+        const Clip* c = doc.project().findClip(clipId);
+        if (!c) return;
+        voiceCleanClips({ clipId }, L"'" + c->name + L"'");
+    }
+    // Voice-clean every clip in the library (whole project).
+    void voiceCleanAllClips() {
+        std::vector<int> ids;
+        for (auto& c : doc.project().library) ids.push_back(c.id);
+        voiceCleanClips(ids, L"all clips");
+    }
+    // Voice-clean the (library) clips referenced by everything placed on a track.
+    void voiceCleanTrack(int trackId) {
+        const Track* t = doc.project().findTrack(trackId);
+        if (!t) return;
+        std::vector<int> ids;
+        for (auto& pc : t->clips) ids.push_back(pc.clipId);
+        voiceCleanClips(ids, L"track '" + t->name + L"'");
+    }
+    // Show the cleaner options once, then denoise the given clips as a single
+    // undo step. Duplicate / empty clips are skipped.
+    void voiceCleanClips(const std::vector<int>& ids, const std::wstring& scopeLabel) {
+        std::vector<int> targets;
+        for (int id : ids) {
+            bool dup = false;
+            for (int t : targets) if (t == id) { dup = true; break; }
+            if (dup) continue;
+            const Clip* c = doc.project().findClip(id);
+            if (c && c->buffer && c->buffer->frames() > 0) targets.push_back(id);
+        }
+        if (targets.empty()) {
+            MessageBoxW(hwnd, L"No audio to clean here.", L"Voice cleaner", MB_ICONINFORMATION);
+            return;
+        }
         dsp::NROptions opts;
         opts.algorithm = dsp::NRAlgorithm::SpectralSubtraction;
         opts.strength = dsp::NRStrength::Medium;
         if (!dlg::voiceCleaner(hwnd, opts)) return;
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
-        auto cleaned = dsp::denoise(*c->buffer, opts);
+        std::vector<std::pair<int, AudioBufferPtr>> updates;
+        int failed = 0;
+        for (int id : targets) {
+            const Clip* c = doc.project().findClip(id);
+            if (!c || !c->buffer) continue;
+            auto cleaned = dsp::denoise(*c->buffer, opts);
+            if (cleaned) updates.push_back({ id, cleaned });
+            else ++failed;
+        }
         SetCursor(old);
-        if (!cleaned) { MessageBoxW(hwnd, L"Voice cleaner failed.", L"Voice cleaner", MB_ICONWARNING); return; }
-        if (previewClipId == clipId) stopAll();
-        doc.replaceClipBuffer(clipId, cleaned, L"Voice cleaner on '" + name + L"'");
+        if (updates.empty()) {
+            MessageBoxW(hwnd, L"Voice cleaner failed.", L"Voice cleaner", MB_ICONWARNING);
+            return;
+        }
+        stopAll();   // buffers are changing under any active playback
+        std::wstring desc = targets.size() == 1
+            ? L"Voice cleaner on " + scopeLabel
+            : L"Voice cleaner (" + scopeLabel + L", " + std::to_wstring(updates.size()) + L" clips)";
+        doc.replaceClipBuffers(updates, desc);
         refresh();
+        if (failed)
+            MessageBoxW(hwnd, L"Some clips could not be cleaned.", L"Voice cleaner", MB_ICONWARNING);
     }
 
     // --------------------------------------------------------- project I/O
@@ -1143,6 +1191,7 @@ struct App {
             L"  \u2022 Double-click a clip (or right-click \u2192 Open in editor) for a full-window editor\n"
             L"  \u2022 Drag a clip up onto a track to place it (drops at any offset)\n"
             L"  \u2022 Right-click for save-selection, crop, normalize, voice cleaner\u2026\n"
+            L"  \u2022 Voice cleaner cleans one clip, or all clips in the project\n"
             L"  \u2022 Drag the volume slider to change a clip's level\n\n"
             L"Full-window editor:\n"
             L"  \u2022 Drag across the big waveform to select; buttons to play/crop/save\n"
@@ -1152,6 +1201,7 @@ struct App {
             L"Timeline:\n"
             L"  \u2022 Drag placed clips to move them (snaps to neighbours)\n"
             L"  \u2022 Drag a track's volume slider to change the track level\n"
+            L"  \u2022 Right-click a track header to voice-clean/rename/remove the track\n"
             L"  \u2022 Click a lane or the ruler to move the playhead\n"
             L"  \u2022 Ctrl+wheel zooms, Shift+wheel scrolls vertically\n\n"
             L"Keys:  Space = play/pause   Ctrl+Z = undo   Ctrl+Shift+Z = redo",
@@ -1431,7 +1481,38 @@ struct App {
                 int cmd = TrackPopupMenu(m, TPM_RETURNCMD, sp.x, sp.y, 0, hwnd, nullptr);
                 DestroyMenu(m);
                 if (cmd == IDM_TL_REMOVE) { doc.removePlaced(pl->trackId, pl->index, L"Remove clip from track"); afterHistory(); }
+                return;
             }
+            // right-click a track header or empty lane -> track menu
+            for (auto& tl : trackLays) {
+                bool onHeader = PtInRect(&tl.header, p);
+                bool onLane = PtInRect(&tl.lane, p);
+                if (onHeader || onLane) { trackContextMenu(tl.trackId, p); return; }
+            }
+        }
+    }
+
+    void trackContextMenu(int trackId, POINT p) {
+        const Track* t = doc.project().findTrack(trackId);
+        if (!t) return;
+        bool hasClips = !t->clips.empty();
+        HMENU m = CreatePopupMenu();
+        AppendMenuW(m, MF_STRING | (hasClips ? 0 : MF_GRAYED), IDM_TRK_DENOISE,
+                    L"Voice cleaner \u2014 this track\u2026");
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(m, MF_STRING, IDM_TRK_RENAME, L"Rename track\u2026");
+        AppendMenuW(m, MF_STRING | (doc.project().tracks.size() > 1 ? 0 : MF_GRAYED),
+                    IDM_TRK_REMOVE, L"Remove track");
+        POINT sp = p; ClientToScreen(hwnd, &sp);
+        int cmd = TrackPopupMenu(m, TPM_RETURNCMD, sp.x, sp.y, 0, hwnd, nullptr);
+        DestroyMenu(m);
+        if (cmd == IDM_TRK_DENOISE) voiceCleanTrack(trackId);
+        else if (cmd == IDM_TRK_RENAME) {
+            std::wstring nm = t->name;
+            if (dlg::promptText(hwnd, L"Rename track", L"Track name:", nm)) { doc.renameTrack(trackId, nm); refresh(); }
+        }
+        else if (cmd == IDM_TRK_REMOVE) {
+            if (doc.project().tracks.size() > 1) { doc.removeTrack(trackId); afterHistory(); }
         }
     }
 
@@ -1455,7 +1536,10 @@ struct App {
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_NORM_MATCH, L"Normalize to match other clips");
         AppendMenuW(m, MF_STRING, IDM_NORM_ALL, L"Normalize all clips (all tracks)");
-        AppendMenuW(m, MF_STRING, IDM_DENOISE, L"Voice cleaner (reduce noise)\u2026");
+        HMENU vc = CreatePopupMenu();
+        AppendMenuW(vc, MF_STRING, IDM_DENOISE, L"This clip\u2026");
+        AppendMenuW(vc, MF_STRING, IDM_DENOISE_ALL, L"All clips (whole project)\u2026");
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)vc, L"Voice cleaner (reduce noise)");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_RENAME, L"Rename\u2026");
         AppendMenuW(m, MF_STRING, IDM_DELETE, L"Delete clip");
@@ -1473,6 +1557,7 @@ struct App {
         else if (cmd == IDM_NORM_MATCH) normalizeClip(clipId, false);
         else if (cmd == IDM_NORM_ALL) normalizeClip(clipId, true);
         else if (cmd == IDM_DENOISE) voiceCleanClip(clipId);
+        else if (cmd == IDM_DENOISE_ALL) voiceCleanAllClips();
         else if (cmd == IDM_RENAME) renameClip(clipId);
         else if (cmd == IDM_DELETE) deleteClipConfirm(clipId);
         else if (cmd >= IDM_ADDTL_BASE && cmd < IDM_TL_REMOVE) {

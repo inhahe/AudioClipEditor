@@ -73,6 +73,23 @@ void Document::replaceClipBuffer(int id, AudioBufferPtr newBuf, const std::wstri
     commit(desc);
 }
 
+void Document::replaceClipBuffers(const std::vector<std::pair<int, AudioBufferPtr>>& updates,
+                                  const std::wstring& desc) {
+    bool any = false;
+    for (auto& u : updates) {
+        Clip* c = project_.findClip(u.first);
+        if (!c) continue;
+        c->buffer = u.second;
+        c->peaks = buildPeaks(u.second);
+        int64_t len = u.second ? u.second->frames() : 0;
+        for (auto& t : project_.tracks)
+            for (auto& p : t.clips)
+                if (p.clipId == u.first) p.lengthFrames = len;
+        any = true;
+    }
+    if (any) commit(desc);
+}
+
 int Document::addTrack() {
     Track t;
     t.id = project_.nextTrackId++;
