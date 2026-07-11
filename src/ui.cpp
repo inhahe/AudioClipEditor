@@ -46,7 +46,7 @@ enum TB { TB_ADD, TB_TRACK, TB_PLAYALL, TB_STOP, TB_UNDO, TB_REDO, TB_COUNT };
 // ----------------------------------------------------------------- context menu ids
 enum {
     IDM_PLAY = 100, IDM_PLAYSEL, IDM_CLEARSEL, IDM_SAVESEL, IDM_CROP,
-    IDM_RENAME, IDM_DELETE,
+    IDM_EDIT, IDM_RENAME, IDM_DELETE,
     IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
@@ -114,6 +114,18 @@ struct App {
     int hotSelClip = -1;           // card whose selection-action button is hovered
     int hotSelBtn = 0;             // 0 none, 1 crop, 2 save-selection
 
+    // full-window clip editor
+    int editClipId = -1;           // >=0 => editor overlay is active for this clip
+    bool editFineToggle = false;   // user forced the fine-tune edge strips on
+    int editDrag = 0;              // 0 none, 1 main-select, 2 left strip, 3 right strip
+    int64_t stripAnchorStart = 0;  // window start snapshot while dragging a strip
+    int64_t stripSpanFrames = 0;   // width (frames) shown by each fine-tune strip
+    int edHot = 0;                 // hovered editor button (see EB_* below)
+    // editor layout rects (rebuilt in computeEditorLayout)
+    RECT edMain{}, edRuler{}, edLeft{}, edRight{};
+    enum { EB_NONE, EB_PLAY, EB_PLAYSEL, EB_FINE, EB_CROP, EB_SAVE, EB_CLEAR, EB_DONE, EB_COUNT };
+    RECT edBtn[EB_COUNT]{};
+
     // ------------------------------------------------------------- helpers
     int S(int v) const { return (int)(v * sc + 0.5f); }
     bool hasSel() const { return selClipId >= 0 && selEnd > selStart; }
@@ -151,6 +163,135 @@ struct App {
         return f < 0 ? 0 : (int64_t)f;
     }
 
+    // ----------------------------------------------------- full-window clip editor
+    bool editorActive() const { return editClipId >= 0; }
+    int64_t editClipFrames() const {
+        const Clip* c = doc.project().findClip(editClipId);
+        return c ? c->frames() : 0;
+    }
+    void openClipEditor(int clipId) {
+        if (!doc.project().findClip(clipId)) return;
+        editClipId = clipId;
+        editDrag = 0; editFineToggle = false; edHot = EB_NONE;
+        if (selClipId != clipId) { selClipId = clipId; selStart = selEnd = 0; }
+        int64_t cf = editClipFrames();
+        stripSpanFrames = std::min<int64_t>(std::max<int64_t>(1, cf), (int64_t)(rate * 0.3));
+        computeLayout();
+        refresh();
+    }
+    void closeClipEditor() { editClipId = -1; editDrag = 0; refresh(); }
+
+    // does the editor currently need the fine-tune strips?
+    bool editFineNeeded() const {
+        if (!hasSel() || selClipId != editClipId) return false;
+        if (editDrag == 1) return false;   // don't reflow while dragging a main selection
+        if (editFineToggle) return true;
+        int64_t cf = editClipFrames();
+        if (cf <= 0) return false;
+        double durSec = (double)cf / rate;
+        int w = std::max(1, (int)(edMain.right - edMain.left));
+        double pxPerSecMain = w / std::max(0.001, durSec);
+        return pxPerSecMain < 100.0;   // too coarse to nudge precisely by hand
+    }
+
+    int edMainX(int64_t f) const {
+        int64_t cf = std::max<int64_t>(1, editClipFrames());
+        int w = (int)(edMain.right - edMain.left);
+        return edMain.left + (int)((double)f / cf * w);
+    }
+    int64_t edMainFrame(int x) const {
+        int64_t cf = std::max<int64_t>(1, editClipFrames());
+        int w = std::max(1, (int)(edMain.right - edMain.left));
+        double t = (double)(x - edMain.left) / w;
+        t = std::max(0.0, std::min(1.0, t));
+        return (int64_t)(t * cf);
+    }
+    // window (frames) shown by a fine strip centred on `center`
+    void stripWindow(int64_t center, int64_t& ws, int64_t& we) const {
+        int64_t cf = editClipFrames();
+        int64_t span = std::min<int64_t>(std::max<int64_t>(1, stripSpanFrames), std::max<int64_t>(1, cf));
+        ws = center - span / 2; we = ws + span;
+        if (ws < 0) { ws = 0; we = span; }
+        if (we > cf) { we = cf; ws = std::max<int64_t>(0, cf - span); }
+    }
+
+    // ----- editor interaction ------------------------------------------------
+    void edButton(int id) {
+        switch (id) {
+        case EB_PLAY:
+            if (previewClipId == editClipId && !previewIsSel && engine.isPlaying()) engine.pause();
+            else if (previewClipId == editClipId && !previewIsSel && engine.isPaused()) engine.resume();
+            else startClipPreview(editClipId, 0);
+            break;
+        case EB_PLAYSEL: if (hasSel() && selClipId == editClipId) playSelection(); break;
+        case EB_FINE: editFineToggle = !editFineToggle; break;
+        case EB_CROP: if (hasSel() && selClipId == editClipId) cropSelection(); break;
+        case EB_SAVE: if (hasSel() && selClipId == editClipId) saveSelectionAsClip(); break;
+        case EB_CLEAR: selClipId = editClipId; selStart = selEnd = 0; break;
+        case EB_DONE: closeClipEditor(); return;
+        }
+        refresh();
+    }
+    void updateStripEdge(const RECT& box, int x) {
+        int64_t cf = editClipFrames();
+        int64_t span = std::min<int64_t>(std::max<int64_t>(1, stripSpanFrames), std::max<int64_t>(1, cf));
+        int w = std::max(1, (int)(box.right - box.left));
+        double t = (double)(x - box.left) / w; t = std::max(0.0, std::min(1.0, t));
+        int64_t f = stripAnchorStart + (int64_t)(t * span);
+        f = std::max<int64_t>(0, std::min<int64_t>(cf, f));
+        if (editDrag == 2)      selStart = std::min(f, selEnd);
+        else if (editDrag == 3) selEnd   = std::max(f, selStart);
+    }
+    void beginStripDrag(int which, int64_t edge, const RECT& box, int x) {
+        editDrag = which;
+        int64_t ws, we; stripWindow(edge, ws, we); stripAnchorStart = ws;
+        updateStripEdge(box, x);
+        SetCapture(hwnd); refresh();
+    }
+    void edDown(POINT p, bool /*dbl*/) {
+        SetFocus(hwnd);
+        downPt = p; dragged = false;
+        for (int i = EB_PLAY; i < EB_COUNT; ++i)
+            if (PtInRect(&edBtn[i], p)) { edButton(i); return; }
+        bool sel = hasSel() && selClipId == editClipId;
+        if (editFineNeeded() && sel) {
+            if (PtInRect(&edLeft, p))  { beginStripDrag(2, selStart, edLeft, p.x);  return; }
+            if (PtInRect(&edRight, p)) { beginStripDrag(3, selEnd, edRight, p.x);    return; }
+        }
+        if (PtInRect(&edMain, p)) {
+            editDrag = 1; selClipId = editClipId;
+            int64_t f = edMainFrame(p.x); selStart = selEnd = f;
+            SetCapture(hwnd); refresh();
+        }
+    }
+    void edMove(POINT p) {
+        int oldHot = edHot; edHot = EB_NONE;
+        for (int i = EB_PLAY; i < EB_COUNT; ++i) if (PtInRect(&edBtn[i], p)) edHot = i;
+        if (editDrag == 0) { if (edHot != oldHot) refresh(); return; }
+        if (!dragged && (std::abs(p.x - downPt.x) > S(3) || std::abs(p.y - downPt.y) > S(3))) dragged = true;
+        if (editDrag == 1)      selEnd = edMainFrame(p.x);
+        else if (editDrag == 2) updateStripEdge(edLeft, p.x);
+        else if (editDrag == 3) updateStripEdge(edRight, p.x);
+        refresh();
+    }
+    void edUp(POINT p) {
+        if (GetCapture() == hwnd) ReleaseCapture();
+        int d = editDrag; editDrag = 0;
+        if (d == 1) {
+            if (!dragged) { selClipId = editClipId; selStart = selEnd = 0; seekClip(editClipId, edMainFrame(p.x)); }
+            else if (selEnd < selStart) std::swap(selStart, selEnd);
+        }
+        refresh();
+    }
+    void edWheel(POINT p, int delta) {
+        if (!PtInRect(&edLeft, p) && !PtInRect(&edRight, p)) return;
+        int64_t cf = std::max<int64_t>(1, editClipFrames());
+        double f = (delta > 0 ? 1.0 / 1.2 : 1.2);
+        stripSpanFrames = (int64_t)(stripSpanFrames * f);
+        stripSpanFrames = std::max<int64_t>((int64_t)(rate * 0.02), std::min<int64_t>(cf, stripSpanFrames));
+        refresh();
+    }
+
     // --------------------------------------------------------- layout
     int trackLaneH() const { return S(72); }
     int trackGap()   const { return S(6); }
@@ -179,6 +320,42 @@ struct App {
         layoutTransport();
         layoutTracks();
         layoutCards();
+        if (editorActive()) computeEditorLayout(rc);
+    }
+
+    void computeEditorLayout(const RECT& rc) {
+        int pad = S(16);
+        int topH = S(56);                       // toolbar row
+        // toolbar buttons, left to right
+        int by = S(10), bh = S(34), bx = pad;
+        auto put = [&](int id, int w) { edBtn[id] = { bx, by, bx + w, by + bh }; bx += w + S(8); };
+        put(EB_PLAY, S(96));
+        put(EB_PLAYSEL, S(120));
+        put(EB_FINE, S(150));
+        bx += S(16);
+        put(EB_CROP, S(120));
+        put(EB_SAVE, S(150));
+        put(EB_CLEAR, S(120));
+        // Done on the far right
+        edBtn[EB_DONE] = { rc.right - pad - S(96), by, rc.right - pad, by + bh };
+
+        int contentTop = topH + pad;
+        int contentBot = rc.bottom - pad;
+        int rulerH2 = S(18);
+        // main waveform spans the full content width (strips stack below it, so the
+        // main width is independent of whether strips show) — set it first so
+        // editFineNeeded() can measure the main scale.
+        edMain = { pad, contentTop + rulerH2, rc.right - pad, contentBot };
+        bool strips = editFineNeeded();
+        int stripH = strips ? S(150) : 0;
+        int mainBot = contentBot - (strips ? stripH + pad : 0);
+        edRuler = { pad, contentTop, rc.right - pad, contentTop + rulerH2 };
+        edMain  = { pad, contentTop + rulerH2, rc.right - pad, mainBot };
+        if (strips) {
+            int mid = rc.right / 2;
+            edLeft  = { pad, contentBot - stripH, mid - S(8), contentBot };
+            edRight = { mid + S(8), contentBot - stripH, rc.right - pad, contentBot };
+        } else { edLeft = edRight = RECT{}; }
     }
 
     void layoutTransport() {
@@ -277,13 +454,131 @@ struct App {
         SetBkMode(mem, TRANSPARENT);
 
         fill(mem, client, col::bg);
-        paintLibrary(mem);
-        paintTimeline(mem);
-        paintTransport(mem);
-        paintDragOverlay(mem);
+        if (editorActive()) {
+            paintEditor(mem, client);
+        } else {
+            paintLibrary(mem);
+            paintTimeline(mem);
+            paintTransport(mem);
+            paintDragOverlay(mem);
+        }
 
         BitBlt(hdc, 0, 0, client.right, client.bottom, mem, 0, 0, SRCCOPY);
         SelectObject(mem, oldb); DeleteObject(bmp); DeleteDC(mem);
+    }
+
+    static std::wstring fmtHMSms(double s) {
+        if (s < 0) s = 0;
+        int mm = (int)(s / 60); double rem = s - mm * 60;
+        wchar_t b[32]; swprintf(b, 32, L"%d:%06.3f", mm, rem);
+        return b;
+    }
+
+    void paintEditor(HDC h, const RECT& client) {
+        const Clip* c = doc.project().findClip(editClipId);
+        if (!c) { closeClipEditor(); return; }
+        int64_t cf = std::max<int64_t>(1, c->frames());
+        bool sel = hasSel() && selClipId == editClipId;
+
+        // toolbar
+        RECT top = { 0, 0, client.right, S(56) };
+        fill(h, top, col::transport);
+        bool playing = (previewClipId == editClipId) && engine.isPlaying();
+        button(h, edBtn[EB_PLAY],    playing ? L"\u275A\u275A Pause" : L"\u25B6 Play",
+               col::accentDk, col::text, edHot == EB_PLAY, fNorm);
+        button(h, edBtn[EB_PLAYSEL], L"\u25B6 Play selection", col::btn,
+               sel ? col::text : col::dim, edHot == EB_PLAYSEL, fNorm);
+        bool fineOn = editFineNeeded();
+        button(h, edBtn[EB_FINE], fineOn ? L"\u2713 Fine-tune edges" : L"Fine-tune edges",
+               fineOn ? col::accentDk : col::btn, col::text, edHot == EB_FINE, fNorm);
+        button(h, edBtn[EB_CROP],  L"Crop to selection\u2026", col::btn,
+               sel ? col::text : col::dim, edHot == EB_CROP, fNorm);
+        button(h, edBtn[EB_SAVE],  L"Save selection as clip", col::btn,
+               sel ? col::text : col::dim, edHot == EB_SAVE, fNorm);
+        button(h, edBtn[EB_CLEAR], L"Clear selection", col::btn,
+               sel ? col::text : col::dim, edHot == EB_CLEAR, fNorm);
+        button(h, edBtn[EB_DONE],  L"Done", col::btn, col::text, edHot == EB_DONE, fBold);
+
+        // ruler + selection read-out
+        fill(h, edRuler, col::ruler);
+        std::wstring info = L"Editing: " + c->name + L"    ";
+        if (sel) info += L"selection " + fmtHMSms((double)selStart / rate) + L" \u2013 " +
+                         fmtHMSms((double)selEnd / rate) +
+                         L"  (" + fmtHMSms((double)(selEnd - selStart) / rate) + L")";
+        else info += L"drag on the waveform to select";
+        RECT infoRc = { edRuler.left + S(6), edRuler.top, edRuler.right - S(6), edRuler.bottom };
+        textOut(h, infoRc, info, col::dim, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        // main waveform
+        fill(h, edMain, col::waveBg);
+        if (c->peaks) wf::draw(h, edMain, *c->peaks, 0, cf, col::wave);
+        if (sel) {
+            int sx0 = edMainX(selStart), sx1 = edMainX(selEnd);
+            RECT sr = { sx0, edMain.top, sx1, edMain.bottom };
+            fill(h, sr, col::selRect);
+            SaveDC(h); IntersectClipRect(h, sr.left, sr.top, sr.right, sr.bottom);
+            if (c->peaks) wf::draw(h, edMain, *c->peaks, 0, cf, col::waveSel);
+            RestoreDC(h, -1);
+            drawVLine(h, sx0, edMain.top, edMain.bottom, col::waveSel);
+            drawVLine(h, sx1, edMain.top, edMain.bottom, col::waveSel);
+        }
+        if (previewClipId == editClipId) {
+            int cx = edMainX(previewCursor);
+            drawVLine(h, cx, edMain.top, edMain.bottom, col::playhead);
+        }
+        // light second-mark ticks on the ruler
+        {
+            double durSec = (double)cf / rate;
+            double step = 1.0; int w = (int)(edMain.right - edMain.left);
+            while (step / durSec * w < S(60)) step *= 2;
+            for (double t = 0; t <= durSec; t += step) {
+                int x = edMainX((int64_t)(t * rate));
+                drawVLine(h, x, edRuler.bottom - S(6), edRuler.bottom, col::cardEdge);
+            }
+        }
+
+        // fine-tune strips
+        if (fineOn && sel) {
+            paintFineStrip(h, edLeft,  L"Start edge", selStart, editDrag == 2, c);
+            paintFineStrip(h, edRight, L"End edge",   selEnd,   editDrag == 3, c);
+        }
+    }
+
+    void paintFineStrip(HDC h, const RECT& box, const wchar_t* label,
+                        int64_t edge, bool dragging, const Clip* c) {
+        int64_t cf = std::max<int64_t>(1, c->frames());
+        int64_t ws, we;
+        if (dragging) { ws = stripAnchorStart; we = ws + std::min<int64_t>(std::max<int64_t>(1, stripSpanFrames), cf); }
+        else stripWindow(edge, ws, we);
+        int64_t span = std::max<int64_t>(1, we - ws);
+        RECT lab = { box.left, box.top, box.right, box.top + S(16) };
+        fill(h, lab, col::transport);
+        std::wstring t = std::wstring(label) + L"   " + fmtHMSms((double)edge / rate) +
+                         L"   (\u00b1" + fmtHMSms((double)span / rate / 2) + L" view)";
+        textOut(h, lab, L"  " + t, col::dim, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT wv = { box.left, lab.bottom, box.right, box.bottom };
+        fill(h, wv, col::waveBg);
+        int w = std::max(1, (int)(wv.right - wv.left));
+        auto fx = [&](int64_t f) { return wv.left + (int)((double)(f - ws) / span * w); };
+        if (c->peaks) wf::draw(h, wv, *c->peaks, ws, we, col::wave);
+        // shade the selected side (left strip: right of edge is inside selection;
+        // right strip: left of edge is inside selection)
+        int ex = fx(edge);
+        drawVLine(h, ex, wv.top, wv.bottom, col::waveSel);
+        // draggable handle
+        RECT knob = { ex - S(5), wv.top, ex + S(5), wv.top + S(10) };
+        roundFill(h, knob, col::waveSel, col::waveSel, S(2));
+        // outline
+        HPEN pen = CreatePen(PS_SOLID, 1, col::cardEdge); HGDIOBJ op = SelectObject(h, pen);
+        HGDIOBJ ob = SelectObject(h, GetStockObject(NULL_BRUSH));
+        Rectangle(h, box.left, box.top, box.right, box.bottom);
+        SelectObject(h, op); SelectObject(h, ob); DeleteObject(pen);
+    }
+
+    void drawVLine(HDC h, int x, int y0, int y1, COLORREF c) {
+        HPEN pen = CreatePen(PS_SOLID, S(1), c); HGDIOBJ op = SelectObject(h, pen);
+        MoveToEx(h, x, y0, nullptr); LineTo(h, x, y1);
+        SelectObject(h, op); DeleteObject(pen);
     }
 
     // Floating ghost of a library clip being dragged toward the timeline. Drawn
@@ -845,9 +1140,15 @@ struct App {
             L"Library clips:\n"
             L"  \u2022 Click the \u25B6 button to play/pause a clip\n"
             L"  \u2022 Click-drag across the waveform to select a section\n"
+            L"  \u2022 Double-click a clip (or right-click \u2192 Open in editor) for a full-window editor\n"
             L"  \u2022 Drag a clip up onto a track to place it (drops at any offset)\n"
             L"  \u2022 Right-click for save-selection, crop, normalize, voice cleaner\u2026\n"
             L"  \u2022 Drag the volume slider to change a clip's level\n\n"
+            L"Full-window editor:\n"
+            L"  \u2022 Drag across the big waveform to select; buttons to play/crop/save\n"
+            L"  \u2022 Fine-tune edges: two zoomed strips for the selection's start & end\n"
+            L"  \u2022 Drag the strip knobs (or wheel-zoom a strip) to nudge exact points\n"
+            L"  \u2022 Esc closes the editor\n\n"
             L"Timeline:\n"
             L"  \u2022 Drag placed clips to move them (snaps to neighbours)\n"
             L"  \u2022 Drag a track's volume slider to change the track level\n"
@@ -924,6 +1225,7 @@ struct App {
 
     // --------------------------------------------------------- mouse
     void onLDown(POINT p, bool dbl) {
+        if (editorActive()) { edDown(p, dbl); return; }
         SetFocus(hwnd);
         downPt = p; dragged = false;
         int tb = tbAt(p);
@@ -956,6 +1258,7 @@ struct App {
                 SetCapture(hwnd); refresh(); return;
               } }
             if (PtInRect(&cl->wave, p)) {
+                if (dbl) { openClipEditor(cl->clipId); return; }
                 // begin selection / seek
                 mode = Mode::WaveSelect; dragClipId = cl->clipId;
                 const Clip* c = doc.project().findClip(cl->clipId);
@@ -1015,6 +1318,7 @@ struct App {
     }
 
     void onMouseMove(POINT p) {
+        if (editorActive()) { edMove(p); return; }
         int oldHot = hotTB;
         hotTB = PtInRect(&rcTransport, p) ? tbAt(p) : -1;
         if (hotTB != oldHot) refresh();
@@ -1064,6 +1368,7 @@ struct App {
     }
 
     void onLUp(POINT p) {
+        if (editorActive()) { edUp(p); return; }
         if (GetCapture() == hwnd) ReleaseCapture();
         Mode m = mode; mode = Mode::None;
 
@@ -1112,6 +1417,7 @@ struct App {
     void afterPlaceRefresh() { clampScroll(); refresh(); }
 
     void onRDown(POINT p) {
+        if (editorActive()) return;
         if (PtInRect(&rcLibrary, p)) {
             const CardLayout* cl = cardAt(p);
             if (cl) { clipContextMenu(cl->clipId, p); return; }
@@ -1132,6 +1438,8 @@ struct App {
     void clipContextMenu(int clipId, POINT p) {
         HMENU m = CreatePopupMenu();
         bool sel = hasSel() && selClipId == clipId;
+        AppendMenuW(m, MF_STRING, IDM_EDIT, L"Open in editor (full window)\u2026");
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_PLAY, L"Play / Pause");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_PLAYSEL, L"Play selection");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_SAVESEL, L"Save selection as new clip");
@@ -1156,7 +1464,8 @@ struct App {
         int cmd = TrackPopupMenu(m, TPM_RETURNCMD, sp.x, sp.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         if (cmd == 0) return;
-        if (cmd == IDM_PLAY) togglePlayClip(clipId);
+        if (cmd == IDM_EDIT) openClipEditor(clipId);
+        else if (cmd == IDM_PLAY) togglePlayClip(clipId);
         else if (cmd == IDM_PLAYSEL) { selClipId = clipId; playSelection(); }
         else if (cmd == IDM_SAVESEL) { selClipId = clipId; saveSelectionAsClip(); }
         else if (cmd == IDM_CROP) { selClipId = clipId; cropSelection(); }
@@ -1249,6 +1558,12 @@ struct App {
     void onKey(WPARAM k) {
         bool ctrl = GetKeyState(VK_CONTROL) & 0x8000;
         bool shift = GetKeyState(VK_SHIFT) & 0x8000;
+        if (editorActive()) {
+            if (k == VK_ESCAPE) { closeClipEditor(); return; }
+            if (k == VK_SPACE) { edButton(EB_PLAY); return; }
+            if (ctrl && (k == 'Z')) { if (shift) doRedo(); else doUndo(); return; }
+            return;
+        }
         if (ctrl && (k == 'Z')) { if (shift) doRedo(); else doUndo(); return; }
         if (ctrl && (k == 'Y')) { doRedo(); return; }
         if (ctrl && (k == 'S')) { saveProjectFile(); return; }
@@ -1263,6 +1578,7 @@ struct App {
 
     void onWheel(POINT p, int delta, bool ctrl, bool shift) {
         ScreenToClient(hwnd, &p);
+        if (editorActive()) { edWheel(p, delta); return; }
         if (PtInRect(&rcLibrary, p)) {
             libScroll -= delta / 2; clampScroll(); refresh(); return;
         }
