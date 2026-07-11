@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <climits>
 
 #define WM_APP_PLAYEND (WM_APP + 1)
 
@@ -65,7 +66,7 @@ struct CardLayout { int clipId; RECT card, top, play, del, wave, vol, crop, save
 struct PlacedLayout { int trackId, index, clipId; RECT rc; };
 struct TrackLayout { int trackId; RECT header, lane; RECT nameRc, delRc, volRc; };
 
-enum class Mode { None, WaveSelect, CardDrag, ClipMove, TimelineSeek, ClipVolume, TrackVolume, ZoomDrag };
+enum class Mode { None, WaveSelect, CardDrag, ClipMove, TimelineSeek, ClipVolume, TrackVolume, ZoomDrag, TlVScroll };
 
 struct App {
     HWND hwnd = nullptr;
@@ -86,6 +87,7 @@ struct App {
     double pxPerSec = 90.0;
     int tlScrollX = 0, tlScrollY = 0, tlContentH = 0;
     int trackHeaderW = 128, rulerH = 22;
+    int vscrollGrab = 0;           // grab offset within the timeline scrollbar thumb
 
     // layout caches (rebuilt each layout())
     std::vector<CardLayout> cards;
@@ -907,6 +909,14 @@ struct App {
                 SelectObject(h, op); DeleteObject(pen);
             }
         }
+        // vertical scrollbar when there are more tracks than fit
+        {
+            RECT gutter, thumb;
+            if (tlVScrollGeom(gutter, thumb)) {
+                fill(h, gutter, col::panel);
+                roundFill(h, thumb, mode == Mode::TlVScroll ? col::accentDk : col::btn, col::cardEdge, S(4));
+            }
+        }
         RestoreDC(h, -1);
     }
 
@@ -1266,6 +1276,36 @@ struct App {
     }
 
     // --------------------------------------------------------- scroll
+    // Vertical scrollbar for the tracks pane. Returns false when all tracks fit
+    // (nothing to scroll). `gutter` is the full track, `thumb` the draggable knob.
+    bool tlVScrollGeom(RECT& gutter, RECT& thumb) const {
+        int tlVis = rcTimeline.bottom - (rcTimeline.top + rulerH);
+        if (tlVis <= 0 || tlContentH <= tlVis) return false;
+        int gw = S(12);
+        gutter = { rcTimeline.right - gw, rcTimeline.top + rulerH, rcTimeline.right, rcTimeline.bottom };
+        int trackH = gutter.bottom - gutter.top;
+        int thumbH = std::max(S(28), (int)((double)tlVis / tlContentH * trackH));
+        thumbH = std::min(thumbH, trackH);
+        int maxY = std::max(1, tlContentH - tlVis);
+        int travel = std::max(0, trackH - thumbH);
+        int thumbTop = gutter.top + (int)((double)tlScrollY / maxY * travel);
+        thumb = { gutter.left + S(2), thumbTop, gutter.right - S(1), thumbTop + thumbH };
+        return true;
+    }
+    // Map a thumb-top pixel position back to a tlScrollY value.
+    void setVScrollFromThumbTop(int thumbTop) {
+        RECT gutter, thumb;
+        if (!tlVScrollGeom(gutter, thumb)) return;
+        int trackH = gutter.bottom - gutter.top;
+        int thumbH = thumb.bottom - thumb.top;
+        int travel = std::max(1, trackH - thumbH);
+        int tlVis = rcTimeline.bottom - (rcTimeline.top + rulerH);
+        int maxY = std::max(0, tlContentH - tlVis);
+        double frac = (double)(thumbTop - gutter.top) / travel;
+        tlScrollY = (int)(std::max(0.0, std::min(1.0, frac)) * maxY);
+        clampScroll();
+    }
+
     void clampScroll() {
         computeLayout();
         int visH = rcLibrary.bottom - rcLibrary.top;
@@ -1335,6 +1375,16 @@ struct App {
 
         // timeline
         if (PtInRect(&rcTimeline, p)) {
+            // vertical scrollbar (takes priority over lane/header hits at the far right)
+            {
+                RECT gutter, thumb;
+                if (tlVScrollGeom(gutter, thumb) && PtInRect(&gutter, p)) {
+                    mode = Mode::TlVScroll;
+                    if (PtInRect(&thumb, p)) vscrollGrab = p.y - thumb.top;
+                    else { vscrollGrab = (thumb.bottom - thumb.top) / 2; setVScrollFromThumbTop(p.y - vscrollGrab); }
+                    SetCapture(hwnd); refresh(); return;
+                }
+            }
             // header hits
             for (auto& tl : trackLays) {
                 if (PtInRect(&tl.delRc, p) && doc.project().tracks.size() > 1) {
@@ -1419,6 +1469,8 @@ struct App {
         } else if (mode == Mode::ZoomDrag) {
             setZoomFrac((float)(p.x - zoomRc.left) / std::max(1, (int)(zoomRc.right - zoomRc.left)));
             clampScroll(); refresh();
+        } else if (mode == Mode::TlVScroll) {
+            setVScrollFromThumbTop(p.y - vscrollGrab); refresh();
         } else if (mode == Mode::CardDrag || mode == Mode::ClipMove || mode == Mode::TimelineSeek) {
             if (mode == Mode::TimelineSeek) { playheadFrame = xToFrame(p.x); if (timelinePlaying) engine.seek(playheadFrame); }
             refresh();
@@ -1473,6 +1525,8 @@ struct App {
         refresh();
     }
     void afterPlaceRefresh() { clampScroll(); refresh(); }
+    // Add a track and scroll the tracks pane so the new (bottom) track is visible.
+    void addTrackAndReveal() { doc.addTrack(); tlScrollY = INT_MAX; clampScroll(); refresh(); }
 
     void onRDown(POINT p) {
         if (editorActive()) return;
@@ -1593,7 +1647,7 @@ struct App {
     void handleTB(int id) {
         switch (id) {
         case TB_ADD: addFiles(); break;
-        case TB_TRACK: doc.addTrack(); afterPlaceRefresh(); break;
+        case TB_TRACK: addTrackAndReveal(); break;
         case TB_PLAYALL: playAll(); break;
         case TB_STOP: stopAll(); break;
         case TB_UNDO: doUndo(); break;
@@ -1642,7 +1696,7 @@ struct App {
         case IDC_EXIT: DestroyWindow(hwnd); break;
         case IDC_UNDO: doUndo(); break;
         case IDC_REDO: doRedo(); break;
-        case IDC_ADDTRACK: doc.addTrack(); afterPlaceRefresh(); break;
+        case IDC_ADDTRACK: addTrackAndReveal(); break;
         case IDC_CONTROLS: showControls(); break;
         }
     }
@@ -1676,12 +1730,15 @@ struct App {
             libScroll -= delta / 2; clampScroll(); refresh(); return;
         }
         if (PtInRect(&rcTimeline, p)) {
+            bool overHeader = p.x < rcTimeline.left + trackHeaderW;
             if (ctrl) {
                 double old = pxPerSec;
                 pxPerSec *= (delta > 0 ? 1.15 : 1 / 1.15);
                 pxPerSec = std::max(8.0, std::min(2000.0, pxPerSec));
                 (void)old;
-            } else if (shift) {
+            } else if (shift || overHeader) {
+                // Shift+wheel anywhere, or a plain wheel over the track-header
+                // column, scrolls the tracks vertically.
                 tlScrollY -= delta / 2;
             } else {
                 tlScrollX -= delta;

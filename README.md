@@ -41,9 +41,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   descriptions so you can pick which future to walk into.
 - **Tracks & timeline.** The timeline sits on top (sized to just fit the current
   number of tracks) with the clip library below it. Start with one track, add as
-  many as you like. Drag a clip card up onto a track to drop it at any time
-  offset; drag placed clips to move them. Clips **snap** to butt up against
-  neighbours and **can't overlap** on a track.
+  many as you like — once there are more tracks than fit, the tracks pane grows a
+  **vertical scrollbar** (and the wheel over the track headers scrolls them), and
+  adding a track scrolls it into view. Drag a clip card up onto a track to drop it
+  at any time offset; drag placed clips to move them. Clips **snap** to butt up
+  against neighbours and **can't overlap** on a track.
 - **Prominent Play All** button plays every track together from the playhead.
 - **Per-clip and per-track volume.** Every card and every track header has a
   volume slider (0–200%). Gain is applied live to preview, timeline mixing, and
@@ -119,7 +121,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Add files / Save project | `Ctrl+O` / `Ctrl+S` |
 | Open / Save / Export | **File** menu |
 | Scroll library | mouse wheel over the clip area |
-| Scroll / zoom timeline | wheel = scroll, `Ctrl`+wheel = zoom, `Shift`+wheel = scroll tracks |
+| Scroll / zoom timeline | wheel = scroll, `Ctrl`+wheel = zoom, `Shift`+wheel (or wheel over the track headers) = scroll tracks vertically; drag the scrollbar on the right when there are more tracks than fit |
 | Time scale (zoom) | the **Scale** slider in the toolbar sets pixels-per-second for both the timeline *and* the clip cards |
 
 ## Architecture
