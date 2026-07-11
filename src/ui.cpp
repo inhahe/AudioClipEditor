@@ -137,18 +137,33 @@ struct App {
     }
 
     // --------------------------------------------------------- layout
+    int trackLaneH() const { return S(72); }
+    int trackGap()   const { return S(6); }
+
     void computeLayout() {
         RECT rc; GetClientRect(hwnd, &rc);
         int tH = S(62);
         rcTransport = { 0, 0, rc.right, tH };
-        int split = tH + (rc.bottom - tH) * 52 / 100;
-        rcLibrary = { 0, tH, rc.right, split };
-        rcTimeline = { 0, split, rc.right, rc.bottom };
         trackHeaderW = S(128);
         rulerH = S(22);
+
+        // Tracks view on top, sized to just fit the current number of tracks;
+        // the clip library fills the remaining space below it.
+        int nTracks = (int)doc.project().tracks.size();
+        int laneH = trackLaneH(), gap = trackGap();
+        int neededTL = rulerH + nTracks * (laneH + gap) + gap;
+        int availBelow = rc.bottom - tH;
+        int minLib = S(150);
+        int tlH = neededTL;
+        if (tlH > availBelow - minLib) tlH = availBelow - minLib;   // keep library visible
+        int floorTL = rulerH + gap;
+        if (tlH < floorTL) tlH = std::min(floorTL, availBelow);     // sanity floor
+        rcTimeline = { 0, tH, rc.right, tH + tlH };
+        rcLibrary  = { 0, tH + tlH, rc.right, rc.bottom };
+
         layoutTransport();
-        layoutCards();
         layoutTracks();
+        layoutCards();
     }
 
     void layoutTransport() {
@@ -200,7 +215,7 @@ struct App {
     void layoutTracks() {
         trackLays.clear(); placed.clear();
         const auto& tracks = doc.project().tracks;
-        int laneH = S(72);
+        int laneH = trackLaneH();
         int y = rcTimeline.top + rulerH - tlScrollY;
         int laneLeft = rcTimeline.left + trackHeaderW;
         for (int ti = 0; ti < (int)tracks.size(); ++ti) {
@@ -220,9 +235,9 @@ struct App {
                 pl.rc = { x0, y + S(4), x1, y + laneH - S(4) };
                 placed.push_back(pl);
             }
-            y += laneH + S(6);
+            y += laneH + trackGap();
         }
-        tlContentH = (y + tlScrollY) - (rcTimeline.top + rulerH) + S(6);
+        tlContentH = (y + tlScrollY) - (rcTimeline.top + rulerH) + trackGap();
     }
 
     // --------------------------------------------------------- painting
@@ -329,7 +344,7 @@ struct App {
         if (doc.project().library.empty()) {
             RECT r = rcLibrary;
             textOut(h, r, L"Click \u201C+ Add Files\u201D to load audio clips.\n"
-                          L"Drag a clip's title bar onto a track below to place it.",
+                          L"Drag a clip up onto a track to place it.",
                     col::dim, fNorm, DT_CENTER | DT_VCENTER);
         }
 
@@ -747,7 +762,7 @@ struct App {
             L"Library clips:\n"
             L"  \u2022 Click the \u25B6 button to play/pause a clip\n"
             L"  \u2022 Click-drag across the waveform to select a section\n"
-            L"  \u2022 Drag the title bar down onto a track to place it\n"
+            L"  \u2022 Drag a clip up onto a track to place it (drops at any offset)\n"
             L"  \u2022 Right-click for save-selection, crop, normalize, voice cleaner\u2026\n"
             L"  \u2022 Drag the volume slider to change a clip's level\n\n"
             L"Timeline:\n"
@@ -912,6 +927,14 @@ struct App {
             if (std::abs(p.x - downPt.x) > S(4) || std::abs(p.y - downPt.y) > S(4)) dragged = true;
         }
         if (mode == Mode::WaveSelect) {
+            // Forgiving drag-to-timeline: if the pointer leaves the library and
+            // enters the tracks area, treat this as a clip placement drag.
+            if (dragged && !PtInRect(&rcLibrary, p) && PtInRect(&rcTimeline, p)) {
+                mode = Mode::CardDrag; moveGrabOffset = 0;
+                selClipId = -1; selStart = selEnd = 0;
+                refresh();
+                return;
+            }
             const CardLayout* cl = nullptr; for (auto& c : cards) if (c.clipId == dragClipId) cl = &c;
             if (cl) {
                 const Clip* c = doc.project().findClip(dragClipId);

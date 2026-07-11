@@ -23,9 +23,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
 - **Undo/redo tree.** `Ctrl+Z` undoes anything. `Ctrl+Shift+Z` redoes — and when
   the history has branched, it pops up a menu of the redo branches with
   descriptions so you can pick which future to walk into.
-- **Tracks & timeline.** Start with one track, add as many as you like. Drag a
-  clip's title bar onto a track to place it; drag placed clips to move them.
-  Clips **snap** to butt up against neighbours and **can't overlap** on a track.
+- **Tracks & timeline.** The timeline sits on top (sized to just fit the current
+  number of tracks) with the clip library below it. Start with one track, add as
+  many as you like. Drag a clip card up onto a track to drop it at any time
+  offset; drag placed clips to move them. Clips **snap** to butt up against
+  neighbours and **can't overlap** on a track.
 - **Prominent Play All** button plays every track together from the playhead.
 - **Per-clip and per-track volume.** Every card and every track header has a
   volume slider (0–200%). Gain is applied live to preview, timeline mixing, and
@@ -83,7 +85,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Normalize volume | right-click a card → *Normalize to match other clips* / *Normalize all clips* |
 | Clean up noise | right-click a card → *Voice cleaner…* |
 | Add a track | **+ Add Track** |
-| Place a clip on a track | drag the card's **title bar** into a track lane, or right-click → Add to timeline |
+| Place a clip on a track | drag a clip card up into a track lane (drops at any time offset, snaps to a neighbouring clip), or right-click → Add to timeline |
 | Move a placed clip | drag it (snaps to neighbours; drag vertically to change tracks) |
 | Remove a placed clip | right-click it → Remove |
 | Set the playhead | click a track lane or the ruler |
