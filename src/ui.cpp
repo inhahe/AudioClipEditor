@@ -1714,6 +1714,7 @@ struct App {
 
 // ----------------------------------------------------------------- window plumbing
 static App* g_app = nullptr;
+static void saveWindowPlacement(HWND hwnd);   // defined below (registry persistence)
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     App* a = (App*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -1763,9 +1764,35 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND: if (HIWORD(wp) == 0 && lp == 0) { a->onCommand(LOWORD(wp)); return 0; } break;
     case WM_TIMER: a->onTimer(); return 0;
     case WM_APP_PLAYEND: a->onPlayEnd(); return 0;
-    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_DESTROY: saveWindowPlacement(hwnd); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// ---- window size/state persistence (HKCU\Software\AudioClipEditor) ----------
+static const wchar_t* kRegKey = L"Software\\AudioClipEditor";
+
+static bool loadWindowPlacement(WINDOWPLACEMENT& wp) {
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRegKey, 0, KEY_READ, &k) != ERROR_SUCCESS) return false;
+    WINDOWPLACEMENT tmp{}; DWORD sz = sizeof(tmp), type = 0;
+    LONG r = RegQueryValueExW(k, L"WindowPlacement", nullptr, &type, (LPBYTE)&tmp, &sz);
+    RegCloseKey(k);
+    if (r != ERROR_SUCCESS || type != REG_BINARY || sz != sizeof(WINDOWPLACEMENT)) return false;
+    // Don't restore into a minimized state; open normally (or maximized) instead.
+    if (tmp.showCmd == SW_SHOWMINIMIZED || tmp.showCmd == SW_MINIMIZE)
+        tmp.showCmd = SW_SHOWNORMAL;
+    wp = tmp; wp.length = sizeof(wp);
+    return true;
+}
+
+static void saveWindowPlacement(HWND hwnd) {
+    WINDOWPLACEMENT wp{}; wp.length = sizeof(wp);
+    if (!GetWindowPlacement(hwnd, &wp)) return;
+    HKEY k;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRegKey, 0, nullptr, 0, KEY_WRITE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
+    RegSetValueExW(k, L"WindowPlacement", 0, REG_BINARY, (const BYTE*)&wp, sizeof(wp));
+    RegCloseKey(k);
 }
 
 int runApp(HINSTANCE hInst, int nCmdShow) {
@@ -1794,14 +1821,17 @@ int runApp(HINSTANCE hInst, int nCmdShow) {
     RegisterClassExW(&wc);
 
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"Audio Clip Editor",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1180, 800,
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1500, 950,
         nullptr, nullptr, hInst, &app);
     g_app = &app;
 
     // engine end-of-source -> post to UI thread
     app.engine.setEndCallback([hwnd] { PostMessageW(hwnd, WM_APP_PLAYEND, 0, 0); });
 
-    ShowWindow(hwnd, nCmdShow);
+    // Restore the last window size/position/maximized state if we have one.
+    WINDOWPLACEMENT wp{};
+    if (loadWindowPlacement(wp)) SetWindowPlacement(hwnd, &wp);
+    else ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
 
     MSG msg;
