@@ -123,6 +123,7 @@ struct App {
     int64_t stripSpanFrames = 0;   // width (frames) shown by each fine-tune strip
     int64_t stripFixedEdge = 0;    // the opposite (non-dragged) selection edge, captured at drag start
     int64_t stripDragFrame = 0;    // frame under the cursor for the strip currently being dragged
+    int64_t mainDragAnchor = 0;    // fixed anchor frame while sweeping a selection on the main waveform
     int edHot = 0;                 // hovered editor button (see EB_* below)
     // editor layout rects (rebuilt in computeEditorLayout)
     RECT edMain{}, edRuler{}, edLeft{}, edRight{};
@@ -277,7 +278,7 @@ struct App {
         }
         if (PtInRect(&edMain, p)) {
             editDrag = 1; selClipId = editClipId;
-            int64_t f = edMainFrame(p.x); selStart = selEnd = f;
+            int64_t f = edMainFrame(p.x); mainDragAnchor = f; selStart = selEnd = f;
             SetCapture(hwnd); refresh();
         }
     }
@@ -286,7 +287,13 @@ struct App {
         for (int i = EB_PLAY; i < EB_COUNT; ++i) if (PtInRect(&edBtn[i], p)) edHot = i;
         if (editDrag == 0) { if (edHot != oldHot) refresh(); return; }
         if (!dragged && (std::abs(p.x - downPt.x) > S(3) || std::abs(p.y - downPt.y) > S(3))) dragged = true;
-        if (editDrag == 1)      selEnd = edMainFrame(p.x);
+        if (editDrag == 1) {
+            // Keep a valid selection even when the cursor sweeps past the anchor,
+            // so the highlight (and strips) never blink out mid-drag.
+            int64_t f = edMainFrame(p.x);
+            selStart = std::min(mainDragAnchor, f);
+            selEnd   = std::max(mainDragAnchor, f);
+        }
         else if (editDrag == 2) updateStripEdge(edLeft, p.x);
         else if (editDrag == 3) updateStripEdge(edRight, p.x);
         refresh();
@@ -296,7 +303,7 @@ struct App {
         int d = editDrag; editDrag = 0;
         if (d == 1) {
             if (!dragged) { selClipId = editClipId; selStart = selEnd = 0; seekClip(editClipId, edMainFrame(p.x)); }
-            else if (selEnd < selStart) std::swap(selStart, selEnd);
+            // (selStart/selEnd stay sorted during the sweep, so no swap needed)
         }
         refresh();
     }
