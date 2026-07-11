@@ -1,0 +1,6 @@
+/build/
+/bin/
+*.log
+*.user
+*.obj
+*.exe

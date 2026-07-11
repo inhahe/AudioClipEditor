@@ -1,0 +1,32 @@
+I tried Audacity and REAPER, and neither of them seem to be easy. What I want to do is 
+- load any number of audio files as clips, have them show in a list (as spans with volume graphs), maybe they're all arranged in a word-wrap sort of way
+- press play on any given clip to play it (with pause, resume, skip around by clicking)
+- select a section from any clip and save it as a new clip (which i can name/rename). can play current selection before commiting to the selection
+- crop any clip using a similar selection mechanism - asks if the user wants to overwrite the original file or save as a new file - if save as a new file, give the user the save file dialog (filename, file type, bitrate, mono/stereo)
+- ctrl+z undo for anything, stores a redo tree, so if the user hits ctrl+shift+z and there are multiple redo paths, it offers branches with descriptions 
+- any numbber of tracks (start with one; let the user add more if they want) showing the clips that are on them that the user can clips onto or play/pause/resume/skip around on or drag and drop clips onto (snaps them into place when right after another clip), can't put two clips on top of each other in one timeline
+- prominent play button to play all tracks
+Make it in C++ using native windows UI
+
+- also add the ability to change the volume on any given clip or track and the ability to normalize the volume of a clip to match the rest of the track or optionally all clips on all tracks (not counting relatively silent spans - this will be for speaking)
+- and add a voice cleaner effect to clean out background noises (maybe with options like which algorithm to use, how aggressively to clean, etc.)
+- and add save/load project, and of course save audio (all tracks put together) with the same audio save dialog
+
+- oh, and since the project may have different clips of different sample rates or bit depths (which should be resampled to fit into the project, of course (at least when playing) which should be at least 48000 hz internally), have sample rate and bit depth be options in the whole-mix export too
+- internal bit depth should probably be 32?
+
+- i want the clips view on the bottom and the tracks view on top. 
+- and have the tracks view only be as high as it needs to be for the current number of tracks.
+
+- oh, i want the clips to actually have widths proportional to their lengths -- same widths they'll appear in in the tracks. but have a global slider to scale width versus time.
+
+- also, make it so that if you double-click on a clip (or right-click and pick a certain menu option), it loads a version of it in a window that spans the entire window for better selecting. and, if the width per time is too small, or if the user clicks a certain toggle, add a second layer of selection underneath, one for the left side of the selection and one for the right, both centered around the current selection points, that the user can use to fine-tune the exact selection points. or should we just allow a zoom while inside the window to make selections more precise? i think that would be less wieldy.
+
+- oh, and make the voice cleaning option available per clip, per track and whole-project [DONE]
+
+- fine-tune editor fixes [DONE]:
+  - dragging one edge past the other keeps a valid (non-zero) selection [DONE]
+  - Done closes the editor, keeps the current selection, and does NOT prompt to save [DONE]
+  - Crop / Save-selection buttons work inside the fine-tune editor (toolbar overlap fixed) [DONE]
+
+
