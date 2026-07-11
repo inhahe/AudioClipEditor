@@ -121,6 +121,8 @@ struct App {
     int editDrag = 0;              // 0 none, 1 main-select, 2 left strip, 3 right strip
     int64_t stripAnchorStart = 0;  // window start snapshot while dragging a strip
     int64_t stripSpanFrames = 0;   // width (frames) shown by each fine-tune strip
+    int64_t stripFixedEdge = 0;    // the opposite (non-dragged) selection edge, captured at drag start
+    int64_t stripDragFrame = 0;    // frame under the cursor for the strip currently being dragged
     int edHot = 0;                 // hovered editor button (see EB_* below)
     // editor layout rects (rebuilt in computeEditorLayout)
     RECT edMain{}, edRuler{}, edLeft{}, edRight{};
@@ -250,11 +252,15 @@ struct App {
         double t = (double)(x - box.left) / w; t = std::max(0.0, std::min(1.0, t));
         int64_t f = stripAnchorStart + (int64_t)(t * span);
         f = std::max<int64_t>(0, std::min<int64_t>(cf, f));
-        if (editDrag == 2)      selStart = std::min(f, selEnd);
-        else if (editDrag == 3) selEnd   = std::max(f, selStart);
+        stripDragFrame = f;
+        // Keep a valid (non-collapsing) selection even if the dragged edge crosses
+        // the fixed one: the selection is simply the span between the two.
+        selStart = std::min(f, stripFixedEdge);
+        selEnd   = std::max(f, stripFixedEdge);
     }
     void beginStripDrag(int which, int64_t edge, const RECT& box, int x) {
         editDrag = which;
+        stripFixedEdge = (which == 2) ? selEnd : selStart;  // the edge we are NOT dragging
         int64_t ws, we; stripWindow(edge, ws, we); stripAnchorStart = ws;
         updateStripEdge(box, x);
         SetCapture(hwnd); refresh();
@@ -347,8 +353,11 @@ struct App {
         put(EB_CROP, S(120));
         put(EB_SAVE, S(150));
         put(EB_CLEAR, S(120));
-        // Done on the far right
-        edBtn[EB_DONE] = { rc.right - pad - S(96), by, rc.right - pad, by + bh };
+        // Done on the far right, but never overlapping the left button group: if the
+        // window is too narrow, park it right after the last left button instead.
+        int doneW = S(96);
+        int doneLeft = std::max(bx, (int)rc.right - pad - doneW);
+        edBtn[EB_DONE] = { doneLeft, by, doneLeft + doneW, by + bh };
 
         int contentTop = topH + pad;
         int contentBot = rc.bottom - pad;
@@ -552,8 +561,12 @@ struct App {
         // be zero-length; still draw the strips (centred on the moving edges) so
         // they slide with the drag rather than blanking out.
         if (fineOn && (sel || editDrag == 1)) {
-            paintFineStrip(h, edLeft,  L"Start edge", selStart, editDrag == 2, c);
-            paintFineStrip(h, edRight, L"End edge",   selEnd,   editDrag == 3, c);
+            // While a strip is being dragged, keep its knob pinned to the cursor
+            // frame so it tracks smoothly even if it crosses the fixed edge.
+            int64_t leftEdge  = (editDrag == 2) ? stripDragFrame : selStart;
+            int64_t rightEdge = (editDrag == 3) ? stripDragFrame : selEnd;
+            paintFineStrip(h, edLeft,  L"Start edge", leftEdge,  editDrag == 2, c);
+            paintFineStrip(h, edRight, L"End edge",   rightEdge, editDrag == 3, c);
         }
     }
 
