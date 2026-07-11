@@ -8,6 +8,9 @@
 #include <vector>
 #include <cstdio>
 #include <cmath>
+#include <algorithm>
+#include <memory>
+#include <cstring>
 
 using Microsoft::WRL::ComPtr;
 
@@ -24,12 +27,43 @@ const wchar_t* extensionFor(ExportFormat f) {
 }
 const wchar_t* labelFor(ExportFormat f) {
     switch (f) {
-    case ExportFormat::WAV: return L"WAV (PCM 16-bit)";
+    case ExportFormat::WAV: return L"WAV (PCM)";
     case ExportFormat::MP3: return L"MP3";
     case ExportFormat::AAC: return L"AAC (.m4a)";
     case ExportFormat::WMA: return L"Windows Media Audio";
     }
     return L"WAV";
+}
+
+// Linear-resample a canonical float buffer to dstRate (keeps channel count).
+// Returns the original data unchanged when the rate already matches.
+static AudioBufferPtr resampleTo(const AudioBuffer& buf, int dstRate) {
+    auto out = std::make_shared<AudioBuffer>();
+    out->channels = buf.channels;
+    out->sampleRate = dstRate;
+    int ch = buf.channels;
+    int64_t nf = buf.frames();
+    if (dstRate <= 0 || dstRate == buf.sampleRate || nf == 0) {
+        out->sampleRate = (dstRate > 0) ? dstRate : buf.sampleRate;
+        out->samples = buf.samples;
+        return out;
+    }
+    double ratio = (double)buf.sampleRate / (double)dstRate;   // src frames / out frame
+    int64_t outFrames = (int64_t)((double)nf * dstRate / buf.sampleRate);
+    out->samples.resize((size_t)outFrames * ch);
+    const float* s = buf.samples.data();
+    for (int64_t i = 0; i < outFrames; ++i) {
+        double srcPos = (double)i * ratio;
+        int64_t i0 = (int64_t)srcPos;
+        double frac = srcPos - (double)i0;
+        int64_t i1 = std::min<int64_t>(i0 + 1, nf - 1);
+        for (int c = 0; c < ch; ++c) {
+            float a = s[i0 * ch + c];
+            float b = s[i1 * ch + c];
+            out->samples[(size_t)i * ch + c] = a + (float)frac * (b - a);
+        }
+    }
+    return out;
 }
 
 // Convert canonical stereo float -> interleaved int16 with requested channel count.
@@ -52,28 +86,65 @@ static std::vector<int16_t> toInt16(const AudioBuffer& buf, int channels) {
     return out;
 }
 
-// ---------------- WAV (manual RIFF, 16-bit PCM) ----------------
+// ---------------- WAV (manual RIFF; 16/24-bit int PCM or 32-bit float) ----------------
 static bool writeWav(const std::wstring& path, const AudioBuffer& buf,
                      const ExportOptions& opts, std::wstring* err) {
-    std::vector<int16_t> pcm = toInt16(buf, opts.channels);
+    int bits = opts.bitsPerSample;
+    if (bits != 16 && bits != 24 && bits != 32) bits = 16;
+    const bool isFloat = (bits == 32);
+    const int ch = opts.channels;
+    const int sc = buf.channels;
+    const int64_t nf = buf.frames();
+    const int bytesPerSample = bits / 8;
+
+    auto clip = [](float v) { return v < -1.f ? -1.f : v > 1.f ? 1.f : v; };
+
+    std::vector<uint8_t> data;
+    data.reserve((size_t)nf * ch * bytesPerSample);
+    const float* s = buf.samples.data();
+    for (int64_t f = 0; f < nf; ++f) {
+        float l = s[f * sc];
+        float r = sc > 1 ? s[f * sc + 1] : l;
+        for (int c = 0; c < ch; ++c) {
+            float v = clip((ch == 1) ? 0.5f * (l + r) : (c == 0 ? l : r));
+            if (bits == 16) {
+                int16_t q = (int16_t)lrintf(v * 32767.0f);
+                data.push_back((uint8_t)(q & 0xff));
+                data.push_back((uint8_t)((q >> 8) & 0xff));
+            } else if (bits == 24) {
+                int32_t q = (int32_t)lrintf(v * 8388607.0f);
+                data.push_back((uint8_t)(q & 0xff));
+                data.push_back((uint8_t)((q >> 8) & 0xff));
+                data.push_back((uint8_t)((q >> 16) & 0xff));
+            } else { // 32-bit IEEE float
+                float fv = v;
+                uint8_t b[4]; std::memcpy(b, &fv, 4);
+                data.insert(data.end(), b, b + 4);
+            }
+        }
+    }
+
     FILE* fp = _wfopen(path.c_str(), L"wb");
     if (!fp) { if (err) *err = L"Could not open output file."; return false; }
 
-    uint32_t dataBytes = (uint32_t)(pcm.size() * sizeof(int16_t));
-    uint16_t ch = (uint16_t)opts.channels;
+    uint32_t dataBytes = (uint32_t)data.size();
+    uint16_t nch = (uint16_t)ch;
     uint32_t rate = (uint32_t)opts.sampleRate;
-    uint16_t bits = 16;
-    uint16_t blockAlign = ch * bits / 8;
+    uint16_t blockAlign = (uint16_t)(ch * bytesPerSample);
     uint32_t byteRate = rate * blockAlign;
-    uint32_t riffSize = 36 + dataBytes;
+    uint16_t fmtTag = isFloat ? 3 /*WAVE_FORMAT_IEEE_FLOAT*/ : 1 /*WAVE_FORMAT_PCM*/;
+    // float files carry a fact chunk (12 bytes) for strict readers
+    uint32_t factBytes = isFloat ? 12 : 0;
+    uint32_t riffSize = 36 + factBytes + dataBytes;
 
     auto w32 = [&](uint32_t v) { fwrite(&v, 4, 1, fp); };
     auto w16 = [&](uint16_t v) { fwrite(&v, 2, 1, fp); };
     fwrite("RIFF", 1, 4, fp); w32(riffSize); fwrite("WAVE", 1, 4, fp);
-    fwrite("fmt ", 1, 4, fp); w32(16); w16(1); w16(ch);
-    w32(rate); w32(byteRate); w16(blockAlign); w16(bits);
+    fwrite("fmt ", 1, 4, fp); w32(16); w16(fmtTag); w16(nch);
+    w32(rate); w32(byteRate); w16(blockAlign); w16((uint16_t)bits);
+    if (isFloat) { fwrite("fact", 1, 4, fp); w32(4); w32((uint32_t)nf); }
     fwrite("data", 1, 4, fp); w32(dataBytes);
-    if (!pcm.empty()) fwrite(pcm.data(), 1, dataBytes, fp);
+    if (!data.empty()) fwrite(data.data(), 1, dataBytes, fp);
     fclose(fp);
     return true;
 }
@@ -178,9 +249,12 @@ static bool writeMF(const std::wstring& path, const AudioBuffer& buf,
 
 bool encodeFile(const std::wstring& path, const AudioBuffer& buf,
                 const ExportOptions& opts, std::wstring* err) {
+    // Resample to the requested output rate first so the buffer's rate always
+    // matches what the header / encoder is told (otherwise pitch/speed shifts).
+    AudioBufferPtr rb = resampleTo(buf, opts.sampleRate);
     if (opts.format == ExportFormat::WAV)
-        return writeWav(path, buf, opts, err);
-    return writeMF(path, buf, opts, err);
+        return writeWav(path, *rb, opts, err);
+    return writeMF(path, *rb, opts, err);
 }
 
 } // namespace mfio

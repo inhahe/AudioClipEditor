@@ -100,6 +100,47 @@ struct PlaybackEngine::Impl {
     bool isFloat = false;
     int bits = 32;
     int dchannels = 2;
+
+    // resampler (source/project rate -> device rate), active only when they differ
+    bool rsActive = false;
+    double rsRatio = 1.0;           // source frames advanced per output frame
+    double rsFrac = 0.0;
+    bool rsPrimed = false;
+    float rsPrev[2]{ 0, 0 }, rsNext[2]{ 0, 0 };
+
+    void resetRs() { rsPrimed = false; rsFrac = 0.0; }
+
+    // Pull one stereo source frame; false when the source is drained.
+    bool pullSrcFrame(float o[2]) {
+        float tmp[2];
+        if (!source || source->render(tmp, 1) < 1) return false;
+        o[0] = tmp[0]; o[1] = tmp[1];
+        return true;
+    }
+    // Linear-resample the source into `frames` device frames. Returns frames
+    // produced; fewer than requested means the source drained.
+    int renderResampled(float* out, int frames) {
+        if (!rsPrimed) {
+            if (!pullSrcFrame(rsPrev)) return 0;
+            if (!pullSrcFrame(rsNext)) { rsNext[0] = rsPrev[0]; rsNext[1] = rsPrev[1]; }
+            rsFrac = 0.0; rsPrimed = true;
+        }
+        int produced = 0;
+        for (int i = 0; i < frames; ++i) {
+            out[i * 2]     = rsPrev[0] + (float)rsFrac * (rsNext[0] - rsPrev[0]);
+            out[i * 2 + 1] = rsPrev[1] + (float)rsFrac * (rsNext[1] - rsPrev[1]);
+            ++produced;
+            rsFrac += rsRatio;
+            bool ended = false;
+            while (rsFrac >= 1.0) {
+                rsFrac -= 1.0;
+                rsPrev[0] = rsNext[0]; rsPrev[1] = rsNext[1];
+                if (!pullSrcFrame(rsNext)) { ended = true; break; }
+            }
+            if (ended) return produced;
+        }
+        return produced;
+    }
 };
 
 PlaybackEngine::PlaybackEngine() = default;
@@ -152,10 +193,22 @@ bool PlaybackEngine::init(std::wstring* err) {
     if (FAILED(hr)) return fail(L"Could not get render client.");
 
     d_->mixbuf.resize((size_t)d_->bufferFrames * 2);
+    // apply any source rate requested before init()
+    d_->rsActive = (srcRate_ > 0 && srcRate_ != sampleRate_);
+    d_->rsRatio = (srcRate_ > 0) ? (double)srcRate_ / (double)sampleRate_ : 1.0;
     d_->running = true;
     d_->client->Start();
     d_->thread = std::thread([this] { threadMain(); });
     return true;
+}
+
+void PlaybackEngine::setSourceRate(int rate) {
+    srcRate_ = rate;
+    if (!d_) return;
+    std::lock_guard<std::mutex> lk(d_->mtx);
+    d_->rsActive = (rate > 0 && rate != sampleRate_);
+    d_->rsRatio = (rate > 0) ? (double)rate / (double)sampleRate_ : 1.0;
+    d_->resetRs();
 }
 
 void PlaybackEngine::shutdown() {
@@ -195,7 +248,7 @@ void PlaybackEngine::writeFrames(void* dst, const float* stereo, int frames) {
             for (int c = 0; c < dch; ++c) {
                 float v = (dch == 1) ? 0.5f * (l + r) : (c == 0 ? l : c == 1 ? r : 0.0f);
                 v = std::max(-1.0f, std::min(1.0f, v));
-                o[i * dch + c] = (int32_t)llrintf(v * 2147483647.0);
+                o[i * dch + c] = (int32_t)llrint((double)v * 2147483647.0);
             }
         }
     }
@@ -224,7 +277,8 @@ void PlaybackEngine::threadMain() {
         {
             std::lock_guard<std::mutex> lk(d_->mtx);
             if (d_->source && !d_->paused && !d_->drained) {
-                produced = d_->source->render(d_->mixbuf.data(), (int)avail);
+                produced = d_->rsActive ? d_->renderResampled(d_->mixbuf.data(), (int)avail)
+                                        : d_->source->render(d_->mixbuf.data(), (int)avail);
                 if (produced < (int)avail) {
                     // zero the tail
                     std::memset(d_->mixbuf.data() + produced * 2, 0,
@@ -252,6 +306,7 @@ void PlaybackEngine::play(std::shared_ptr<IPlaybackSource> src, int64_t startFra
     if (d_->source) d_->source->seek(startFrame);
     d_->paused = false;
     d_->drained = false;
+    d_->resetRs();
 }
 void PlaybackEngine::pause() {
     std::lock_guard<std::mutex> lk(d_->mtx);
@@ -266,12 +321,14 @@ void PlaybackEngine::stop() {
     d_->source.reset();
     d_->paused = true;
     d_->drained = false;
+    d_->resetRs();
 }
 void PlaybackEngine::seek(int64_t frame) {
     std::lock_guard<std::mutex> lk(d_->mtx);
     if (d_->source) {
         d_->source->seek(frame);
         d_->drained = false;
+        d_->resetRs();
     }
 }
 bool PlaybackEngine::isPlaying() const {

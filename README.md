@@ -42,7 +42,13 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   whole library and timeline (audio embedded), so a project is fully
   self-contained. `Ctrl+S` saves; the File menu has Open / Save / Save As.
 - **Export the mixdown.** *File → Export Mixdown* renders all tracks together and
-  saves through the same audio dialog (format, bitrate, mono/stereo).
+  saves through the same audio dialog — pick **format, sample rate, bit depth**
+  (16/24-bit PCM or 32-bit float for WAV), **bitrate** (compressed formats), and
+  mono/stereo. The mix is resampled to the chosen output rate on the way out.
+- **Mixed source rates are unified.** Clips can come from files of any sample rate
+  or bit depth; each is resampled to the project's internal rate on load. The
+  project runs at **≥ 48 kHz internally** and the engine resamples to the audio
+  device on playback, so nothing plays back at the wrong pitch.
 - **Menu bar** (File / Edit / Track / Help) mirrors the toolbar and adds project
   I/O, mixdown export, and a Controls reference.
 
@@ -96,8 +102,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `audio_buffer.h` | Canonical float PCM buffer + peak (volume-graph) cache |
 | `model.h` | `Clip`, `Track`, `PlacedClip`, `Project` |
 | `decoder.{h,cpp}` | Media Foundation Source Reader → stereo float at the device rate |
-| `encoder.{h,cpp}` | WAV (manual RIFF) + Media Foundation Sink Writer (MP3/AAC/WMA) |
-| `engine.{h,cpp}` | WASAPI render engine; `BufferSource` (preview) + `TimelineSource` (mix all tracks) |
+| `encoder.{h,cpp}` | WAV (manual RIFF, 16/24-bit PCM or 32-bit float) + Media Foundation Sink Writer (MP3/AAC/WMA); resamples to the chosen output rate |
+| `engine.{h,cpp}` | WASAPI render engine; `BufferSource` (preview) + `TimelineSource` (mix all tracks); linear-resamples the project rate to the device rate on the audio thread |
 | `undo.h` | Snapshot-based undo **tree** with branching redo |
 | `document.{h,cpp}` | Owns the project + undo tree; every edit commits a snapshot |
 | `waveform.{h,cpp}` | GDI filled volume-graph rendering |
@@ -106,6 +112,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `ui.cpp` | Main window: menu bar, layout, painting, hit-testing, all interaction |
 | `selftest.cpp` | `--selftest` backend round-trip checks (decode/encode/peaks/DSP) |
 
-All audio is decoded to the output device's mix sample rate and stereo float, so
-playback needs no resampling. Channel/format conversion (mono downmix, bitrate,
-container) happens only at export time.
+All audio is decoded to the project's internal rate (**max(48 kHz, device mix
+rate)**) as stereo float, so clips of any source rate/bit depth are unified. When
+the device mix rate is below the internal rate, the engine linear-resamples on
+the audio thread during playback. Sample-rate / bit-depth / channel / container
+conversion for output happens at export time.

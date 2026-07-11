@@ -126,6 +126,32 @@ int runSelfTest() {
         check(clean2 && clean2->frames() > 0, L"denoise wiener", clean2 ? L"" : L"null");
     }
 
+    // Export sample-rate conversion + bit depths
+    {
+        struct { int rate; int bits; const wchar_t* tag; } cases[] = {
+            { 44100, 16, L"WAV 44100/16" },
+            { 48000, 24, L"WAV 48000/24" },
+            { 96000, 32, L"WAV 96000/32f" },
+        };
+        for (auto& C : cases) {
+            std::wstring p = dir + L"\\_selftest_" + std::to_wstring(C.rate) + L"_" +
+                             std::to_wstring(C.bits) + L".wav";
+            mfio::ExportOptions eo; eo.format = mfio::ExportFormat::WAV;
+            eo.sampleRate = C.rate; eo.bitsPerSample = C.bits; eo.channels = 2;
+            std::wstring e2;
+            bool wok2 = mfio::encodeFile(p, *sine, eo, &e2);
+            if (wok2) {
+                auto dec = mfio::decodeFile(p, rate, &e2);   // decode back to project rate
+                // duration must be preserved (within 0.1s) despite the rate change
+                bool ok = dec && std::llabs(dec->frames() - sine->frames()) < rate / 10 && rms(*dec) > 0.1;
+                check(ok, std::wstring(L"export ") + C.tag,
+                      dec ? (L"frames=" + std::to_wstring(dec->frames()) + L" rms=" + std::to_wstring(rms(*dec))) : e2);
+            } else {
+                check(false, std::wstring(L"export ") + C.tag, e2);
+            }
+        }
+    }
+
     // Slicing (crop) sanity
     auto slice = std::make_shared<AudioBuffer>();
     slice->sampleRate = rate; slice->channels = 2;

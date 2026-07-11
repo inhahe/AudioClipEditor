@@ -112,17 +112,20 @@ struct ExportState {
     mfio::ExportOptions* opts;
     std::wstring* path;
     std::wstring suggested;
-    HWND cbFormat, cbBitrate, cbChannels;
+    HWND cbFormat, cbRate, cbBits, cbBitrate, cbChannels;
     bool ok = false;
     HWND parent;
 };
 
 static const int kBitrates[] = { 96, 128, 160, 192, 256, 320 };
+static const int kRates[]    = { 22050, 32000, 44100, 48000, 96000 };
+static const int kBits[]     = { 16, 24, 32 };   // 32 = IEEE float (WAV only)
 
-static void updateBitrateEnable(ExportState* st) {
+static void updateExportEnable(ExportState* st) {
     int fi = (int)SendMessageW(st->cbFormat, CB_GETCURSEL, 0, 0);
     bool isWav = (fi == 0);
-    EnableWindow(st->cbBitrate, !isWav);
+    EnableWindow(st->cbBitrate, !isWav);   // bitrate only for compressed formats
+    EnableWindow(st->cbBits, isWav);       // bit depth only for WAV
 }
 
 static LRESULT CALLBACK ExportProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -130,16 +133,20 @@ static LRESULT CALLBACK ExportProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_COMMAND:
         if (HIWORD(w) == CBN_SELCHANGE && (HWND)l == st->cbFormat) {
-            updateBitrateEnable(st);
+            updateExportEnable(st);
             return 0;
         }
         if (LOWORD(w) == IDCANCEL) { st->ok = false; DestroyWindow(h); return 0; }
         if (LOWORD(w) == IDOK) {
             int fi = (int)SendMessageW(st->cbFormat, CB_GETCURSEL, 0, 0);
+            int ri = (int)SendMessageW(st->cbRate, CB_GETCURSEL, 0, 0);
+            int di = (int)SendMessageW(st->cbBits, CB_GETCURSEL, 0, 0);
             int bi = (int)SendMessageW(st->cbBitrate, CB_GETCURSEL, 0, 0);
             int ci = (int)SendMessageW(st->cbChannels, CB_GETCURSEL, 0, 0);
             mfio::ExportFormat fmt = (mfio::ExportFormat)fi;
             st->opts->format = fmt;
+            st->opts->sampleRate = kRates[ri < 0 ? 3 : ri];
+            st->opts->bitsPerSample = kBits[di < 0 ? 0 : di];
             st->opts->bitrateKbps = kBitrates[bi < 0 ? 3 : bi];
             st->opts->channels = (ci == 1) ? 1 : 2;
 
@@ -184,7 +191,7 @@ bool exportOptions(HWND parent, mfio::ExportOptions& opts, std::wstring& outPath
     ExportState st; st.opts = &opts; st.path = &outPath; st.suggested = suggestedName; st.parent = parent;
 
     RECT pr; GetWindowRect(parent, &pr);
-    int W = 360, H = 220;
+    int W = 360, H = 304;
     int x = pr.left + ((pr.right - pr.left) - W) / 2;
     int y = pr.top + ((pr.bottom - pr.top) - H) / 2;
     HWND h = CreateWindowExW(WS_EX_DLGMODALFRAME, L"ACE_Export", L"Save As...",
@@ -192,21 +199,29 @@ bool exportOptions(HWND parent, mfio::ExportOptions& opts, std::wstring& outPath
     SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
 
     auto label = [&](const wchar_t* t, int yy) {
-        HWND c = CreateWindowW(L"STATIC", t, WS_CHILD | WS_VISIBLE, 16, yy, 90, 20, h, nullptr, hInst, nullptr);
+        HWND c = CreateWindowW(L"STATIC", t, WS_CHILD | WS_VISIBLE, 16, yy, 96, 20, h, nullptr, hInst, nullptr);
         SendMessageW(c, WM_SETFONT, (WPARAM)guiFont(), TRUE);
     };
     auto combo = [&](int yy) {
         HWND c = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
-            116, yy, 220, 200, h, nullptr, hInst, nullptr);
+            120, yy, 216, 200, h, nullptr, hInst, nullptr);
         SendMessageW(c, WM_SETFONT, (WPARAM)guiFont(), TRUE);
         return c;
     };
-    label(L"File type:", 18);   st.cbFormat = combo(16);
-    label(L"Bitrate:", 54);     st.cbBitrate = combo(52);
-    label(L"Channels:", 90);    st.cbChannels = combo(88);
+    label(L"File type:", 18);     st.cbFormat = combo(16);
+    label(L"Sample rate:", 54);   st.cbRate = combo(52);
+    label(L"Bit depth:", 90);     st.cbBits = combo(88);
+    label(L"Bitrate:", 126);      st.cbBitrate = combo(124);
+    label(L"Channels:", 162);     st.cbChannels = combo(160);
 
-    for (auto* f : { L"WAV (PCM 16-bit)", L"MP3", L"AAC (.m4a)", L"Windows Media Audio" })
+    for (auto* f : { L"WAV (PCM)", L"MP3", L"AAC (.m4a)", L"Windows Media Audio" })
         SendMessageW(st.cbFormat, CB_ADDSTRING, 0, (LPARAM)f);
+    for (int r : kRates) {
+        std::wstring s = std::to_wstring(r) + L" Hz";
+        SendMessageW(st.cbRate, CB_ADDSTRING, 0, (LPARAM)s.c_str());
+    }
+    for (auto* b : { L"16-bit", L"24-bit", L"32-bit float" })
+        SendMessageW(st.cbBits, CB_ADDSTRING, 0, (LPARAM)b);
     for (int b : kBitrates) {
         std::wstring s = std::to_wstring(b) + L" kbps";
         SendMessageW(st.cbBitrate, CB_ADDSTRING, 0, (LPARAM)s.c_str());
@@ -215,20 +230,23 @@ bool exportOptions(HWND parent, mfio::ExportOptions& opts, std::wstring& outPath
     SendMessageW(st.cbChannels, CB_ADDSTRING, 0, (LPARAM)L"Mono");
 
     // defaults
-    int fmtIdx = (int)opts.format;
-    SendMessageW(st.cbFormat, CB_SETCURSEL, fmtIdx, 0);
+    SendMessageW(st.cbFormat, CB_SETCURSEL, (int)opts.format, 0);
+    int rIdx = 3; for (int i = 0; i < 5; ++i) if (kRates[i] == opts.sampleRate) rIdx = i;
+    SendMessageW(st.cbRate, CB_SETCURSEL, rIdx, 0);
+    int dIdx = 0; for (int i = 0; i < 3; ++i) if (kBits[i] == opts.bitsPerSample) dIdx = i;
+    SendMessageW(st.cbBits, CB_SETCURSEL, dIdx, 0);
     int brIdx = 3; for (int i = 0; i < 6; ++i) if (kBitrates[i] == opts.bitrateKbps) brIdx = i;
     SendMessageW(st.cbBitrate, CB_SETCURSEL, brIdx, 0);
     SendMessageW(st.cbChannels, CB_SETCURSEL, opts.channels == 1 ? 1 : 0, 0);
 
     HWND ok = CreateWindowW(L"BUTTON", L"Save...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-        150, 140, 88, 30, h, (HMENU)IDOK, hInst, nullptr);
+        150, 224, 88, 30, h, (HMENU)IDOK, hInst, nullptr);
     HWND cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-        246, 140, 88, 30, h, (HMENU)IDCANCEL, hInst, nullptr);
+        246, 224, 88, 30, h, (HMENU)IDCANCEL, hInst, nullptr);
     SendMessageW(ok, WM_SETFONT, (WPARAM)guiFont(), TRUE);
     SendMessageW(cancel, WM_SETFONT, (WPARAM)guiFont(), TRUE);
 
-    updateBitrateEnable(&st);
+    updateExportEnable(&st);
     SetFocus(st.cbFormat);
     runModal(h, parent);
     return st.ok;

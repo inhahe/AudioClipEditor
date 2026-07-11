@@ -65,7 +65,12 @@ public:
     bool init(std::wstring* err = nullptr);
     void shutdown();
 
-    int sampleRate() const { return sampleRate_; }
+    int sampleRate() const { return sampleRate_; }   // audio device (output) rate
+
+    // Rate of the audio in the sources (the project/internal rate). If it differs
+    // from the device rate, the engine linear-resamples on the audio thread so the
+    // internal project rate can stay >= 48 kHz regardless of the device mix rate.
+    void setSourceRate(int rate);
 
     // Called (from the audio thread) when the active source drains fully.
     void setEndCallback(std::function<void()> cb) { endCb_ = std::move(cb); }
@@ -89,5 +94,6 @@ private:
     struct Impl;
     std::unique_ptr<Impl> d_;
     std::function<void()> endCb_;
-    int sampleRate_ = 48000;
+    int sampleRate_ = 48000;    // device output rate
+    int srcRate_ = 0;           // project/source rate (0 = same as device)
 };

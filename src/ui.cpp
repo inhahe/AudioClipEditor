@@ -706,6 +706,9 @@ struct App {
         if (path.empty()) return;
         if (!doc.loadProject(path)) { MessageBoxW(hwnd, L"Could not open project.", L"Open", MB_ICONWARNING); return; }
         stopAll();
+        // Follow the loaded project's internal rate so playback resamples correctly.
+        rate = doc.project().sampleRate > 0 ? doc.project().sampleRate : rate;
+        engine.setSourceRate(rate);
         projectPath = path;
         selClipId = -1; selStart = selEnd = 0; previewClipId = -1; timelinePlaying = false; playheadFrame = 0;
         libScroll = tlScrollX = tlScrollY = 0;
@@ -1233,7 +1236,12 @@ int runApp(HINSTANCE hInst, int nCmdShow) {
     if (!app.engine.init(&engErr))
         MessageBoxW(nullptr, (L"Audio output unavailable: " + engErr + L"\nPlayback will be silent.").c_str(),
                     L"Audio warning", MB_ICONWARNING);
-    app.rate = app.engine.sampleRate() > 0 ? app.engine.sampleRate() : 48000;
+    // Project runs at >= 48 kHz internally regardless of the device mix rate; the
+    // engine resamples to the device on playback. Source files are decoded to this
+    // rate on load, so clips of any rate/bit depth are unified into the project.
+    int devRate = app.engine.sampleRate() > 0 ? app.engine.sampleRate() : 48000;
+    app.rate = std::max(48000, devRate);
+    app.engine.setSourceRate(app.rate);
     app.doc.init(app.rate);
 
     WNDCLASSEXW wc{}; wc.cbSize = sizeof(wc);

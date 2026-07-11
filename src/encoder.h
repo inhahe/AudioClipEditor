@@ -9,7 +9,8 @@ enum class ExportFormat { WAV, MP3, AAC, WMA };
 struct ExportOptions {
     ExportFormat format = ExportFormat::WAV;
     int channels = 2;           // 1 = mono, 2 = stereo
-    int sampleRate = 48000;
+    int sampleRate = 48000;     // output rate; buffer is resampled to this
+    int bitsPerSample = 16;     // WAV only: 16, 24 (int PCM) or 32 (IEEE float)
     int bitrateKbps = 192;      // for compressed formats
 };
 
