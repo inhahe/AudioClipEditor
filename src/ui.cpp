@@ -182,17 +182,25 @@ struct App {
     }
     void closeClipEditor() { editClipId = -1; editDrag = 0; refresh(); }
 
-    // does the editor currently need the fine-tune strips?
-    bool editFineNeeded() const {
-        if (!hasSel() || selClipId != editClipId) return false;
-        if (editDrag == 1) return false;   // don't reflow while dragging a main selection
+    // Are the fine-tune strips applicable to this clip at all (toggle on, or the
+    // main view too coarse to nudge precisely by hand)? Independent of selection.
+    bool editFineApplicable() const {
+        if (selClipId != editClipId) return false;
         if (editFineToggle) return true;
         int64_t cf = editClipFrames();
         if (cf <= 0) return false;
         double durSec = (double)cf / rate;
         int w = std::max(1, (int)(edMain.right - edMain.left));
         double pxPerSecMain = w / std::max(0.001, durSec);
-        return pxPerSecMain < 100.0;   // too coarse to nudge precisely by hand
+        return pxPerSecMain < 100.0;
+    }
+    // does the editor currently need the fine-tune strips?
+    bool editFineNeeded() const {
+        if (!editFineApplicable()) return false;
+        // Keep the strips reserved while dragging a main-waveform edge so they
+        // stay put and slide to follow the moving selection instead of vanishing.
+        if (editDrag == 1) return true;
+        return hasSel() && selClipId == editClipId;
     }
 
     int edMainX(int64_t f) const {
@@ -538,8 +546,10 @@ struct App {
             }
         }
 
-        // fine-tune strips
-        if (fineOn && sel) {
+        // fine-tune strips. During a main-edge drag the selection may momentarily
+        // be zero-length; still draw the strips (centred on the moving edges) so
+        // they slide with the drag rather than blanking out.
+        if (fineOn && (sel || editDrag == 1)) {
             paintFineStrip(h, edLeft,  L"Start edge", selStart, editDrag == 2, c);
             paintFineStrip(h, edRight, L"End edge",   selEnd,   editDrag == 3, c);
         }
