@@ -33,9 +33,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   time via the **Fine-tune edges** toggle, and each strip **wheel-zooms** to dial in
   the window. `Esc` closes the editor.
 - **Crop a clip** to the selection — the **Crop** button (or right-click → Crop).
-  You're asked whether to **overwrite the original file**, **save as a new file**
-  (a Save-As dialog with file type, bitrate, and mono/stereo), or just trim it in
-  the editor.
+  Cropping only trims the clip inside the editor (a single undo step); it **never
+  overwrites or deletes the original file on disk**. To keep a cropped copy, use
+  **Save sel** (save the selection as a new clip) or export.
 - **Undo/redo tree.** `Ctrl+Z` undoes anything. `Ctrl+Shift+Z` redoes — and when
   the history has branched, it pops up a menu of the redo branches with
   descriptions so you can pick which future to walk into.

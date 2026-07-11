@@ -1054,51 +1054,15 @@ struct App {
         if (!hasSel()) return;
         Clip* c = doc.project().findClip(selClipId);
         if (!c || !c->buffer) return;
-        int id = c->id; std::wstring nm = c->name; std::wstring srcPath = c->sourcePath;
+        int id = c->id; std::wstring nm = c->name;
         auto slice = sliceBuffer(*c->buffer, selStart, selEnd);
 
-        int choice = MessageBoxW(hwnd,
-            L"Crop this clip to the current selection.\n\n"
-            L"YES  - overwrite the original file on disk\n"
-            L"NO   - save the cropped audio as a new file\n"
-            L"CANCEL - just trim the clip in the editor",
-            L"Crop clip", MB_YESNOCANCEL | MB_ICONQUESTION);
-
-        // Always trim the in-editor clip (undoable) unless the user cancelled outright?
-        // Cancel here means "just trim in editor" per the prompt.
+        // Crop only trims the clip in-editor (undoable). We never overwrite or
+        // delete the original file on disk — to keep a cropped copy, use
+        // "Save selection as clip" or export.
         doc.replaceClipBuffer(id, slice, L"Crop '" + nm + L"'");
-        // reset selection to whole new clip
         selStart = 0; selEnd = 0; selClipId = -1;
-
-        if (choice == IDYES) {
-            if (srcPath.empty()) {
-                MessageBoxW(hwnd, L"This clip has no source file; use Save As instead.", L"Crop", MB_ICONINFORMATION);
-            } else {
-                mfio::ExportOptions o; o.sampleRate = rate; o.channels = slice->channels;
-                o.format = formatFromExt(srcPath); o.bitrateKbps = 192;
-                std::wstring err;
-                if (!mfio::encodeFile(srcPath, *slice, o, &err))
-                    MessageBoxW(hwnd, err.c_str(), L"Could not overwrite", MB_ICONWARNING);
-            }
-        } else if (choice == IDNO) {
-            mfio::ExportOptions o; o.sampleRate = rate; o.channels = slice->channels; o.format = mfio::ExportFormat::WAV;
-            std::wstring outPath;
-            if (dlg::exportOptions(hwnd, o, outPath, nm)) {
-                std::wstring err;
-                if (!mfio::encodeFile(outPath, *slice, o, &err))
-                    MessageBoxW(hwnd, err.c_str(), L"Could not save", MB_ICONWARNING);
-            }
-        }
         refresh();
-    }
-
-    static mfio::ExportFormat formatFromExt(const std::wstring& path) {
-        std::wstring e = PathFindExtensionW(path.c_str());
-        for (auto& c : e) c = towlower(c);
-        if (e == L".mp3") return mfio::ExportFormat::MP3;
-        if (e == L".m4a" || e == L".aac" || e == L".mp4") return mfio::ExportFormat::AAC;
-        if (e == L".wma") return mfio::ExportFormat::WMA;
-        return mfio::ExportFormat::WAV;
     }
 
     void renameClip(int id) {
