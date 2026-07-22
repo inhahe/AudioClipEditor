@@ -89,6 +89,7 @@ struct App {
     RECT zoomRc{};                 // global time-scale slider (transport bar)
 
     std::wstring projectPath;      // current .acep path (empty = unsaved)
+    bool lastTitleDirty = false;   // last unsaved-changes state reflected in the title
 
     // scroll / zoom
     int libScroll = 0, libContentH = 0;
@@ -1354,9 +1355,11 @@ struct App {
     void setTitle() {
         std::wstring t = L"Audio Clip Editor";
         if (!projectPath.empty()) t += std::wstring(L" \u2014 ") + PathFindFileNameW(projectPath.c_str());
+        if (doc.isModified()) t += L" *";
         SetWindowTextW(hwnd, t.c_str());
     }
     void openProjectFile() {
+        if (!confirmDiscardChanges()) return;
         std::wstring path = dlg::openProject(hwnd);
         if (path.empty()) return;
         if (!doc.loadProject(path)) { MessageBoxW(hwnd, L"Could not open project.", L"Open", MB_ICONWARNING); return; }
@@ -1376,10 +1379,29 @@ struct App {
         if (!doc.saveProject(path)) { MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING); return false; }
         projectPath = path; setTitle(); return true;
     }
-    void saveProjectFile() {
-        if (projectPath.empty()) { saveProjectAs(); return; }
-        if (!doc.saveProject(projectPath))
+    bool saveProjectFile() {
+        if (projectPath.empty()) return saveProjectAs();
+        if (!doc.saveProject(projectPath)) {
             MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING);
+            return false;
+        }
+        setTitle();
+        return true;
+    }
+    // Guard against losing unsaved work before an action that discards the current
+    // project (exit, open another project). Returns true if the caller may proceed
+    // (saved, or the user chose to discard); false to cancel the action.
+    bool confirmDiscardChanges() {
+        if (!doc.isModified()) return true;
+        std::wstring name = projectPath.empty() ? L"this project"
+                          : std::wstring(L"\u201C") + PathFindFileNameW(projectPath.c_str()) + L"\u201D";
+        int r = MessageBoxW(hwnd,
+            (L"Save changes to " + name + L" before closing?").c_str(),
+            L"Audio Clip Editor",
+            MB_YESNOCANCEL | MB_ICONWARNING);
+        if (r == IDCANCEL) return false;
+        if (r == IDNO) return true;      // discard
+        return saveProjectFile();         // IDYES: proceed only if the save succeeds
     }
     void exportMix() {
         auto mix = doc.renderMix();
@@ -1910,7 +1932,7 @@ struct App {
         case IDC_SAVEPROJ: saveProjectFile(); break;
         case IDC_SAVEPROJAS: saveProjectAs(); break;
         case IDC_EXPORTMIX: exportMix(); break;
-        case IDC_EXIT: DestroyWindow(hwnd); break;
+        case IDC_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
         case IDC_UNDO: doUndo(); break;
         case IDC_REDO: doRedo(); break;
         case IDC_ADDTRACK: addTrackAndReveal(); break;
@@ -1966,6 +1988,8 @@ struct App {
 
     // --------------------------------------------------------- timer / playend
     void onTimer() {
+        // Keep the title's unsaved-changes marker (" *") in sync as edits happen.
+        if (doc.isModified() != lastTitleDirty) { lastTitleDirty = doc.isModified(); setTitle(); }
         if (engine.isPlaying()) {
             if (timelinePlaying) playheadFrame = engine.position();
             else if (previewClipId >= 0) {
@@ -2038,6 +2062,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND: if (HIWORD(wp) == 0 && lp == 0) { a->onCommand(LOWORD(wp)); return 0; } break;
     case WM_TIMER: a->onTimer(); return 0;
     case WM_APP_PLAYEND: a->onPlayEnd(); return 0;
+    case WM_CLOSE:
+        if (a && !a->confirmDiscardChanges()) return 0;  // user cancelled exit
+        DestroyWindow(hwnd);
+        return 0;
     case WM_DESTROY: saveWindowPlacement(hwnd); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);

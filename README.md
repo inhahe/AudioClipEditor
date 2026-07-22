@@ -81,7 +81,10 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   used floats to the top). Captures live for the session.
 - **Save / load projects.** Projects are saved as a single `.acep` file with the
   whole library and timeline (audio embedded), so a project is fully
-  self-contained. `Ctrl+S` saves; the File menu has Open / Save / Save As.
+  self-contained. `Ctrl+S` saves; the File menu has Open / Save / Save As. The
+  title bar shows a `*` while there are unsaved changes, and the app **prompts you
+  to save** (Save / Don't Save / Cancel) before closing or opening another project
+  if the current one has unsaved edits — so you never lose work by accident.
 - **Export the mixdown.** *File → Export Mixdown* renders all tracks together and
   saves through the same audio dialog — pick **format, sample rate, bit depth**
   (16/24-bit PCM or 32-bit float for WAV), **bitrate** (compressed formats), and

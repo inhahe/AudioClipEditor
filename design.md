@@ -16,7 +16,7 @@ sync with behavior changes.
 | `encoder.{h,cpp}` | WAV writer (manual RIFF; 16/24-bit PCM, 32-bit float) + MF Sink Writer (MP3/AAC/WMA); output-rate resampling |
 | `engine.{h,cpp}` | WASAPI shared-mode render thread; `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
 | `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker |
-| `document.{h,cpp}` | Owns `Project` + undo tree; all mutations go through `commit(desc)` |
+| `document.{h,cpp}` | Owns `Project` + undo tree; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`) |
 | `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms (see below) |
 | `waveform.{h,cpp}` | GDI oscilloscope: min/max envelope zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, file/project pickers |
@@ -172,3 +172,15 @@ dispatch through `denoise()` incl. missing-profile rejection.
 
 Voice cleaning (any algorithm) replaces clip buffers and commits **one snapshot
 per operation** — a track-wide or project-wide clean is a single undo step.
+
+## Unsaved-changes guard
+
+`Document` remembers the undo node that was current at the last save/load/new
+(`savedNode_`, set by `markSaved()` in `init`/`saveProject`/`loadProject`).
+`isModified()` is simply `undo_.current() != savedNode_`, so undoing back to the
+saved state clears the dirty flag and redoing away re-sets it — no separate dirty
+bit to keep in sync with the history. The UI shows a `*` in the title bar while
+modified (refreshed from `onTimer` when the flag flips) and calls
+`App::confirmDiscardChanges()` — a Yes/No/Cancel *"Save changes…?"* box — before
+any project-discarding action (`WM_CLOSE`/exit, opening another project). Cancel
+aborts the action; Yes proceeds only if the save actually succeeds.

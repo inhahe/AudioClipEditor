@@ -63,9 +63,18 @@ public:
 
     int newClipId();  // allocate without committing (caller commits)
 
+    // --- Unsaved-changes tracking ---
+    // The "saved" marker is the undo node that was current when the project was
+    // last saved (or freshly loaded/created). The project is modified iff the
+    // current undo node differs from it — so undoing back to the saved state
+    // clears the dirty flag, and redoing away sets it again.
+    void markSaved() { savedNode_ = undo_.current(); }
+    bool isModified() const { return undo_.current() != savedNode_; }
+
 private:
     void commit(const std::wstring& desc) { undo_.commit(project_, desc); }
 
     Project project_;
     UndoTree undo_;
+    const UndoNode* savedNode_ = nullptr;
 };

@@ -13,6 +13,7 @@ void Document::init(int sampleRate) {
     t.name = L"Track 1";
     project_.tracks.push_back(std::move(t));
     undo_.init(project_);
+    markSaved();
 }
 
 PeakCachePtr Document::buildPeaks(const AudioBufferPtr& buf) {
@@ -290,6 +291,7 @@ bool Document::saveProject(const std::wstring& path) {
         for (auto& pc : t.clips) { wI32(f, pc.clipId); wI64(f, pc.startFrame); wI64(f, pc.lengthFrames); }
     }
     fclose(f);
+    markSaved();
     return true;
 }
 
@@ -338,6 +340,7 @@ bool Document::loadProject(const std::wstring& path) {
 
     project_ = p;
     undo_.init(project_);   // fresh history for loaded project
+    markSaved();
     return true;
 }
 
