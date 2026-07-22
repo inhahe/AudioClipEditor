@@ -1,0 +1,129 @@
+# Audio Clip Editor — Design
+
+Native-Windows audio clip editor: C++20, Win32 API only (no dialog resources — all
+UI is `CreateWindowW` + owner-drawn painting), Media Foundation for decode/encode,
+WASAPI for playback. No external audio libraries. Built with CMake + MSVC; the exe
+lands in `bin/AudioClipEditor.exe`. `README.md` is the user-facing doc — keep it in
+sync with behavior changes.
+
+## Module map
+
+| File | Role |
+|---|---|
+| `audio_buffer.h` | `AudioBuffer` (interleaved float PCM, `sampleRate`/`channels`/`samples`), `AudioBufferPtr` (`shared_ptr`), `PeakCache` min/max bucket envelope for waveform drawing |
+| `model.h` | `Clip` (id, name, buffer, peaks, gain), `Track` (id, name, gain, placed clips), `PlacedClip` (clipId + start frame), `Project` |
+| `decoder.{h,cpp}` | MF Source Reader → stereo float at the project rate |
+| `encoder.{h,cpp}` | WAV writer (manual RIFF; 16/24-bit PCM, 32-bit float) + MF Sink Writer (MP3/AAC/WMA); output-rate resampling |
+| `engine.{h,cpp}` | WASAPI shared-mode render thread; `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
+| `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker |
+| `document.{h,cpp}` | Owns `Project` + undo tree; all mutations go through `commit(desc)` |
+| `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms (see below) |
+| `waveform.{h,cpp}` | GDI oscilloscope: min/max envelope zoomed out, per-sample trace zoomed in |
+| `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, file/project pickers |
+| `ui.cpp` | The whole main window: `App` struct, layout, painting, hit-testing, menus, drag/drop, full-window clip editor |
+| `main.cpp` | `wWinMain` → `--selftest` or `runApp()` |
+| `selftest.cpp` | Headless `--selftest`: decode/encode round-trips, DSP checks, writes `bin/selftest.log` |
+
+## Core invariants
+
+- **One internal sample rate.** Everything is resampled on load to
+  `max(48000, device mix rate)`, stereo interleaved float. DSP and the timeline
+  never see mixed rates; export resamples out.
+- **Buffers are immutable-by-convention.** Edits produce new `AudioBuffer`s
+  (`sliceBuffer`, DSP returns fresh buffers); `Document::commit` snapshots the
+  whole project for undo. Never mutate a buffer that a snapshot might share.
+- **No dangling pointers into containers.** Clips/tracks are found by id at use
+  time (`findClip(id)`), never held as pointers across mutations.
+- **UI thread owns everything except the WASAPI render callback**, which only
+  reads through the engine's source objects (swapped under a lock).
+
+## DSP: noise reduction (`dsp.{h,cpp}`)
+
+Three algorithms behind one entry point `dsp::denoise(buf, NROptions)`:
+
+1. **SpectralSubtraction** / 2. **Wiener** — automatic: STFT (1024/hop 256),
+   noise floor estimated per-bin from the quietest ~10% of frames (assumes speech
+   pauses), strength presets Light/Medium/Aggressive.
+3. **Profile** (`NRAlgorithm::Profile`) — **faithful reimplementation of
+   Audacity's Noise Reduction effect** (verified line-by-line against
+   Audacity 3.7.1 `libraries/lib-builtin-effects/NoiseReductionBase.cpp`, in its
+   released configuration). Independent clean-room implementation — no GPL code
+   copied.
+
+### Profile algorithm details (parity targets)
+
+- STFT: **window 2048, hop 512** (4 steps/window), **periodic Hann** analysis ×
+  Hann synthesis (Audacity's WT_HANN_HANN), spectrum bins 0..1024.
+- `computeNoiseProfile(buf)`: per-bin **mean noise power** pooled over all
+  channels, complete windows only, **no padding**; `windows == 0` (input
+  < 2048 frames) ⇒ invalid ("too short").
+- Classification (Audacity DM_SECOND_GREATEST): a time-frequency cell is noise
+  iff the **second-greatest power among the 5 windows centred on it** ≤
+  `sensitivity · ln(10) · profileMean[bin]`. Out-of-range neighbours count as
+  zero power.
+- Gains: noise ⇒ `10^(−reductionDb/20)`, signal ⇒ 1. Then **attack/release
+  smoothing**: backward pass (attack, 0.02 s) and forward pass (release, 0.10 s)
+  take `max(g[k], neighbor·oneBlockFactor)` with
+  `nBlocks = 1 + (int)(t·rate/hop)`, `oneBlockFactor = 10^(−dB/(20·nBlocks))`.
+  (Offline two-pass over full arrays — proven equivalent to Audacity's streaming
+  queue.)
+- **Frequency smoothing**: geometric mean (mean of logs) of the gain curve over
+  `[k−bands, k+bands]`, applied in *both* Reduce and Residue modes.
+- **Residue** mode multiplies the spectrum by `(gain − 1)` — phase-flipped — so
+  `reduce − residue == original` exactly (selftest asserts maxDiff < 1e-3).
+- Reduction pass zero-pads **lead = trail = window − hop** and overlap-adds with
+  a `Σwin²` normalizer; output clamped to [−1, 1].
+- Options struct `NRProfileOptions` mirrors Audacity's dialog exactly:
+  `reductionDb` 0–48 (default **6**), `sensitivity` 0.01–24 (default **6.00**),
+  `freqSmoothingBands` 0–12 (default **6**), `residue` bool
+  (Noise: Reduce/Residue). (These are the current 3.x factory defaults;
+  pre-3.x was 12/6.00/3.)
+- `denoiseWithProfile` returns nullptr when the profile is invalid or
+  `profile.sampleRate != buf.sampleRate` (Audacity's rate-match rule). Since the
+  whole app runs at one internal rate this only fires if a stale profile
+  survives a device-rate change.
+- Memory shape: pass A stores per-frame **power spectra** only; the gain array
+  reuses that storage; pass B recomputes the forward FFT per frame (3 FFTs per
+  frame per channel total).
+
+### Profile workflow in the app
+
+Audacity's "Step 1: select noise, Get Noise Profile; Step 2: select audio,
+apply" maps onto this app's clip model:
+
+- The **noise selection is the drag-selection on any clip card** (or in the
+  full-window editor). Capture via the **Get noise profile** button inside the
+  voice-cleaner dialog, or right-click → *Voice cleaner → Get noise profile from
+  selection* (`IDM_GETPROFILE`, greyed without a selection) →
+  `App::captureNoiseProfileFromSelection()`.
+- Reduction applies to **whole clips** per the app's existing scope model (this
+  clip / this track / all clips), not to the selection.
+- **Session persistence**: `App` holds `nrOpts` (last-used options),
+  `noiseProfile`, and `noiseProfileDesc` (e.g. `1.20 s from 'clip'`). The
+  profile survives across dialog invocations, like Audacity's session profile.
+  `NROptions::noiseProfile` (the pointer) is **bound only at call time**
+  (`opts.noiseProfile = &noiseProfile;`) — never persisted — to avoid dangling.
+
+## Voice-cleaner dialog (`dialogs.cpp`)
+
+Manual modal (no resource script), same pattern as the export dialog:
+`VoiceCleanerContext` carries `opts`/`profile`/`profileDesc` in/out plus the
+current `noiseSelection` slice. Algorithm combo (Spectral subtraction / Wiener
+filter / Noise profile (Audacity-style)) drives row visibility: auto algorithms
+show the Strength combo; Profile shows Get-profile button + status line +
+dB/Sensitivity/Bands edits + Reduce/Residue radios. Apply is blocked (message
+box) when Profile is chosen without a captured profile. Numeric edits parse with
+`wcstod`, clamp to Audacity's ranges, and fall back to defaults on garbage.
+
+## Selftest
+
+`--selftest` (headless, logs to `bin/selftest.log`). Profile-NR coverage:
+capture validity + too-short rejection, 20 dB reduction attenuates a noise-only
+region by ≈20 dB (measured −20.00 dB) while preserving ≥70% of an embedded tone
+(measured 99.5%), reduce−residue==original identity, rate-mismatch rejection,
+dispatch through `denoise()` incl. missing-profile rejection.
+
+## Undo / scopes
+
+Voice cleaning (any algorithm) replaces clip buffers and commits **one snapshot
+per operation** — a track-wide or project-wide clean is a single undo step.

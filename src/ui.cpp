@@ -48,7 +48,7 @@ enum TB { TB_ADD, TB_TRACK, TB_PLAYALL, TB_STOP, TB_UNDO, TB_REDO, TB_COUNT };
 enum {
     IDM_PLAY = 100, IDM_PLAYSEL, IDM_CLEARSEL, IDM_SAVESEL, IDM_CROP,
     IDM_EDIT, IDM_RENAME, IDM_DELETE,
-    IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE, IDM_DENOISE_ALL,
+    IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE, IDM_DENOISE_ALL, IDM_GETPROFILE,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE,
@@ -104,6 +104,12 @@ struct App {
     // selection (belongs to selClipId)
     int selClipId = -1;
     int64_t selStart = 0, selEnd = 0;
+
+    // voice cleaner session state: last-used options + captured noise profile
+    // (Audacity-style; profile lives for the session, like Audacity's)
+    dsp::NROptions nrOpts;
+    dsp::NoiseProfile noiseProfile;
+    std::wstring noiseProfileDesc;
 
     // interaction
     Mode mode = Mode::None;
@@ -1125,10 +1131,24 @@ struct App {
             MessageBoxW(hwnd, L"No audio to clean here.", L"Voice cleaner", MB_ICONINFORMATION);
             return;
         }
-        dsp::NROptions opts;
-        opts.algorithm = dsp::NRAlgorithm::SpectralSubtraction;
-        opts.strength = dsp::NRStrength::Medium;
-        if (!dlg::voiceCleaner(hwnd, opts)) return;
+        // The current waveform selection (on any clip) doubles as the noise
+        // sample for the Audacity-style profile algorithm's Get Noise Profile.
+        AudioBufferPtr noiseSel;
+        dlg::VoiceCleanerContext ctx;
+        ctx.opts = &nrOpts;
+        ctx.profile = &noiseProfile;
+        ctx.profileDesc = &noiseProfileDesc;
+        if (hasSel()) {
+            const Clip* sc = doc.project().findClip(selClipId);
+            if (sc && sc->buffer) {
+                noiseSel = sliceBuffer(*sc->buffer, selStart, selEnd);
+                ctx.noiseSelection = noiseSel.get();
+                ctx.selectionDesc = L"'" + sc->name + L"'";
+            }
+        }
+        if (!dlg::voiceCleaner(hwnd, ctx)) return;
+        dsp::NROptions opts = nrOpts;             // nrOpts persists for the session
+        opts.noiseProfile = &noiseProfile;        // bind profile only for this call
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
         std::vector<std::pair<int, AudioBufferPtr>> updates;
         int failed = 0;
@@ -1152,6 +1172,32 @@ struct App {
         refresh();
         if (failed)
             MessageBoxW(hwnd, L"Some clips could not be cleaned.", L"Voice cleaner", MB_ICONWARNING);
+    }
+
+    // Capture the Audacity-style noise profile from the current selection
+    // (right-click shortcut; the voice cleaner dialog has the same button).
+    void captureNoiseProfileFromSelection() {
+        if (!hasSel()) return;
+        const Clip* c = doc.project().findClip(selClipId);
+        if (!c || !c->buffer) return;
+        auto slice = sliceBuffer(*c->buffer, selStart, selEnd);
+        dsp::NoiseProfile p = dsp::computeNoiseProfile(*slice);
+        if (!p.valid()) {
+            MessageBoxW(hwnd,
+                L"Selected noise profile is too short.\n"
+                L"Select at least ~50 ms of noise-only audio.",
+                L"Voice cleaner", MB_ICONINFORMATION);
+            return;
+        }
+        noiseProfile = std::move(p);
+        wchar_t d[160];
+        swprintf(d, 160, L"%.2f s from '%s'", noiseProfile.seconds, c->name.c_str());
+        noiseProfileDesc = d;
+        MessageBoxW(hwnd,
+            (L"Noise profile captured: " + noiseProfileDesc +
+             L"\n\nRun the voice cleaner with the \u201CNoise profile "
+             L"(Audacity-style)\u201D algorithm to apply it.").c_str(),
+            L"Voice cleaner", MB_ICONINFORMATION);
     }
 
     // --------------------------------------------------------- project I/O
@@ -1601,6 +1647,9 @@ struct App {
         HMENU vc = CreatePopupMenu();
         AppendMenuW(vc, MF_STRING, IDM_DENOISE, L"This clip\u2026");
         AppendMenuW(vc, MF_STRING, IDM_DENOISE_ALL, L"All clips (whole project)\u2026");
+        AppendMenuW(vc, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(vc, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_GETPROFILE,
+                    L"Get noise profile from selection");
         AppendMenuW(m, MF_POPUP, (UINT_PTR)vc, L"Voice cleaner (reduce noise)");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_RENAME, L"Rename\u2026");
@@ -1620,6 +1669,7 @@ struct App {
         else if (cmd == IDM_NORM_ALL) normalizeClip(clipId, true);
         else if (cmd == IDM_DENOISE) voiceCleanClip(clipId);
         else if (cmd == IDM_DENOISE_ALL) voiceCleanAllClips();
+        else if (cmd == IDM_GETPROFILE) captureNoiseProfileFromSelection();
         else if (cmd == IDM_RENAME) renameClip(clipId);
         else if (cmd == IDM_DELETE) deleteClipConfirm(clipId);
         else if (cmd >= IDM_ADDTL_BASE && cmd < IDM_TL_REMOVE) {

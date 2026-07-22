@@ -18,8 +18,20 @@ std::vector<std::wstring> openAudioFiles(HWND parent);
 bool exportOptions(HWND parent, mfio::ExportOptions& opts, std::wstring& outPath,
                    const std::wstring& suggestedName);
 
-// Voice cleaner (noise reduction) options modal. Returns true on Apply.
-bool voiceCleaner(HWND parent, dsp::NROptions& opts);
+// Voice cleaner (noise reduction) options modal. `opts` carries the last-used
+// settings in and the chosen settings out (the caller persists them for the
+// session). For the Audacity-style "Noise profile" algorithm the dialog offers
+// a Get Noise Profile button that captures `*profile` from `noiseSelection`
+// (the current waveform selection, may be null) and describes it in
+// `*profileDesc`. Returns true on Apply.
+struct VoiceCleanerContext {
+    dsp::NROptions* opts = nullptr;               // in/out
+    dsp::NoiseProfile* profile = nullptr;         // in/out (session-scoped)
+    std::wstring* profileDesc = nullptr;          // in/out, e.g. "1.2 s from 'clip'"
+    const AudioBuffer* noiseSelection = nullptr;  // current selection slice, or null
+    std::wstring selectionDesc;                   // clip name of the selection
+};
+bool voiceCleaner(HWND parent, VoiceCleanerContext& ctx);
 
 // Project open/save file dialogs (.acep). Return empty string on cancel.
 std::wstring openProject(HWND parent);

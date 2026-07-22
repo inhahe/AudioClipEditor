@@ -126,6 +126,102 @@ int runSelfTest() {
         check(clean2 && clean2->frames() > 0, L"denoise wiener", clean2 ? L"" : L"null");
     }
 
+    // DSP: Audacity-style profile-based noise reduction
+    {
+        // 2 s stereo buffer: constant white noise + a 440 Hz tone only in the middle.
+        const double ampNoise = 0.05, ampTone = 0.4;
+        const int64_t nf = rate * 2;
+        const int64_t toneA = (int64_t)(rate * 0.75), toneB = (int64_t)(rate * 1.25);
+        auto buf = std::make_shared<AudioBuffer>();
+        buf->sampleRate = rate; buf->channels = 2;
+        buf->samples.resize((size_t)nf * 2);
+        unsigned seed = 777u;
+        for (int64_t i = 0; i < nf; ++i) {
+            float t = 0.0f;
+            if (i >= toneA && i < toneB)
+                t = (float)(ampTone * std::sin(2.0 * 3.14159265358979 * 440.0 * i / rate));
+            for (int c = 0; c < 2; ++c) {
+                seed = seed * 1103515245u + 12345u;
+                float n = ((float)((seed >> 16) & 0x7fff) / 32768.0f - 0.5f) * 2.0f;
+                buf->samples[i * 2 + c] = t + n * (float)ampNoise;
+            }
+        }
+
+        // RMS over a frame range of one buffer (both channels).
+        auto rmsRange = [](const AudioBuffer& b, int64_t a, int64_t z) {
+            double s = 0; int64_t n = 0;
+            for (int64_t i = a; i < z; ++i)
+                for (int c = 0; c < b.channels; ++c) { double v = b.samples[i * b.channels + c]; s += v * v; n++; }
+            return n ? std::sqrt(s / n) : 0.0;
+        };
+
+        // Profile from the first 0.5 s (noise only).
+        auto noiseSlice = std::make_shared<AudioBuffer>();
+        noiseSlice->sampleRate = rate; noiseSlice->channels = 2;
+        noiseSlice->samples.assign(buf->samples.begin(), buf->samples.begin() + (size_t)(rate / 2) * 2);
+        dsp::NoiseProfile prof = dsp::computeNoiseProfile(*noiseSlice);
+        check(prof.valid() && prof.sampleRate == rate, L"noise profile capture",
+              L"windows=" + std::to_wstring(prof.windows) + L" bins=" + std::to_wstring(prof.means.size()));
+
+        // Too-short selection (< one STFT window) -> invalid profile.
+        auto shortSlice = std::make_shared<AudioBuffer>();
+        shortSlice->sampleRate = rate; shortSlice->channels = 2;
+        shortSlice->samples.assign(buf->samples.begin(), buf->samples.begin() + 1000 * 2);
+        dsp::NoiseProfile shortProf = dsp::computeNoiseProfile(*shortSlice);
+        check(!shortProf.valid(), L"noise profile too short rejected");
+
+        // Reduce at 20 dB: noise floor drops ~20 dB, tone survives.
+        dsp::NRProfileOptions po; po.reductionDb = 20.0f; po.sensitivity = 6.0f; po.freqSmoothingBands = 0;
+        auto red = dsp::denoiseWithProfile(*buf, prof, po);
+        bool okRed = red && red->frames() == buf->frames() && red->channels == 2;
+        check(okRed, L"profile NR output shape",
+              red ? (L"frames=" + std::to_wstring(red->frames())) : L"null");
+        if (okRed) {
+            // Noise-only region: measure away from edges/tone (0.1 s .. 0.6 s).
+            double nBefore = rmsRange(*buf, rate / 10, (int64_t)(rate * 0.6));
+            double nAfter  = rmsRange(*red, rate / 10, (int64_t)(rate * 0.6));
+            double attenDb = 20.0 * std::log10(nAfter / nBefore);
+            check(attenDb < -14.0, L"profile NR noise attenuation",
+                  L"atten=" + std::to_wstring(attenDb) + L" dB (want <= -14, target -20)");
+
+            // Tone region interior (skip 0.1 s at each edge for attack/release).
+            double tBefore = rmsRange(*buf, toneA + rate / 10, toneB - rate / 10);
+            double tAfter  = rmsRange(*red, toneA + rate / 10, toneB - rate / 10);
+            check(tAfter > 0.7 * tBefore, L"profile NR preserves tone",
+                  L"before=" + std::to_wstring(tBefore) + L" after=" + std::to_wstring(tAfter));
+        }
+
+        // Reduce - residue == original (defaults: 6 dB / 6.00 / 6 bands).
+        dsp::NRProfileOptions pd;
+        auto r1 = dsp::denoiseWithProfile(*buf, prof, pd);
+        dsp::NRProfileOptions pr = pd; pr.residue = true;
+        auto r2 = dsp::denoiseWithProfile(*buf, prof, pr);
+        if (r1 && r2 && r1->samples.size() == buf->samples.size() && r2->samples.size() == buf->samples.size()) {
+            double maxDiff = 0;
+            for (size_t i = 0; i < buf->samples.size(); ++i) {
+                double d = std::fabs((double)r1->samples[i] - (double)r2->samples[i] - (double)buf->samples[i]);
+                if (d > maxDiff) maxDiff = d;
+            }
+            check(maxDiff < 1e-3, L"profile NR reduce-residue identity",
+                  L"maxDiff=" + std::to_wstring(maxDiff));
+        } else {
+            check(false, L"profile NR reduce-residue identity", L"null or size mismatch");
+        }
+
+        // Sample-rate mismatch -> rejected.
+        dsp::NoiseProfile wrongRate = prof; wrongRate.sampleRate = 44100;
+        check(dsp::denoiseWithProfile(*buf, wrongRate, pd) == nullptr, L"profile NR rate mismatch rejected");
+
+        // Dispatch through dsp::denoise with algorithm=Profile.
+        dsp::NROptions nrp; nrp.algorithm = dsp::NRAlgorithm::Profile;
+        nrp.profile = pd; nrp.noiseProfile = &prof;
+        auto viaDenoise = dsp::denoise(*buf, nrp);
+        check(viaDenoise && viaDenoise->frames() == buf->frames(), L"denoise dispatch profile algo",
+              viaDenoise ? L"" : L"null");
+        nrp.noiseProfile = nullptr;
+        check(dsp::denoise(*buf, nrp) == nullptr, L"denoise profile without capture rejected");
+    }
+
     // Export sample-rate conversion + bit depths
     {
         struct { int rate; int bits; const wchar_t* tag; } cases[] = {
