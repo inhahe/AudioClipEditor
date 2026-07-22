@@ -1,6 +1,9 @@
 /build/
 /bin/
+/dist/
 *.log
 *.user
 *.obj
 *.exe
+*.dll
+*.zip
