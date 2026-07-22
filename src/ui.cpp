@@ -49,6 +49,7 @@ enum {
     IDM_PLAY = 100, IDM_PLAYSEL, IDM_CLEARSEL, IDM_SAVESEL, IDM_CROP,
     IDM_EDIT, IDM_RENAME, IDM_DELETE,
     IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE, IDM_DENOISE_ALL, IDM_GETPROFILE,
+    IDM_GETPROFILE_CLIP,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE,
@@ -143,7 +144,7 @@ struct App {
     int edHot = 0;                 // hovered editor button (see EB_* below)
     // editor layout rects (rebuilt in computeEditorLayout)
     RECT edMain{}, edRuler{}, edLeft{}, edRight{};
-    enum { EB_NONE, EB_PLAY, EB_PLAYSEL, EB_FINE, EB_CROP, EB_SAVE, EB_CLEAR, EB_DONE, EB_COUNT };
+    enum { EB_NONE, EB_PLAY, EB_PLAYSEL, EB_FINE, EB_CROP, EB_SAVE, EB_CAPTURE, EB_CLEAR, EB_DONE, EB_COUNT };
     RECT edBtn[EB_COUNT]{};
 
     // ------------------------------------------------------------- helpers
@@ -257,6 +258,7 @@ struct App {
         case EB_FINE: editFineToggle = !editFineToggle; break;
         case EB_CROP: if (hasSel() && selClipId == editClipId) cropSelection(); break;
         case EB_SAVE: if (hasSel() && selClipId == editClipId) saveSelectionAsClip(); break;
+        case EB_CAPTURE: captureNoiseProfileFromEditor(); break;
         case EB_CLEAR: selClipId = editClipId; selStart = selEnd = 0; break;
         case EB_DONE: closeClipEditor(); return;
         }
@@ -375,6 +377,7 @@ struct App {
         bx += S(16);
         put(EB_CROP, S(120));
         put(EB_SAVE, S(150));
+        put(EB_CAPTURE, S(150));
         put(EB_CLEAR, S(120));
         // Done on the far right, but never overlapping the left button group: if the
         // window is too narrow, park it right after the last left button instead.
@@ -538,6 +541,8 @@ struct App {
                sel ? col::text : col::dim, edHot == EB_CROP, fNorm);
         button(h, edBtn[EB_SAVE],  L"Save selection as clip", col::btn,
                sel ? col::text : col::dim, edHot == EB_SAVE, fNorm);
+        button(h, edBtn[EB_CAPTURE], sel ? L"Capture noise (sel)" : L"Capture noise (clip)",
+               col::btn, col::text, edHot == EB_CAPTURE, fNorm);
         button(h, edBtn[EB_CLEAR], L"Clear selection", col::btn,
                sel ? col::text : col::dim, edHot == EB_CLEAR, fNorm);
         button(h, edBtn[EB_DONE],  L"Done", col::btn, col::text, edHot == EB_DONE, fBold);
@@ -1252,6 +1257,42 @@ struct App {
             L"Voice cleaner", MB_ICONINFORMATION);
     }
 
+    // Capture a noise profile from an entire clip buffer (no selection needed).
+    // Useful when the clip is nothing but noise, or as a quick whole-clip
+    // estimate. Feeds the same recents list as the selection capture.
+    void captureNoiseProfileFromClip(int clipId) {
+        const Clip* c = doc.project().findClip(clipId);
+        if (!c || !c->buffer || c->buffer->frames() == 0) return;
+        dsp::NoiseProfile p = dsp::computeNoiseProfile(*c->buffer);
+        if (!p.valid()) {
+            MessageBoxW(hwnd,
+                L"This clip is too short to build a noise profile.\n"
+                L"It needs at least ~50 ms of audio.",
+                L"Voice cleaner", MB_ICONINFORMATION);
+            return;
+        }
+        noiseProfile = std::move(p);
+        wchar_t d[160];
+        swprintf(d, 160, L"whole clip '%s' (%.2f s)", c->name.c_str(), noiseProfile.seconds);
+        noiseProfileDesc = d;
+        rememberCapture(noiseProfile, noiseProfileDesc);
+        MessageBoxW(hwnd,
+            (L"Noise capture saved: " + noiseProfileDesc +
+             L"\n\nApply it from any clip's right-click menu \u2192 Voice cleaner "
+             L"\u2192 Apply noise capture, or via the voice cleaner dialog.").c_str(),
+            L"Voice cleaner", MB_ICONINFORMATION);
+    }
+
+    // Capture from the full-window editor: use the active selection if one is
+    // present, else fall back to the whole clip.
+    void captureNoiseProfileFromEditor() {
+        if (editClipId < 0) return;
+        if (hasSel() && selClipId == editClipId)
+            captureNoiseProfileFromSelection();
+        else
+            captureNoiseProfileFromClip(editClipId);
+    }
+
     // Add the active capture to the front of the recent-captures list (most
     // recently used first, capped, no duplicate of the current front). The
     // profile itself is the cached per-capture processing result.
@@ -1763,6 +1804,7 @@ struct App {
         AppendMenuW(vc, MF_STRING, IDM_GETPROFILE,
                     hasSel() ? L"Capture noise from selection"
                              : L"Capture noise from selection\u2026");
+        AppendMenuW(vc, MF_STRING, IDM_GETPROFILE_CLIP, L"Capture noise from whole clip");
         // Apply a remembered background-noise capture straight to this clip.
         HMENU rec = CreatePopupMenu();
         if (noiseCaptures.empty()) {
@@ -1792,6 +1834,7 @@ struct App {
         else if (cmd == IDM_DENOISE) voiceCleanClip(clipId);
         else if (cmd == IDM_DENOISE_ALL) voiceCleanAllClips();
         else if (cmd == IDM_GETPROFILE) captureNoiseProfileFromSelection();
+        else if (cmd == IDM_GETPROFILE_CLIP) captureNoiseProfileFromClip(clipId);
         else if (cmd >= IDM_APPLYCAP_BASE && cmd < IDM_APPLYCAP_BASE + 100)
             applyCaptureToClip(clipId, cmd - IDM_APPLYCAP_BASE);
         else if (cmd == IDM_RENAME) renameClip(clipId);

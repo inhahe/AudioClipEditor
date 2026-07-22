@@ -93,9 +93,19 @@ apply" maps onto this app's clip model:
 
 - The **noise selection is the drag-selection on any clip card** (or in the
   full-window editor). Capture via the **Get noise profile** button inside the
-  voice-cleaner dialog, or right-click → *Voice cleaner → Get noise profile from
-  selection* (`IDM_GETPROFILE`, greyed without a selection) →
-  `App::captureNoiseProfileFromSelection()`.
+  voice-cleaner dialog, or right-click → *Voice cleaner → Capture noise from
+  selection* (`IDM_GETPROFILE`, always enabled — shows guidance when there is no
+  selection) → `App::captureNoiseProfileFromSelection()`.
+- **Capture from a whole clip** (no selection needed): right-click → *Voice
+  cleaner → Capture noise from whole clip* (`IDM_GETPROFILE_CLIP`) →
+  `App::captureNoiseProfileFromClip(clipId)`, which runs
+  `dsp::computeNoiseProfile` over the entire clip buffer (desc `whole clip 'name'
+  (s)`).
+- **Capture from inside the full-window editor**: the editor toolbar has a
+  **Capture noise** button (`EB_CAPTURE`) → `App::captureNoiseProfileFromEditor()`,
+  which uses the active editor selection if present, else falls back to the whole
+  clip. The button label reflects which (`Capture noise (sel)` / `(clip)`).
+- All three capture paths feed the same `rememberCapture()` recents list.
 - Reduction applies to **whole clips** per the app's existing scope model (this
   clip / this track / all clips), not to the selection.
 - **Session persistence**: `App` holds `nrOpts` (last-used options),

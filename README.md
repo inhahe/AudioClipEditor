@@ -25,7 +25,7 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   Save selection) slices the selection into a new clip you name (rename any time).
 - **Full-window clip editor.** Double-click a clip card (or right-click
   → *Open in editor*) to blow the clip up to a full-window view for precise work.
-  It has its own toolbar (play, play selection, crop, save selection, clear, done)
+  It has its own toolbar (play, play selection, crop, save selection, capture noise, clear, done)
   and — because dragging a pixel-precise edge on a zoomed-out waveform is fiddly —
   a pair of **fine-tune edge strips**: two zoomed lanes, one centred on the
   selection's **start** and one on its **end**, so you can nudge each boundary
@@ -61,8 +61,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   **noise profile** gate — a faithful reimplementation of Audacity's Noise
   Reduction effect with the same two-step workflow and the same options. Drag a
   selection over a noise-only stretch, capture it with **Get noise profile**
-  (button in the dialog, or right-click → *Voice cleaner → Get noise profile from
-  selection*), then clean any clip with **Noise reduction (dB)** (0–48),
+  (button in the dialog, or right-click → *Voice cleaner → Capture noise from
+  selection*) — or capture from an **entire clip** (right-click → *Voice cleaner →
+  Capture noise from whole clip*) or from **inside the full-window editor** (the
+  **Capture noise** toolbar button, which uses the current selection if one is
+  active, else the whole clip) — then clean any clip with **Noise reduction (dB)** (0–48),
   **Sensitivity** (0.01–24), **Frequency smoothing (bands)** (0–12), and
   **Reduce / Residue** — Residue keeps only what would be removed, so you can
   audition exactly what you're losing. You can clean at three **scopes** — a
@@ -124,7 +127,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Set clip / track volume | drag the volume slider on the card or track header |
 | Normalize volume | right-click a card → *Normalize to match other clips* / *Normalize all clips* |
 | Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |
-| Capture a noise profile | select a noise-only stretch, then right-click → *Voice cleaner → Capture noise from selection* (or the **Get noise profile** button in the dialog) |
+| Capture a noise profile | select a noise-only stretch, then right-click → *Voice cleaner → Capture noise from selection* (or the **Get noise profile** button in the dialog); or *Capture noise from whole clip*; or the **Capture noise** button in the full-window editor |
 | Apply a saved noise capture | right-click a card → *Voice cleaner → Apply noise capture ▸* and pick a recent capture |
 | Track actions | **right-click a track header/lane**: voice-clean the track, rename, remove |
 | Add a track | **+ Add Track** |
