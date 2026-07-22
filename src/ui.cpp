@@ -48,11 +48,13 @@ enum TB { TB_ADD, TB_TRACK, TB_PLAYALL, TB_STOP, TB_UNDO, TB_REDO, TB_COUNT };
 enum {
     IDM_PLAY = 100, IDM_PLAYSEL, IDM_CLEARSEL, IDM_SAVESEL, IDM_CROP,
     IDM_EDIT, IDM_RENAME, IDM_DELETE,
-    IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE, IDM_DENOISE_ALL,
+    IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE, IDM_DENOISE_ALL, IDM_GETPROFILE,
+    IDM_GETPROFILE_CLIP,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE,
-    IDM_REDO_BASE = 400
+    IDM_REDO_BASE = 400,
+    IDM_APPLYCAP_BASE = 500   // + recent-capture index (apply to the clicked clip)
 };
 
 // Menu bar command ids
@@ -65,6 +67,12 @@ enum {
 struct CardLayout { int clipId; RECT card, top, play, del, wave, vol, crop, savesel; };
 struct PlacedLayout { int trackId, index, clipId; RECT rc; };
 struct TrackLayout { int trackId; RECT header, lane; RECT nameRc, delRc, volRc; };
+
+// A remembered background-noise capture. The computed dsp::NoiseProfile is the
+// per-capture "processing result" (per-bin noise power means) that is reused
+// unchanged for every clip the capture is applied to, so we remember it here
+// rather than recomputing when the user picks the capture again from recents.
+struct NoiseCapture { dsp::NoiseProfile profile; std::wstring desc; };
 
 enum class Mode { None, WaveSelect, CardDrag, ClipMove, TimelineSeek, ClipVolume, TrackVolume, ZoomDrag, TlVScroll };
 
@@ -81,6 +89,7 @@ struct App {
     RECT zoomRc{};                 // global time-scale slider (transport bar)
 
     std::wstring projectPath;      // current .acep path (empty = unsaved)
+    bool lastTitleDirty = false;   // last unsaved-changes state reflected in the title
 
     // scroll / zoom
     int libScroll = 0, libContentH = 0;
@@ -104,6 +113,13 @@ struct App {
     // selection (belongs to selClipId)
     int selClipId = -1;
     int64_t selStart = 0, selEnd = 0;
+
+    // voice cleaner session state: last-used options + captured noise profile
+    // (Audacity-style; profile lives for the session, like Audacity's)
+    dsp::NROptions nrOpts;
+    dsp::NoiseProfile noiseProfile;        // the "active" capture (used by the dialog)
+    std::wstring noiseProfileDesc;
+    std::vector<NoiseCapture> noiseCaptures;  // recent captures, most-recent first
 
     // interaction
     Mode mode = Mode::None;
@@ -129,7 +145,7 @@ struct App {
     int edHot = 0;                 // hovered editor button (see EB_* below)
     // editor layout rects (rebuilt in computeEditorLayout)
     RECT edMain{}, edRuler{}, edLeft{}, edRight{};
-    enum { EB_NONE, EB_PLAY, EB_PLAYSEL, EB_FINE, EB_CROP, EB_SAVE, EB_CLEAR, EB_DONE, EB_COUNT };
+    enum { EB_NONE, EB_PLAY, EB_PLAYSEL, EB_FINE, EB_CROP, EB_SAVE, EB_CAPTURE, EB_CLEAR, EB_DONE, EB_COUNT };
     RECT edBtn[EB_COUNT]{};
 
     // ------------------------------------------------------------- helpers
@@ -243,6 +259,7 @@ struct App {
         case EB_FINE: editFineToggle = !editFineToggle; break;
         case EB_CROP: if (hasSel() && selClipId == editClipId) cropSelection(); break;
         case EB_SAVE: if (hasSel() && selClipId == editClipId) saveSelectionAsClip(); break;
+        case EB_CAPTURE: captureNoiseProfileFromEditor(); break;
         case EB_CLEAR: selClipId = editClipId; selStart = selEnd = 0; break;
         case EB_DONE: closeClipEditor(); return;
         }
@@ -361,6 +378,7 @@ struct App {
         bx += S(16);
         put(EB_CROP, S(120));
         put(EB_SAVE, S(150));
+        put(EB_CAPTURE, S(150));
         put(EB_CLEAR, S(120));
         // Done on the far right, but never overlapping the left button group: if the
         // window is too narrow, park it right after the last left button instead.
@@ -524,6 +542,8 @@ struct App {
                sel ? col::text : col::dim, edHot == EB_CROP, fNorm);
         button(h, edBtn[EB_SAVE],  L"Save selection as clip", col::btn,
                sel ? col::text : col::dim, edHot == EB_SAVE, fNorm);
+        button(h, edBtn[EB_CAPTURE], sel ? L"Capture noise (sel)" : L"Capture noise (clip)",
+               col::btn, col::text, edHot == EB_CAPTURE, fNorm);
         button(h, edBtn[EB_CLEAR], L"Clear selection", col::btn,
                sel ? col::text : col::dim, edHot == EB_CLEAR, fNorm);
         button(h, edBtn[EB_DONE],  L"Done", col::btn, col::text, edHot == EB_DONE, fBold);
@@ -873,6 +893,12 @@ struct App {
         for (const auto& pl : placed) {
             const Clip* c = doc.project().findClip(pl.clipId);
             bool moving = (mode == Mode::ClipMove && moveTrackId == pl.trackId && moveIndex == pl.index);
+            // While actively dragging, the moved clip is drawn as a floating ghost
+            // (below); leave just a faint outline in its home slot.
+            if (moving && dragged) {
+                roundFill(h, pl.rc, col::panel, col::cardEdge, S(6));
+                continue;
+            }
             roundFill(h, pl.rc, moving ? col::clipBlkSel : col::clipBlk, col::cardEdge, S(6));
             RECT wv = { pl.rc.left + S(3), pl.rc.top + S(18), pl.rc.right - S(3), pl.rc.bottom - S(4) };
             if (c && c->buffer && c->peaks && wv.right > wv.left) {
@@ -897,6 +923,32 @@ struct App {
                         bool ok = tk && !tk->overlaps(start, c->frames());
                         roundFill(h, g, ok ? col::accentDk : col::stop, col::text, S(6));
                     }
+                }
+            }
+        }
+        // drag ghost when sliding a placed clip around (shows where it will land)
+        if (mode == Mode::ClipMove && dragged) {
+            POINT p; GetCursorPos(&p); ScreenToClient(hwnd, &p);
+            int tid = moveTrackId; trackAtPoint(p, tid);
+            const Clip* c = doc.project().findClip(dragClipId);
+            if (c) {
+                int ignore = (tid == moveTrackId) ? moveIndex : -1;
+                int64_t start = snapFrame(tid, xToFrame(p.x) - moveGrabOffset, c->frames(), ignore);
+                for (auto& tl : trackLays) if (tl.trackId == tid) {
+                    int x0 = frameToX(start), x1 = frameToX(start + c->frames());
+                    RECT g = { x0, tl.lane.top + S(4), x1, tl.lane.bottom - S(4) };
+                    const Track* tk = doc.project().findTrack(tid);
+                    bool ok = tk && !tk->overlaps(start, c->frames(), ignore);
+                    roundFill(h, g, ok ? col::clipBlkSel : col::stop, col::text, S(6));
+                    // waveform + name so the ghost reads as the actual clip
+                    RECT wv = { g.left + S(3), g.top + S(18), g.right - S(3), g.bottom - S(4) };
+                    if (c->buffer && c->peaks && wv.right > wv.left) {
+                        SaveDC(h); IntersectClipRect(h, wv.left, wv.top, wv.right, wv.bottom);
+                        wf::draw(h, wv, *c->buffer, *c->peaks, 0, c->frames(), RGB(180, 210, 245));
+                        RestoreDC(h, -1);
+                    }
+                    RECT nm = { g.left + S(6), g.top + S(2), g.right - S(4), g.top + S(18) };
+                    textOut(h, nm, c->name, col::text, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                 }
             }
         }
@@ -1125,10 +1177,26 @@ struct App {
             MessageBoxW(hwnd, L"No audio to clean here.", L"Voice cleaner", MB_ICONINFORMATION);
             return;
         }
-        dsp::NROptions opts;
-        opts.algorithm = dsp::NRAlgorithm::SpectralSubtraction;
-        opts.strength = dsp::NRStrength::Medium;
-        if (!dlg::voiceCleaner(hwnd, opts)) return;
+        // The current waveform selection (on any clip) doubles as the noise
+        // sample for the Audacity-style profile algorithm's Get Noise Profile.
+        AudioBufferPtr noiseSel;
+        dlg::VoiceCleanerContext ctx;
+        ctx.opts = &nrOpts;
+        ctx.profile = &noiseProfile;
+        ctx.profileDesc = &noiseProfileDesc;
+        if (hasSel()) {
+            const Clip* sc = doc.project().findClip(selClipId);
+            if (sc && sc->buffer) {
+                noiseSel = sliceBuffer(*sc->buffer, selStart, selEnd);
+                ctx.noiseSelection = noiseSel.get();
+                ctx.selectionDesc = L"'" + sc->name + L"'";
+            }
+        }
+        bool okDlg = dlg::voiceCleaner(hwnd, ctx);
+        if (ctx.captured) rememberCapture(noiseProfile, noiseProfileDesc);
+        if (!okDlg) return;
+        dsp::NROptions opts = nrOpts;             // nrOpts persists for the session
+        opts.noiseProfile = &noiseProfile;        // bind profile only for this call
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
         std::vector<std::pair<int, AudioBufferPtr>> updates;
         int failed = 0;
@@ -1154,13 +1222,144 @@ struct App {
             MessageBoxW(hwnd, L"Some clips could not be cleaned.", L"Voice cleaner", MB_ICONWARNING);
     }
 
+    // Capture the Audacity-style noise profile from the current selection
+    // (right-click shortcut; the voice cleaner dialog has the same button).
+    void captureNoiseProfileFromSelection() {
+        if (!hasSel()) {
+            MessageBoxW(hwnd,
+                L"Select a noise-only region first.\n\n"
+                L"Drag across a clip's waveform over a stretch that contains only "
+                L"background noise (no speech), then choose \u201CCapture noise from "
+                L"selection\u201D again. The capture is then available under "
+                L"\u201CApply noise capture\u201D for any clip.",
+                L"Capture noise", MB_ICONINFORMATION);
+            return;
+        }
+        const Clip* c = doc.project().findClip(selClipId);
+        if (!c || !c->buffer) return;
+        auto slice = sliceBuffer(*c->buffer, selStart, selEnd);
+        dsp::NoiseProfile p = dsp::computeNoiseProfile(*slice);
+        if (!p.valid()) {
+            MessageBoxW(hwnd,
+                L"Selected noise profile is too short.\n"
+                L"Select at least ~50 ms of noise-only audio.",
+                L"Voice cleaner", MB_ICONINFORMATION);
+            return;
+        }
+        noiseProfile = std::move(p);
+        wchar_t d[160];
+        swprintf(d, 160, L"%.2f s from '%s'", noiseProfile.seconds, c->name.c_str());
+        noiseProfileDesc = d;
+        rememberCapture(noiseProfile, noiseProfileDesc);
+        MessageBoxW(hwnd,
+            (L"Noise capture saved: " + noiseProfileDesc +
+             L"\n\nApply it from any clip's right-click menu \u2192 Voice cleaner "
+             L"\u2192 Apply noise capture, or via the voice cleaner dialog.").c_str(),
+            L"Voice cleaner", MB_ICONINFORMATION);
+    }
+
+    // Capture a noise profile from an entire clip buffer (no selection needed).
+    // Useful when the clip is nothing but noise, or as a quick whole-clip
+    // estimate. Feeds the same recents list as the selection capture.
+    void captureNoiseProfileFromClip(int clipId) {
+        const Clip* c = doc.project().findClip(clipId);
+        if (!c || !c->buffer || c->buffer->frames() == 0) return;
+        dsp::NoiseProfile p = dsp::computeNoiseProfile(*c->buffer);
+        if (!p.valid()) {
+            MessageBoxW(hwnd,
+                L"This clip is too short to build a noise profile.\n"
+                L"It needs at least ~50 ms of audio.",
+                L"Voice cleaner", MB_ICONINFORMATION);
+            return;
+        }
+        noiseProfile = std::move(p);
+        wchar_t d[160];
+        swprintf(d, 160, L"whole clip '%s' (%.2f s)", c->name.c_str(), noiseProfile.seconds);
+        noiseProfileDesc = d;
+        rememberCapture(noiseProfile, noiseProfileDesc);
+        MessageBoxW(hwnd,
+            (L"Noise capture saved: " + noiseProfileDesc +
+             L"\n\nApply it from any clip's right-click menu \u2192 Voice cleaner "
+             L"\u2192 Apply noise capture, or via the voice cleaner dialog.").c_str(),
+            L"Voice cleaner", MB_ICONINFORMATION);
+    }
+
+    // Capture from the full-window editor: use the active selection if one is
+    // present, else fall back to the whole clip.
+    void captureNoiseProfileFromEditor() {
+        if (editClipId < 0) return;
+        if (hasSel() && selClipId == editClipId)
+            captureNoiseProfileFromSelection();
+        else
+            captureNoiseProfileFromClip(editClipId);
+    }
+
+    // Add the active capture to the front of the recent-captures list (most
+    // recently used first, capped, no duplicate of the current front). The
+    // profile itself is the cached per-capture processing result.
+    void rememberCapture(const dsp::NoiseProfile& prof, const std::wstring& desc) {
+        if (!prof.valid()) return;
+        // Skip if this is already the most-recent capture (e.g. applying it again
+        // through the dialog without recapturing).
+        if (!noiseCaptures.empty() && noiseCaptures.front().desc == desc &&
+            noiseCaptures.front().profile.windows == prof.windows &&
+            noiseCaptures.front().profile.seconds == prof.seconds)
+            return;
+        noiseCaptures.insert(noiseCaptures.begin(), NoiseCapture{ prof, desc });
+        const size_t kMaxCaptures = 8;
+        if (noiseCaptures.size() > kMaxCaptures) noiseCaptures.resize(kMaxCaptures);
+    }
+
+    // Apply a remembered noise capture to one clip using the current profile
+    // options (one undo step). Reuses the capture's cached NoiseProfile; moves
+    // it to the front of the recents as most-recently-used.
+    void applyCaptureToClip(int clipId, int captureIdx) {
+        if (captureIdx < 0 || captureIdx >= (int)noiseCaptures.size()) return;
+        const Clip* c = doc.project().findClip(clipId);
+        if (!c || !c->buffer || c->buffer->frames() == 0) return;
+        // Copy into the stable active-profile member (never hold a pointer into
+        // the vector across the reorder below).
+        noiseProfile = noiseCaptures[captureIdx].profile;
+        noiseProfileDesc = noiseCaptures[captureIdx].desc;
+        std::wstring capDesc = noiseProfileDesc;
+        if (noiseProfile.sampleRate != c->buffer->sampleRate) {
+            MessageBoxW(hwnd,
+                L"This noise capture was made at a different sample rate than the clip, "
+                L"so it can't be applied. Capture a new profile from this project.",
+                L"Voice cleaner", MB_ICONINFORMATION);
+            return;
+        }
+        nrOpts.algorithm = dsp::NRAlgorithm::Profile;
+        dsp::NROptions opts = nrOpts;
+        opts.noiseProfile = &noiseProfile;
+        HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+        auto cleaned = dsp::denoise(*c->buffer, opts);
+        SetCursor(old);
+        if (!cleaned) {
+            MessageBoxW(hwnd, L"Voice cleaner failed for this clip.", L"Voice cleaner", MB_ICONWARNING);
+            return;
+        }
+        stopAll();
+        doc.replaceClipBuffers({ { clipId, cleaned } },
+            L"Voice cleaner on '" + c->name + L"' (" + capDesc + L")");
+        // Promote the used capture to most-recently-used.
+        if (captureIdx != 0) {
+            NoiseCapture used = noiseCaptures[captureIdx];
+            noiseCaptures.erase(noiseCaptures.begin() + captureIdx);
+            noiseCaptures.insert(noiseCaptures.begin(), std::move(used));
+        }
+        refresh();
+    }
+
     // --------------------------------------------------------- project I/O
     void setTitle() {
         std::wstring t = L"Audio Clip Editor";
         if (!projectPath.empty()) t += std::wstring(L" \u2014 ") + PathFindFileNameW(projectPath.c_str());
+        if (doc.isModified()) t += L" *";
         SetWindowTextW(hwnd, t.c_str());
     }
     void openProjectFile() {
+        if (!confirmDiscardChanges()) return;
         std::wstring path = dlg::openProject(hwnd);
         if (path.empty()) return;
         if (!doc.loadProject(path)) { MessageBoxW(hwnd, L"Could not open project.", L"Open", MB_ICONWARNING); return; }
@@ -1180,10 +1379,29 @@ struct App {
         if (!doc.saveProject(path)) { MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING); return false; }
         projectPath = path; setTitle(); return true;
     }
-    void saveProjectFile() {
-        if (projectPath.empty()) { saveProjectAs(); return; }
-        if (!doc.saveProject(projectPath))
+    bool saveProjectFile() {
+        if (projectPath.empty()) return saveProjectAs();
+        if (!doc.saveProject(projectPath)) {
             MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING);
+            return false;
+        }
+        setTitle();
+        return true;
+    }
+    // Guard against losing unsaved work before an action that discards the current
+    // project (exit, open another project). Returns true if the caller may proceed
+    // (saved, or the user chose to discard); false to cancel the action.
+    bool confirmDiscardChanges() {
+        if (!doc.isModified()) return true;
+        std::wstring name = projectPath.empty() ? L"this project"
+                          : std::wstring(L"\u201C") + PathFindFileNameW(projectPath.c_str()) + L"\u201D";
+        int r = MessageBoxW(hwnd,
+            (L"Save changes to " + name + L" before closing?").c_str(),
+            L"Audio Clip Editor",
+            MB_YESNOCANCEL | MB_ICONWARNING);
+        if (r == IDCANCEL) return false;
+        if (r == IDNO) return true;      // discard
+        return saveProjectFile();         // IDYES: proceed only if the save succeeds
     }
     void exportMix() {
         auto mix = doc.renderMix();
@@ -1601,6 +1819,23 @@ struct App {
         HMENU vc = CreatePopupMenu();
         AppendMenuW(vc, MF_STRING, IDM_DENOISE, L"This clip\u2026");
         AppendMenuW(vc, MF_STRING, IDM_DENOISE_ALL, L"All clips (whole project)\u2026");
+        AppendMenuW(vc, MF_SEPARATOR, 0, nullptr);
+        // Always enabled: capturing uses whatever clip currently holds the
+        // drag-selection (not necessarily the one right-clicked). If there is no
+        // selection yet, the handler explains how to make one.
+        AppendMenuW(vc, MF_STRING, IDM_GETPROFILE,
+                    hasSel() ? L"Capture noise from selection"
+                             : L"Capture noise from selection\u2026");
+        AppendMenuW(vc, MF_STRING, IDM_GETPROFILE_CLIP, L"Capture noise from whole clip");
+        // Apply a remembered background-noise capture straight to this clip.
+        HMENU rec = CreatePopupMenu();
+        if (noiseCaptures.empty()) {
+            AppendMenuW(rec, MF_STRING | MF_GRAYED, 0, L"(no captures yet \u2014 capture noise from a selection)");
+        } else {
+            for (size_t i = 0; i < noiseCaptures.size(); ++i)
+                AppendMenuW(rec, MF_STRING, IDM_APPLYCAP_BASE + (int)i, noiseCaptures[i].desc.c_str());
+        }
+        AppendMenuW(vc, MF_POPUP, (UINT_PTR)rec, L"Apply noise capture \u25B8");
         AppendMenuW(m, MF_POPUP, (UINT_PTR)vc, L"Voice cleaner (reduce noise)");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_RENAME, L"Rename\u2026");
@@ -1620,6 +1855,10 @@ struct App {
         else if (cmd == IDM_NORM_ALL) normalizeClip(clipId, true);
         else if (cmd == IDM_DENOISE) voiceCleanClip(clipId);
         else if (cmd == IDM_DENOISE_ALL) voiceCleanAllClips();
+        else if (cmd == IDM_GETPROFILE) captureNoiseProfileFromSelection();
+        else if (cmd == IDM_GETPROFILE_CLIP) captureNoiseProfileFromClip(clipId);
+        else if (cmd >= IDM_APPLYCAP_BASE && cmd < IDM_APPLYCAP_BASE + 100)
+            applyCaptureToClip(clipId, cmd - IDM_APPLYCAP_BASE);
         else if (cmd == IDM_RENAME) renameClip(clipId);
         else if (cmd == IDM_DELETE) deleteClipConfirm(clipId);
         else if (cmd >= IDM_ADDTL_BASE && cmd < IDM_TL_REMOVE) {
@@ -1693,7 +1932,7 @@ struct App {
         case IDC_SAVEPROJ: saveProjectFile(); break;
         case IDC_SAVEPROJAS: saveProjectAs(); break;
         case IDC_EXPORTMIX: exportMix(); break;
-        case IDC_EXIT: DestroyWindow(hwnd); break;
+        case IDC_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
         case IDC_UNDO: doUndo(); break;
         case IDC_REDO: doRedo(); break;
         case IDC_ADDTRACK: addTrackAndReveal(); break;
@@ -1749,6 +1988,8 @@ struct App {
 
     // --------------------------------------------------------- timer / playend
     void onTimer() {
+        // Keep the title's unsaved-changes marker (" *") in sync as edits happen.
+        if (doc.isModified() != lastTitleDirty) { lastTitleDirty = doc.isModified(); setTitle(); }
         if (engine.isPlaying()) {
             if (timelinePlaying) playheadFrame = engine.position();
             else if (previewClipId >= 0) {
@@ -1821,6 +2062,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND: if (HIWORD(wp) == 0 && lp == 0) { a->onCommand(LOWORD(wp)); return 0; } break;
     case WM_TIMER: a->onTimer(); return 0;
     case WM_APP_PLAYEND: a->onPlayEnd(); return 0;
+    case WM_CLOSE:
+        if (a && !a->confirmDiscardChanges()) return 0;  // user cancelled exit
+        DestroyWindow(hwnd);
+        return 0;
     case WM_DESTROY: saveWindowPlacement(hwnd); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);

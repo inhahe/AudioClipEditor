@@ -161,7 +161,209 @@ static std::vector<float> denoiseChannel(const std::vector<float>& in, const NRO
     return out;
 }
 
+// ---------------- Audacity-style profile-based noise gating ----------------
+// Reimplements Audacity's Noise Reduction (NoiseReductionBase.cpp) in its
+// released configuration: WT_HANN_HANN windows, window size 2048, 4 steps per
+// window, DM_SECOND_GREATEST classification, attack 0.02 s / release 0.10 s.
+// The streaming window-queue of the original is unrolled into whole-signal
+// passes, which is mathematically equivalent (the attack pass runs backward in
+// time, the release pass forward, exactly like the queue propagation).
+
+static const int kNRWin  = 2048;            // STFT window (Audacity default)
+static const int kNRHop  = kNRWin / 4;      // 4 steps per window (Hann/Hann)
+static const int kNRSpec = kNRWin / 2 + 1;  // bins 0..Nyquist
+
+static void nrMakeWindow(std::vector<float>& w) {
+    // Periodic Hann; used for both analysis and synthesis (WT_HANN_HANN).
+    w.resize(kNRWin);
+    for (int i = 0; i < kNRWin; ++i)
+        w[i] = 0.5f * (1.0f - (float)std::cos(2.0 * PI * i / kNRWin));
+}
+
+NoiseProfile computeNoiseProfile(const AudioBuffer& buf) {
+    NoiseProfile p;
+    p.sampleRate = buf.sampleRate;
+    p.seconds = buf.durationSec();
+    const int ch = buf.channels;
+    const int64_t nf = buf.frames();
+    if (ch <= 0 || nf < kNRWin) return p;   // "Selected noise profile is too short."
+
+    std::vector<float> win; nrMakeWindow(win);
+    std::vector<double> sums(kNRSpec, 0.0);
+    std::vector<cf> fbuf(kNRWin);
+    // Only complete windows, no padding (matches Audacity's profile pass);
+    // every channel's windows pool into one statistics set.
+    const size_t nFr = (size_t)(1 + (nf - kNRWin) / kNRHop);
+    for (int c = 0; c < ch; ++c) {
+        for (size_t fr = 0; fr < nFr; ++fr) {
+            const int64_t s0 = (int64_t)fr * kNRHop;
+            for (int i = 0; i < kNRWin; ++i)
+                fbuf[i] = cf(buf.samples[(s0 + i) * ch + c] * win[i], 0.0f);
+            fft(fbuf, false);
+            for (int k = 0; k < kNRSpec; ++k) {
+                const double re = fbuf[k].real(), im = fbuf[k].imag();
+                sums[k] += re * re + im * im;
+            }
+            ++p.windows;
+        }
+    }
+    p.means.resize(kNRSpec);
+    for (int k = 0; k < kNRSpec; ++k) p.means[k] = (float)(sums[k] / p.windows);
+    return p;
+}
+
+// Geometric-mean smoothing of the gain curve across frequency: average the
+// logs over [k-bins, k+bins] (Audacity's ApplyFreqSmoothing).
+static void nrFreqSmooth(std::vector<float>& g, int bins, std::vector<float>& scratch) {
+    if (bins <= 0) return;
+    for (int k = 0; k < kNRSpec; ++k) g[k] = std::log(g[k]);
+    for (int k = 0; k < kNRSpec; ++k) {
+        const int j0 = std::max(0, k - bins);
+        const int j1 = std::min(kNRSpec - 1, k + bins);
+        float acc = 0.0f;
+        for (int j = j0; j <= j1; ++j) acc += g[j];
+        scratch[k] = acc / (j1 - j0 + 1);
+    }
+    for (int k = 0; k < kNRSpec; ++k) g[k] = std::exp(scratch[k]);
+}
+
+static std::vector<float> denoiseChannelProfile(const std::vector<float>& in, int rate,
+                                                const NoiseProfile& prof,
+                                                const NRProfileOptions& opts) {
+    const size_t len = in.size();
+    // Zero-pad both ends: every real sample gets full overlap coverage and the
+    // classifier sees zero-power context beyond the edges, like Audacity's
+    // leading/trailing padding in the reduction pass.
+    const size_t lead = kNRWin - kNRHop;
+    const size_t padded = lead + len + kNRWin;
+    const size_t nFr = 1 + (padded - kNRWin) / kNRHop;
+
+    std::vector<float> win; nrMakeWindow(win);
+    auto sampleAt = [&](size_t padIdx) -> float {
+        return (padIdx >= lead && padIdx - lead < len) ? in[padIdx - lead] : 0.0f;
+    };
+
+    // Pass A: per-window power spectra.
+    std::vector<float> power(nFr * (size_t)kNRSpec);
+    std::vector<cf> fbuf(kNRWin);
+    for (size_t fr = 0; fr < nFr; ++fr) {
+        const size_t s0 = fr * kNRHop;
+        for (int i = 0; i < kNRWin; ++i)
+            fbuf[i] = cf(sampleAt(s0 + i) * win[i], 0.0f);
+        fft(fbuf, false);
+        float* pw = &power[fr * kNRSpec];
+        for (int k = 0; k < kNRSpec; ++k) {
+            const float re = fbuf[k].real(), im = fbuf[k].imag();
+            pw[k] = re * re + im * im;
+        }
+    }
+
+    // Classify each time-frequency cell: noise iff the SECOND GREATEST power
+    // among the 5 windows centred on it stays at or below the threshold
+    // sensitivity * ln(10) * mean noise power (out-of-range windows count as
+    // zero power, matching the padded queue).
+    const int nExamine = 1 + kNRWin / kNRHop;   // 5
+    const int center = nExamine / 2;            // 2
+    const double sensFactor = (double)opts.sensitivity * std::log(10.0);
+    std::vector<uint8_t> isNoise(nFr * (size_t)kNRSpec);
+    for (size_t fr = 0; fr < nFr; ++fr) {
+        uint8_t* cl = &isNoise[fr * kNRSpec];
+        for (int k = 0; k < kNRSpec; ++k) {
+            float greatest = 0.0f, second = 0.0f;
+            for (int d = -center; d <= nExamine - 1 - center; ++d) {
+                const int64_t f2 = (int64_t)fr + d;
+                const float pw = (f2 >= 0 && f2 < (int64_t)nFr)
+                                     ? power[(size_t)f2 * kNRSpec + k] : 0.0f;
+                if (pw >= greatest) { second = greatest; greatest = pw; }
+                else if (pw >= second) second = pw;
+            }
+            cl[k] = second <= sensFactor * prof.means[k] ? 1 : 0;
+        }
+    }
+
+    // Gains: attenuation for noise cells, unity for signal cells, then
+    // exponential attack (backward in time) and release (forward) ramps.
+    const float atten = (float)std::pow(10.0, -opts.reductionDb / 20.0);
+    const int nAttackBlocks  = 1 + (int)(0.02 * rate / kNRHop);
+    const int nReleaseBlocks = 1 + (int)(0.10 * rate / kNRHop);
+    const float oneAttack  = (float)std::pow(10.0, -opts.reductionDb / (20.0 * nAttackBlocks));
+    const float oneRelease = (float)std::pow(10.0, -opts.reductionDb / (20.0 * nReleaseBlocks));
+
+    std::vector<float>& gain = power;   // reuse storage; power no longer needed
+    for (size_t i = 0; i < gain.size(); ++i) gain[i] = isNoise[i] ? atten : 1.0f;
+    for (size_t fr = nFr - 1; fr-- > 0; ) {          // attack: toward earlier windows
+        const float* nx = &gain[(fr + 1) * kNRSpec];
+        float* g = &gain[fr * kNRSpec];
+        for (int k = 0; k < kNRSpec; ++k) {
+            const float m = nx[k] * oneAttack;
+            if (g[k] < m) g[k] = m;
+        }
+    }
+    for (size_t fr = 1; fr < nFr; ++fr) {            // release: toward later windows
+        const float* pv = &gain[(fr - 1) * kNRSpec];
+        float* g = &gain[fr * kNRSpec];
+        for (int k = 0; k < kNRSpec; ++k) {
+            const float m = pv[k] * oneRelease;
+            if (g[k] < m) g[k] = m;
+        }
+    }
+
+    // Pass B: frequency-smooth the gains, apply to the spectrum (Reduce: *g,
+    // Residue: *(g-1), phase-flipped like Audacity), resynthesize.
+    std::vector<float> outPad(padded, 0.0f), norm(padded, 0.0f);
+    std::vector<float> grow(kNRSpec), scratch(kNRSpec);
+    for (size_t fr = 0; fr < nFr; ++fr) {
+        const size_t s0 = fr * kNRHop;
+        for (int i = 0; i < kNRWin; ++i)
+            fbuf[i] = cf(sampleAt(s0 + i) * win[i], 0.0f);
+        fft(fbuf, false);
+        std::copy(&gain[fr * kNRSpec], &gain[fr * kNRSpec] + kNRSpec, grow.begin());
+        nrFreqSmooth(grow, opts.freqSmoothingBands, scratch);
+        for (int k = 0; k < kNRSpec; ++k) {
+            const float g = opts.residue ? grow[k] - 1.0f : grow[k];
+            fbuf[k] *= g;
+            if (k > 0 && k < kNRWin / 2) fbuf[kNRWin - k] *= g;  // conjugate mirror
+        }
+        fft(fbuf, true);
+        for (int i = 0; i < kNRWin; ++i) {
+            outPad[s0 + i] += fbuf[i].real() * win[i];
+            norm[s0 + i] += win[i] * win[i];
+        }
+    }
+    std::vector<float> out(len, 0.0f);
+    for (size_t i = 0; i < len; ++i) {
+        const float nn = norm[lead + i];
+        if (nn > 1e-6f) out[i] = outPad[lead + i] / nn;
+    }
+    return out;
+}
+
+AudioBufferPtr denoiseWithProfile(const AudioBuffer& buf, const NoiseProfile& profile,
+                                  const NRProfileOptions& opts) {
+    if (!profile.valid() || profile.sampleRate != buf.sampleRate) return nullptr;
+    const int ch = buf.channels;
+    const int64_t nf = buf.frames();
+    auto out = std::make_shared<AudioBuffer>();
+    out->sampleRate = buf.sampleRate;
+    out->channels = ch;
+    out->samples.resize(buf.samples.size());
+    if (nf <= 0 || ch <= 0) return out;
+
+    for (int c = 0; c < ch; ++c) {
+        std::vector<float> chan((size_t)nf);
+        for (int64_t i = 0; i < nf; ++i) chan[i] = buf.samples[i * ch + c];
+        std::vector<float> clean = denoiseChannelProfile(chan, buf.sampleRate, profile, opts);
+        for (int64_t i = 0; i < nf; ++i)
+            out->samples[i * ch + c] = std::max(-1.0f, std::min(1.0f, clean[i]));
+    }
+    return out;
+}
+
 AudioBufferPtr denoise(const AudioBuffer& buf, const NROptions& opts) {
+    if (opts.algorithm == NRAlgorithm::Profile) {
+        if (!opts.noiseProfile) return nullptr;
+        return denoiseWithProfile(buf, *opts.noiseProfile, opts.profile);
+    }
     int ch = buf.channels;
     int64_t nf = buf.frames();
     auto out = std::make_shared<AudioBuffer>();

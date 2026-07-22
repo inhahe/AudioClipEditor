@@ -25,7 +25,7 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   Save selection) slices the selection into a new clip you name (rename any time).
 - **Full-window clip editor.** Double-click a clip card (or right-click
   → *Open in editor*) to blow the clip up to a full-window view for precise work.
-  It has its own toolbar (play, play selection, crop, save selection, clear, done)
+  It has its own toolbar (play, play selection, crop, save selection, capture noise, clear, done)
   and — because dragging a pixel-precise edge on a zoomed-out waveform is fiddly —
   a pair of **fine-tune edge strips**: two zoomed lanes, one centred on the
   selection's **start** and one on its **end**, so you can nudge each boundary
@@ -55,15 +55,36 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   Loudness is measured over speech only — relatively silent gaps are ignored — so
   quiet talkers get pulled up without amplifying room tone.
 - **Voice cleaner (noise reduction).** Right-click → *Voice cleaner* runs an STFT
-  denoiser to strip steady background noise. Choose the **algorithm** (spectral
-  subtraction or Wiener filter) and how **aggressively** to clean (light / medium
-  / aggressive). You can clean at three **scopes** — a single clip, **every clip on
-  one track** (right-click the track header → *Voice cleaner — this track*), or
-  **every clip in the whole project** (clip menu → *Voice cleaner → All clips*).
-  A track/project clean uses one set of options and lands as a single undo step.
+  denoiser to strip steady background noise. Three **algorithms**: automatic
+  **spectral subtraction** or **Wiener filter** (noise floor estimated from the
+  quietest frames; pick light / medium / aggressive), or the Audacity-style
+  **noise profile** gate — a faithful reimplementation of Audacity's Noise
+  Reduction effect with the same two-step workflow and the same options. Drag a
+  selection over a noise-only stretch, capture it with **Get noise profile**
+  (button in the dialog, or right-click → *Voice cleaner → Capture noise from
+  selection*) — or capture from an **entire clip** (right-click → *Voice cleaner →
+  Capture noise from whole clip*) or from **inside the full-window editor** (the
+  **Capture noise** toolbar button, which uses the current selection if one is
+  active, else the whole clip) — then clean any clip with **Noise reduction (dB)** (0–48),
+  **Sensitivity** (0.01–24), **Frequency smoothing (bands)** (0–12), and
+  **Reduce / Residue** — Residue keeps only what would be removed, so you can
+  audition exactly what you're losing. You can clean at three **scopes** — a
+  single clip, **every clip on one track** (right-click the track header →
+  *Voice cleaner — this track*), or **every clip in the whole project** (clip menu
+  → *Voice cleaner → All clips*). A track/project clean uses one set of options
+  and lands as a single undo step.
+- **Reusable noise captures.** Each captured noise profile is remembered as a
+  **recent capture** (its computed spectral profile — the per-capture work that's
+  shared across every clip it cleans — is cached, so re-using it is instant). Any
+  clip's right-click *Voice cleaner → Apply noise capture ▸* lists the recent
+  captures; pick one to clean that clip with it in a single click (most-recently
+  used floats to the top). Captures live for the session.
 - **Save / load projects.** Projects are saved as a single `.acep` file with the
   whole library and timeline (audio embedded), so a project is fully
-  self-contained. `Ctrl+S` saves; the File menu has Open / Save / Save As.
+  self-contained. `Ctrl+S` saves; the File menu has Open / Save / Save As. The
+  title bar shows a `*` while there are unsaved changes, and the app **prompts you
+  to save** (Save / Don't Save / Cancel) before closing or opening another project
+  if the current one has unsaved edits — so you never lose work by accident.
 - **Export the mixdown.** *File → Export Mixdown* renders all tracks together and
   saves through the same audio dialog — pick **format, sample rate, bit depth**
   (16/24-bit PCM or 32-bit float for WAV), **bitrate** (compressed formats), and
@@ -109,10 +130,12 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Set clip / track volume | drag the volume slider on the card or track header |
 | Normalize volume | right-click a card → *Normalize to match other clips* / *Normalize all clips* |
 | Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |
+| Capture a noise profile | select a noise-only stretch, then right-click → *Voice cleaner → Capture noise from selection* (or the **Get noise profile** button in the dialog); or *Capture noise from whole clip*; or the **Capture noise** button in the full-window editor |
+| Apply a saved noise capture | right-click a card → *Voice cleaner → Apply noise capture ▸* and pick a recent capture |
 | Track actions | **right-click a track header/lane**: voice-clean the track, rename, remove |
 | Add a track | **+ Add Track** |
 | Place a clip on a track | drag a clip card up into a track lane (drops at any time offset, snaps to a neighbouring clip), or right-click → Add to timeline |
-| Move a placed clip | drag it (snaps to neighbours; drag vertically to change tracks) |
+| Move a placed clip | drag it along the track — a live ghost shows where it will land (snaps to neighbours; drag vertically to change tracks) |
 | Remove a placed clip | right-click it → Remove |
 | Set the playhead | click a track lane or the ruler |
 | Play all tracks | **▶ Play All** (`Space` when nothing is being previewed) |
@@ -136,7 +159,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `undo.h` | Snapshot-based undo **tree** with branching redo |
 | `document.{h,cpp}` | Owns the project + undo tree; every edit commits a snapshot |
 | `waveform.{h,cpp}` | GDI oscilloscope rendering: min/max envelope zoomed out, sample line zoomed in |
-| `dsp.{h,cpp}` | FFT, speech-aware loudness, STFT noise reduction (spectral subtraction / Wiener) |
+| `dsp.{h,cpp}` | FFT, speech-aware loudness, STFT noise reduction (spectral subtraction / Wiener / Audacity-style profile gate) |
 | `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, open/save file & project dialogs |
 | `ui.cpp` | Main window: menu bar, layout, painting, hit-testing, all interaction |
 | `selftest.cpp` | `--selftest` backend round-trip checks (decode/encode/peaks/DSP) |

@@ -253,22 +253,96 @@ bool exportOptions(HWND parent, mfio::ExportOptions& opts, std::wstring& outPath
 }
 
 // ------------------------------------------------------------------ voice cleaner
+enum { IDC_VC_ALGO = 2001, IDC_VC_GETPROFILE = 2002 };
+
 struct VCState {
-    dsp::NROptions* opts;
-    HWND cbAlgo, cbStrength;
+    VoiceCleanerContext* ctx = nullptr;
+    HWND cbAlgo = 0;
+    HWND lbStrength = 0, cbStrength = 0;
+    HWND lbProfile = 0, btnProfile = 0, stStatus = 0;
+    HWND lbDb = 0, edDb = 0, lbSens = 0, edSens = 0, lbBands = 0, edBands = 0;
+    HWND lbNoise = 0, rbReduce = 0, rbResidue = 0;
     bool ok = false;
 };
+
+static double vcReadDouble(HWND edit, double lo, double hi, double fallback) {
+    wchar_t buf[64]{}; GetWindowTextW(edit, buf, 64);
+    wchar_t* end = nullptr;
+    double v = wcstod(buf, &end);
+    if (end == buf) v = fallback;
+    return std::max(lo, std::min(hi, v));
+}
+
+static void vcUpdateStatus(VCState* st) {
+    std::wstring s;
+    if (st->ctx->profile && st->ctx->profile->valid())
+        s = L"Profile: " + *st->ctx->profileDesc;
+    else if (st->ctx->noiseSelection)
+        s = L"No profile yet \u2014 click Get Noise Profile to capture the current selection.";
+    else
+        s = L"No profile yet \u2014 select a noise-only span in a clip first, then reopen.";
+    SetWindowTextW(st->stStatus, s.c_str());
+}
+
+static void vcUpdateVisibility(VCState* st) {
+    const bool prof = SendMessageW(st->cbAlgo, CB_GETCURSEL, 0, 0) == 2;
+    for (HWND c : { st->lbStrength, st->cbStrength })
+        ShowWindow(c, prof ? SW_HIDE : SW_SHOW);
+    for (HWND c : { st->lbProfile, st->btnProfile, st->stStatus, st->lbDb, st->edDb,
+                    st->lbSens, st->edSens, st->lbBands, st->edBands,
+                    st->lbNoise, st->rbReduce, st->rbResidue })
+        ShowWindow(c, prof ? SW_SHOW : SW_HIDE);
+}
 
 static LRESULT CALLBACK VCProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     auto* st = (VCState*)GetWindowLongPtrW(h, GWLP_USERDATA);
     switch (m) {
     case WM_COMMAND:
+        if (LOWORD(w) == IDC_VC_ALGO && HIWORD(w) == CBN_SELCHANGE) {
+            vcUpdateVisibility(st); return 0;
+        }
+        if (LOWORD(w) == IDC_VC_GETPROFILE) {
+            if (st->ctx->noiseSelection) {
+                dsp::NoiseProfile p = dsp::computeNoiseProfile(*st->ctx->noiseSelection);
+                if (!p.valid()) {
+                    MessageBoxW(h,
+                        L"Selected noise profile is too short.\n"
+                        L"Select at least ~50 ms of noise-only audio.",
+                        L"Voice Cleaner", MB_ICONINFORMATION);
+                } else {
+                    *st->ctx->profile = std::move(p);
+                    wchar_t d[160];
+                    swprintf(d, 160, L"%.2f s from %s", st->ctx->profile->seconds,
+                             st->ctx->selectionDesc.c_str());
+                    *st->ctx->profileDesc = d;
+                    st->ctx->captured = true;   // caller adds this to recent captures
+                }
+                vcUpdateStatus(st);
+            }
+            return 0;
+        }
         if (LOWORD(w) == IDCANCEL) { st->ok = false; DestroyWindow(h); return 0; }
         if (LOWORD(w) == IDOK) {
-            int ai = (int)SendMessageW(st->cbAlgo, CB_GETCURSEL, 0, 0);
-            int si = (int)SendMessageW(st->cbStrength, CB_GETCURSEL, 0, 0);
-            st->opts->algorithm = (ai == 1) ? dsp::NRAlgorithm::Wiener : dsp::NRAlgorithm::SpectralSubtraction;
-            st->opts->strength = si == 0 ? dsp::NRStrength::Light : si == 2 ? dsp::NRStrength::Aggressive : dsp::NRStrength::Medium;
+            const int ai = (int)SendMessageW(st->cbAlgo, CB_GETCURSEL, 0, 0);
+            const int si = (int)SendMessageW(st->cbStrength, CB_GETCURSEL, 0, 0);
+            dsp::NROptions& o = *st->ctx->opts;
+            if (ai == 2 && !(st->ctx->profile && st->ctx->profile->valid())) {
+                MessageBoxW(h,
+                    L"No noise profile has been captured.\n\n"
+                    L"Close this dialog, drag-select a span that contains only noise "
+                    L"(no speech) on any clip, reopen the voice cleaner and click "
+                    L"Get Noise Profile.",
+                    L"Voice Cleaner", MB_ICONINFORMATION);
+                return 0;
+            }
+            o.algorithm = ai == 2 ? dsp::NRAlgorithm::Profile
+                        : ai == 1 ? dsp::NRAlgorithm::Wiener
+                                  : dsp::NRAlgorithm::SpectralSubtraction;
+            o.strength = si == 0 ? dsp::NRStrength::Light : si == 2 ? dsp::NRStrength::Aggressive : dsp::NRStrength::Medium;
+            o.profile.reductionDb = (float)vcReadDouble(st->edDb, 0.0, 48.0, 6.0);
+            o.profile.sensitivity = (float)vcReadDouble(st->edSens, 0.01, 24.0, 6.0);
+            o.profile.freqSmoothingBands = (int)(vcReadDouble(st->edBands, 0.0, 12.0, 6.0) + 0.5);
+            o.profile.residue = SendMessageW(st->rbResidue, BM_GETCHECK, 0, 0) == BST_CHECKED;
             st->ok = true; DestroyWindow(h); return 0;
         }
         break;
@@ -277,7 +351,7 @@ static LRESULT CALLBACK VCProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
-bool voiceCleaner(HWND parent, dsp::NROptions& opts) {
+bool voiceCleaner(HWND parent, VoiceCleanerContext& ctx) {
     static bool reg = false;
     HINSTANCE hInst = GetModuleHandleW(nullptr);
     if (!reg) {
@@ -286,9 +360,10 @@ bool voiceCleaner(HWND parent, dsp::NROptions& opts) {
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         wc.lpszClassName = L"ACE_VC"; RegisterClassW(&wc); reg = true;
     }
-    VCState st; st.opts = &opts;
+    dsp::NROptions& opts = *ctx.opts;
+    VCState st; st.ctx = &ctx;
     RECT pr; GetWindowRect(parent, &pr);
-    int W = 380, H = 210;
+    int W = 430, H = 368;
     int x = pr.left + ((pr.right - pr.left) - W) / 2;
     int y = pr.top + ((pr.bottom - pr.top) - H) / 2;
     HWND h = CreateWindowExW(WS_EX_DLGMODALFRAME, L"ACE_VC", L"Voice Cleaner",
@@ -296,38 +371,85 @@ bool voiceCleaner(HWND parent, dsp::NROptions& opts) {
     SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
 
     HWND info = CreateWindowW(L"STATIC",
-        L"Reduces steady background noise (hum, hiss, fans).\nNoise profile is auto-detected from quiet gaps.",
-        WS_CHILD | WS_VISIBLE, 16, 12, 344, 36, h, nullptr, hInst, nullptr);
-    auto label = [&](const wchar_t* t, int yy) {
-        HWND c = CreateWindowW(L"STATIC", t, WS_CHILD | WS_VISIBLE, 16, yy, 90, 20, h, nullptr, hInst, nullptr);
-        SendMessageW(c, WM_SETFONT, (WPARAM)guiFont(), TRUE);
-    };
-    auto combo = [&](int yy) {
-        HWND c = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
-            116, yy, 240, 160, h, nullptr, hInst, nullptr);
+        L"Reduces steady background noise (hum, hiss, fans).\n"
+        L"Auto algorithms profile quiet gaps; Noise profile uses a captured sample.",
+        WS_CHILD | WS_VISIBLE, 16, 12, 396, 36, h, nullptr, hInst, nullptr);
+    SendMessageW(info, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+    auto label = [&](const wchar_t* t, int yy, int w = 180) {
+        HWND c = CreateWindowW(L"STATIC", t, WS_CHILD | WS_VISIBLE, 16, yy, w, 20, h, nullptr, hInst, nullptr);
         SendMessageW(c, WM_SETFONT, (WPARAM)guiFont(), TRUE);
         return c;
     };
-    label(L"Algorithm:", 62);  st.cbAlgo = combo(60);
-    label(L"Strength:", 98);   st.cbStrength = combo(96);
-    SendMessageW(info, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+    auto combo = [&](int yy, int id = 0) {
+        HWND c = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+            210, yy, 202, 200, h, (HMENU)(INT_PTR)id, hInst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+        return c;
+    };
+    auto edit = [&](int yy, const std::wstring& text) {
+        HWND c = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", text.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            210, yy, 80, 22, h, nullptr, hInst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+        return c;
+    };
 
-    SendMessageW(st.cbAlgo, CB_ADDSTRING, 0, (LPARAM)L"Spectral subtraction");
-    SendMessageW(st.cbAlgo, CB_ADDSTRING, 0, (LPARAM)L"Wiener filter");
+    label(L"Algorithm:", 58);
+    st.cbAlgo = combo(56, IDC_VC_ALGO);
+    for (auto* a : { L"Spectral subtraction", L"Wiener filter", L"Noise profile (Audacity-style)" })
+        SendMessageW(st.cbAlgo, CB_ADDSTRING, 0, (LPARAM)a);
+
+    // Auto-algorithm row (shares the row below Algorithm with the profile button)
+    st.lbStrength = label(L"Strength:", 94);
+    st.cbStrength = combo(92);
     for (auto* s : { L"Light", L"Medium", L"Aggressive" })
         SendMessageW(st.cbStrength, CB_ADDSTRING, 0, (LPARAM)s);
-    SendMessageW(st.cbAlgo, CB_SETCURSEL, opts.algorithm == dsp::NRAlgorithm::Wiener ? 1 : 0, 0);
+
+    // Profile rows
+    st.lbProfile = label(L"Noise profile:", 94);
+    st.btnProfile = CreateWindowW(L"BUTTON", L"Get Noise Profile",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 210, 90, 202, 26, h, (HMENU)IDC_VC_GETPROFILE, hInst, nullptr);
+    SendMessageW(st.btnProfile, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+    EnableWindow(st.btnProfile, ctx.noiseSelection != nullptr);
+    st.stStatus = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 16, 122, 396, 18, h, nullptr, hInst, nullptr);
+    SendMessageW(st.stStatus, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+
+    wchar_t num[64];
+    swprintf(num, 64, L"%g", (double)opts.profile.reductionDb);
+    st.lbDb = label(L"Noise reduction (dB):", 150);
+    st.edDb = edit(148, num);
+    swprintf(num, 64, L"%.2f", (double)opts.profile.sensitivity);
+    st.lbSens = label(L"Sensitivity:", 182);
+    st.edSens = edit(180, num);
+    swprintf(num, 64, L"%d", opts.profile.freqSmoothingBands);
+    st.lbBands = label(L"Frequency smoothing (bands):", 214);
+    st.edBands = edit(212, num);
+    st.lbNoise = label(L"Noise:", 246);
+    st.rbReduce = CreateWindowW(L"BUTTON", L"Reduce",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
+        210, 244, 90, 20, h, nullptr, hInst, nullptr);
+    st.rbResidue = CreateWindowW(L"BUTTON", L"Residue",
+        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+        306, 244, 100, 20, h, nullptr, hInst, nullptr);
+    for (HWND c : { st.rbReduce, st.rbResidue }) SendMessageW(c, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+    SendMessageW(opts.profile.residue ? st.rbResidue : st.rbReduce, BM_SETCHECK, BST_CHECKED, 0);
+
+    const int ai = opts.algorithm == dsp::NRAlgorithm::Profile ? 2
+                 : opts.algorithm == dsp::NRAlgorithm::Wiener ? 1 : 0;
+    SendMessageW(st.cbAlgo, CB_SETCURSEL, ai, 0);
     int si = opts.strength == dsp::NRStrength::Light ? 0 : opts.strength == dsp::NRStrength::Aggressive ? 2 : 1;
     SendMessageW(st.cbStrength, CB_SETCURSEL, si, 0);
 
     HWND ok = CreateWindowW(L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-        168, 138, 88, 30, h, (HMENU)IDOK, hInst, nullptr);
+        218, 286, 88, 30, h, (HMENU)IDOK, hInst, nullptr);
     HWND cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-        264, 138, 88, 30, h, (HMENU)IDCANCEL, hInst, nullptr);
+        314, 286, 88, 30, h, (HMENU)IDCANCEL, hInst, nullptr);
     SendMessageW(ok, WM_SETFONT, (WPARAM)guiFont(), TRUE);
     SendMessageW(cancel, WM_SETFONT, (WPARAM)guiFont(), TRUE);
 
-    SetFocus(st.cbStrength);
+    vcUpdateStatus(&st);
+    vcUpdateVisibility(&st);
+    SetFocus(st.cbAlgo);
     runModal(h, parent);
     return st.ok;
 }
