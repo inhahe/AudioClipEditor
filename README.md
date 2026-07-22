@@ -65,11 +65,17 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   selection*), then clean any clip with **Noise reduction (dB)** (0–48),
   **Sensitivity** (0.01–24), **Frequency smoothing (bands)** (0–12), and
   **Reduce / Residue** — Residue keeps only what would be removed, so you can
-  audition exactly what you're losing. The profile and last-used settings persist
-  for the session. You can clean at three **scopes** — a single clip, **every clip
-  on one track** (right-click the track header → *Voice cleaner — this track*), or
-  **every clip in the whole project** (clip menu → *Voice cleaner → All clips*).
-  A track/project clean uses one set of options and lands as a single undo step.
+  audition exactly what you're losing. You can clean at three **scopes** — a
+  single clip, **every clip on one track** (right-click the track header →
+  *Voice cleaner — this track*), or **every clip in the whole project** (clip menu
+  → *Voice cleaner → All clips*). A track/project clean uses one set of options
+  and lands as a single undo step.
+- **Reusable noise captures.** Each captured noise profile is remembered as a
+  **recent capture** (its computed spectral profile — the per-capture work that's
+  shared across every clip it cleans — is cached, so re-using it is instant). Any
+  clip's right-click *Voice cleaner → Apply noise capture ▸* lists the recent
+  captures; pick one to clean that clip with it in a single click (most-recently
+  used floats to the top). Captures live for the session.
 - **Save / load projects.** Projects are saved as a single `.acep` file with the
   whole library and timeline (audio embedded), so a project is fully
   self-contained. `Ctrl+S` saves; the File menu has Open / Save / Save As.
@@ -118,11 +124,12 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Set clip / track volume | drag the volume slider on the card or track header |
 | Normalize volume | right-click a card → *Normalize to match other clips* / *Normalize all clips* |
 | Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |
-| Capture a noise profile | select a noise-only stretch, then right-click → *Voice cleaner → Get noise profile from selection* (or the **Get noise profile** button in the dialog) |
+| Capture a noise profile | select a noise-only stretch, then right-click → *Voice cleaner → Capture noise from selection* (or the **Get noise profile** button in the dialog) |
+| Apply a saved noise capture | right-click a card → *Voice cleaner → Apply noise capture ▸* and pick a recent capture |
 | Track actions | **right-click a track header/lane**: voice-clean the track, rename, remove |
 | Add a track | **+ Add Track** |
 | Place a clip on a track | drag a clip card up into a track lane (drops at any time offset, snaps to a neighbouring clip), or right-click → Add to timeline |
-| Move a placed clip | drag it (snaps to neighbours; drag vertically to change tracks) |
+| Move a placed clip | drag it along the track — a live ghost shows where it will land (snaps to neighbours; drag vertically to change tracks) |
 | Remove a placed clip | right-click it → Remove |
 | Set the playhead | click a track lane or the ruler |
 | Play all tracks | **▶ Play All** (`Space` when nothing is being previewed) |

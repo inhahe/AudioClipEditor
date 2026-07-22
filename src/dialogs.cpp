@@ -315,6 +315,7 @@ static LRESULT CALLBACK VCProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                     swprintf(d, 160, L"%.2f s from %s", st->ctx->profile->seconds,
                              st->ctx->selectionDesc.c_str());
                     *st->ctx->profileDesc = d;
+                    st->ctx->captured = true;   // caller adds this to recent captures
                 }
                 vcUpdateStatus(st);
             }

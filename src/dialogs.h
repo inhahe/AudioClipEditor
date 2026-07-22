@@ -30,6 +30,9 @@ struct VoiceCleanerContext {
     std::wstring* profileDesc = nullptr;          // in/out, e.g. "1.2 s from 'clip'"
     const AudioBuffer* noiseSelection = nullptr;  // current selection slice, or null
     std::wstring selectionDesc;                   // clip name of the selection
+    bool captured = false;                        // set true if the user captured a new
+                                                  // profile via Get Noise Profile, so the
+                                                  // caller can add it to recent captures
 };
 bool voiceCleaner(HWND parent, VoiceCleanerContext& ctx);
 

@@ -99,10 +99,45 @@ apply" maps onto this app's clip model:
 - Reduction applies to **whole clips** per the app's existing scope model (this
   clip / this track / all clips), not to the selection.
 - **Session persistence**: `App` holds `nrOpts` (last-used options),
-  `noiseProfile`, and `noiseProfileDesc` (e.g. `1.20 s from 'clip'`). The
+  `noiseProfile`/`noiseProfileDesc` (the *active* capture, e.g. `1.20 s from
+  'clip'`), and `noiseCaptures` (recent captures, most-recent first). The active
   profile survives across dialog invocations, like Audacity's session profile.
   `NROptions::noiseProfile` (the pointer) is **bound only at call time**
   (`opts.noiseProfile = &noiseProfile;`) — never persisted — to avoid dangling.
+
+### Recent noise captures (reuse without recompute)
+
+- A **`NoiseCapture`** = the computed `dsp::NoiseProfile` + a description. The
+  profile (per-bin noise-power means) is the *only* capture-derived precomputation
+  that is shared unchanged across every clip a capture cleans — everything else
+  (target STFT, classification, gains) depends on the target audio. So the
+  captures list caches exactly that profile; re-selecting a capture from recents
+  never recomputes it.
+- `App::noiseCaptures` (`std::vector<NoiseCapture>`, cap 8, MRU-ordered).
+  `rememberCapture()` inserts at the front (skipping a no-op re-add of the current
+  front); both `captureNoiseProfileFromSelection()` and the dialog's Get-Noise-
+  Profile button (which sets `VoiceCleanerContext::captured`) feed it.
+- **Apply from recents**: clip right-click → *Voice cleaner → Apply noise capture
+  ▸* lists the captures (`IDM_APPLYCAP_BASE + index`). `applyCaptureToClip()`
+  copies the chosen profile into the stable `noiseProfile` member (never holds a
+  pointer into the vector across the MRU reorder), forces `NRAlgorithm::Profile`,
+  denoises that one clip with the current `nrOpts.profile` options as a single
+  undo step, then promotes the capture to the front. Rejects a sample-rate
+  mismatch with a message.
+- Captures are **session-scoped** (not written to the `.acep` project), matching
+  Audacity's session profile behavior.
+
+## Timeline: moving a placed clip (drag feedback)
+
+`Mode::ClipMove` (started in `onLDown` when `placedAt(p)` hits) drags a placed
+clip. During the drag `paintTimeline` draws a **live ghost** of the clip (name +
+waveform) at the snapped target position under the cursor — coloured
+`clipBlkSel` when the drop is legal, `stop` (red) when it would overlap — while
+the clip's home slot is left as a faint outline. The actual `Document::moveClip`
+happens on `onLUp`. The ghost mirrors the existing `Mode::CardDrag`
+(library-card → track) drop preview and uses the same `snapFrame` /
+`Track::overlaps(start, len, ignore)` logic as the commit, so what you see is
+where it lands.
 
 ## Voice-cleaner dialog (`dialogs.cpp`)
 
