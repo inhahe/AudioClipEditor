@@ -1219,7 +1219,16 @@ struct App {
     // Capture the Audacity-style noise profile from the current selection
     // (right-click shortcut; the voice cleaner dialog has the same button).
     void captureNoiseProfileFromSelection() {
-        if (!hasSel()) return;
+        if (!hasSel()) {
+            MessageBoxW(hwnd,
+                L"Select a noise-only region first.\n\n"
+                L"Drag across a clip's waveform over a stretch that contains only "
+                L"background noise (no speech), then choose \u201CCapture noise from "
+                L"selection\u201D again. The capture is then available under "
+                L"\u201CApply noise capture\u201D for any clip.",
+                L"Capture noise", MB_ICONINFORMATION);
+            return;
+        }
         const Clip* c = doc.project().findClip(selClipId);
         if (!c || !c->buffer) return;
         auto slice = sliceBuffer(*c->buffer, selStart, selEnd);
@@ -1748,8 +1757,12 @@ struct App {
         AppendMenuW(vc, MF_STRING, IDM_DENOISE, L"This clip\u2026");
         AppendMenuW(vc, MF_STRING, IDM_DENOISE_ALL, L"All clips (whole project)\u2026");
         AppendMenuW(vc, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(vc, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_GETPROFILE,
-                    L"Capture noise from selection");
+        // Always enabled: capturing uses whatever clip currently holds the
+        // drag-selection (not necessarily the one right-clicked). If there is no
+        // selection yet, the handler explains how to make one.
+        AppendMenuW(vc, MF_STRING, IDM_GETPROFILE,
+                    hasSel() ? L"Capture noise from selection"
+                             : L"Capture noise from selection\u2026");
         // Apply a remembered background-noise capture straight to this clip.
         HMENU rec = CreatePopupMenu();
         if (noiseCaptures.empty()) {
