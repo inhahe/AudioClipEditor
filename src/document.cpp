@@ -3,6 +3,23 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <windows.h>
+
+// The timestamp used for "sort by time": the source file's last-write time when
+// the clip came from disk, else the current wall-clock time (derived clips).
+static uint64_t clipTimestampFor(const std::wstring& sourcePath) {
+    if (!sourcePath.empty()) {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (GetFileAttributesExW(sourcePath.c_str(), GetFileExInfoStandard, &fad)) {
+            ULARGE_INTEGER u; u.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+            u.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+            if (u.QuadPart) return u.QuadPart;
+        }
+    }
+    FILETIME ft{}; GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER u; u.LowPart = ft.dwLowDateTime; u.HighPart = ft.dwHighDateTime;
+    return u.QuadPart;
+}
 
 void Document::init(int sampleRate) {
     project_ = Project{};
@@ -32,6 +49,7 @@ int Document::addClip(const std::wstring& name, AudioBufferPtr buf,
     c.sourcePath = sourcePath;
     c.buffer = buf;
     c.peaks = buildPeaks(buf);
+    c.timestamp = clipTimestampFor(sourcePath);
     int id = c.id;
     project_.library.push_back(std::move(c));
     commit(undoDesc);
@@ -59,6 +77,41 @@ void Document::removeClip(int id) {
     lib.erase(std::remove_if(lib.begin(), lib.end(),
         [&](const Clip& x) { return x.id == id; }), lib.end());
     commit(L"Delete clip '" + nm + L"'");
+}
+
+void Document::moveClipInLibrary(int clipId, int targetIndex) {
+    auto& lib = project_.library;
+    int from = -1;
+    for (int i = 0; i < (int)lib.size(); ++i) if (lib[i].id == clipId) { from = i; break; }
+    if (from < 0) return;
+    if (targetIndex < 0) targetIndex = 0;
+    if (targetIndex > (int)lib.size()) targetIndex = (int)lib.size();
+    // Dropping just before or just after the current slot is a no-op.
+    if (targetIndex == from || targetIndex == from + 1) return;
+    Clip c = std::move(lib[from]);
+    lib.erase(lib.begin() + from);
+    if (targetIndex > from) --targetIndex;   // account for the removal above
+    lib.insert(lib.begin() + targetIndex, std::move(c));
+    commit(L"Reorder clips");
+}
+
+void Document::sortLibrary(bool byName) {
+    auto& lib = project_.library;
+    if (lib.size() < 2) return;
+    std::vector<Clip> before = lib;  // detect an actual change to avoid a no-op undo step
+    std::stable_sort(lib.begin(), lib.end(), [byName](const Clip& a, const Clip& b) {
+        if (byName) {
+            int cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
+            if (cmp != 0) return cmp < 0;
+            return a.id < b.id;               // stable tiebreak for equal names
+        }
+        if (a.timestamp != b.timestamp) return a.timestamp < b.timestamp;
+        return a.id < b.id;
+    });
+    bool changed = false;
+    for (size_t i = 0; i < lib.size(); ++i) if (lib[i].id != before[i].id) { changed = true; break; }
+    if (!changed) return;
+    commit(byName ? L"Sort clips by name" : L"Sort clips by time");
 }
 
 void Document::replaceClipBuffer(int id, AudioBufferPtr newBuf, const std::wstring& desc) {
@@ -264,7 +317,7 @@ bool Document::saveProject(const std::wstring& path) {
     FILE* f = _wfopen(path.c_str(), L"wb");
     if (!f) return false;
     fwrite("ACEP", 1, 4, f);
-    wU32(f, 1);
+    wU32(f, 2);   // v2 adds per-clip timestamp (for "sort by time")
     wI32(f, project_.sampleRate);
     wI32(f, project_.nextClipId);
     wI32(f, project_.nextTrackId);
@@ -274,6 +327,7 @@ bool Document::saveProject(const std::wstring& path) {
         wF32(f, c.gain);
         wStr(f, c.name);
         wStr(f, c.sourcePath);
+        wI64(f, (int64_t)c.timestamp);
         int ch = c.buffer ? c.buffer->channels : 2;
         int sr = c.buffer ? c.buffer->sampleRate : project_.sampleRate;
         int64_t nf = c.frames();
@@ -299,7 +353,7 @@ bool Document::loadProject(const std::wstring& path) {
     FILE* f = _wfopen(path.c_str(), L"rb");
     if (!f) return false;
     char magic[4]; if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "ACEP", 4) != 0) { fclose(f); return false; }
-    uint32_t ver = rU32(f); (void)ver;
+    uint32_t ver = rU32(f);
 
     Project p;
     p.sampleRate = rI32(f);
@@ -312,6 +366,9 @@ bool Document::loadProject(const std::wstring& path) {
         c.gain = rF32(f);
         c.name = rStr(f);
         c.sourcePath = rStr(f);
+        // v2+ stores the timestamp; for older projects fall back to the source
+        // file's current mtime (or now) so "sort by time" still does something sane.
+        c.timestamp = (ver >= 2) ? (uint64_t)rI64(f) : clipTimestampFor(c.sourcePath);
         int ch = rI32(f); int sr = rI32(f); int64_t nf = rI64(f);
         auto buf = std::make_shared<AudioBuffer>();
         buf->channels = ch; buf->sampleRate = sr;

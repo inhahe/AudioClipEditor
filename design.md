@@ -11,7 +11,7 @@ sync with behavior changes.
 | File | Role |
 |---|---|
 | `audio_buffer.h` | `AudioBuffer` (interleaved float PCM, `sampleRate`/`channels`/`samples`), `AudioBufferPtr` (`shared_ptr`), `PeakCache` min/max bucket envelope for waveform drawing |
-| `model.h` | `Clip` (id, name, buffer, peaks, gain), `Track` (id, name, gain, placed clips), `PlacedClip` (clipId + start frame), `Project` |
+| `model.h` | `Clip` (id, name, buffer, peaks, gain, **timestamp**), `Track` (id, name, gain, placed clips), `PlacedClip` (clipId + start frame), `Project` (library order = display order) |
 | `decoder.{h,cpp}` | MF Source Reader → stereo float at the project rate |
 | `encoder.{h,cpp}` | WAV writer (manual RIFF; 16/24-bit PCM, 32-bit float) + MF Sink Writer (MP3/AAC/WMA); output-rate resampling |
 | `engine.{h,cpp}` | WASAPI shared-mode render thread; `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
@@ -149,6 +149,31 @@ happens on `onLUp`. The ghost mirrors the existing `Mode::CardDrag`
 `Track::overlaps(start, len, ignore)` logic as the commit, so what you see is
 where it lands.
 
+## Library ordering (reorder + sort)
+
+The clip library's display order **is** `Project::library`'s vector order
+(`layoutCards` walks it in order), so reordering means reordering the vector.
+
+- **Drag-reorder**: dragging a card by its title bar starts `Mode::CardDrag` (the
+  same gesture as drag-to-track). Dropping inside `rcLibrary` (rather than on a
+  track) calls `Document::moveClipInLibrary(clipId, libInsertIndex(p))`.
+  `libInsertIndex` returns a reading-order insertion index (earlier row, or same
+  row and left of a card's centre); `moveClipInLibrary` erases then re-inserts,
+  adjusting the target for the removal, and is a no-op (no undo step) when the drop
+  wouldn't change position. `paintLibrary` draws a live accent **insertion caret**
+  at the drop point and outlines the dragged card in accent; the cursor shows
+  `IDC_SIZEALL` over a drag handle / during a card drag.
+- **Sort**: right-clicking the empty library area (`onRDown` → `libraryContextMenu`)
+  offers *Sort by name (A–Z)* and *Sort by time (oldest first)* →
+  `Document::sortLibrary(byName)`. Name sort is case-insensitive (`_wcsicmp`) with
+  an id tiebreak; time sort uses `Clip::timestamp`. Both `stable_sort` and only
+  commit an undo step if the order actually changed.
+- **`Clip::timestamp`** (FILETIME ticks) is set in `Document::addClip` from the
+  source file's last-write time, or the current time for derived clips (crop /
+  save-selection, no source path). It is persisted in the `.acep` file (**format
+  bumped to v2**); loading a v1 project falls back to the source file's current
+  mtime so time-sort still works.
+
 ## Selection editing (independent edges)
 
 A selection can be adjusted one edge at a time instead of redrawn. All three
@@ -186,7 +211,9 @@ box) when Profile is chosen without a captured profile. Numeric edits parse with
 capture validity + too-short rejection, 20 dB reduction attenuates a noise-only
 region by ≈20 dB (measured −20.00 dB) while preserving ≥70% of an embedded tone
 (measured 99.5%), reduce−residue==original identity, rate-mismatch rejection,
-dispatch through `denoise()` incl. missing-profile rejection.
+dispatch through `denoise()` incl. missing-profile rejection. Also covers a
+`Document` `.acep` **v2 round-trip** (library order + per-clip timestamps
+preserved) and library **sort-by-name / sort-by-time / reorder**.
 
 ## Undo / scopes
 

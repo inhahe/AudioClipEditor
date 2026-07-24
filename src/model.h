@@ -14,6 +14,9 @@ struct Clip {
     AudioBufferPtr buffer;
     PeakCachePtr peaks;
     float gain = 1.0f;             // linear volume multiplier
+    uint64_t timestamp = 0;        // FILETIME ticks: source file's mtime for loaded
+                                   // clips, else the wall-clock time it was created.
+                                   // Used for "sort by time" in the library.
 
     int64_t frames() const { return buffer ? buffer->frames() : 0; }
     int sampleRate() const { return buffer ? buffer->sampleRate : 48000; }

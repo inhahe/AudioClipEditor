@@ -53,6 +53,7 @@ enum {
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE,
+    IDM_SORT_NAME = 340, IDM_SORT_TIME,
     IDM_REDO_BASE = 400,
     IDM_APPLYCAP_BASE = 500   // + recent-capture index (apply to the clicked clip)
 };
@@ -197,6 +198,18 @@ struct App {
             int sx0 = c.wave.left + (int)((double)selStart / nf * ww);
             int sx1 = c.wave.left + (int)((double)selEnd / nf * ww);
             return hitSelEdge(p.x, sx0, sx1) != 0;
+        }
+        return false;
+    }
+    // A card is being dragged to reorder / place it.
+    bool draggingCard() const { return mode == Mode::CardDrag && dragged; }
+    // Is p over a card's title-bar drag handle (the grab area for reordering /
+    // dragging to a track), excluding the play / delete buttons that sit in it?
+    bool overCardDragHandle(POINT p) const {
+        if (editorActive() || !PtInRect(&rcLibrary, p)) return false;
+        for (auto& c : cards) if (PtInRect(&c.top, p)) {
+            if (PtInRect(&c.play, p) || PtInRect(&c.del, p)) return false;
+            return true;
         }
         return false;
     }
@@ -826,7 +839,9 @@ struct App {
             const Clip* c = doc.project().findClip(cl.clipId);
             if (!c) continue;
             bool selHere = (selClipId == cl.clipId);
-            roundFill(h, cl.card, selHere ? col::cardSel : col::card, col::cardEdge, S(8));
+            bool dragThis = (mode == Mode::CardDrag && dragged && cl.clipId == dragClipId);
+            roundFill(h, cl.card, selHere ? col::cardSel : col::card,
+                      dragThis ? col::accent : col::cardEdge, S(8));
 
             // play/pause button
             bool playingThis = (previewClipId == cl.clipId) && engine.isPlaying();
@@ -885,6 +900,18 @@ struct App {
             drawSlider(h, cl.vol, c->gain);
             RECT pct = { cl.vol.right + S(4), cl.vol.top - S(2), cl.card.right - S(6), cl.vol.bottom + S(2) };
             textOut(h, pct, gainLabel(c->gain), col::dim, fSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        }
+        // insertion caret while reordering a clip within the library
+        if (mode == Mode::CardDrag && dragged && !cards.empty()) {
+            POINT cp; GetCursorPos(&cp); ScreenToClient(hwnd, &cp);
+            if (PtInRect(&rcLibrary, cp)) {
+                int idx = libInsertIndex(cp);
+                bool atEnd = idx >= (int)cards.size();
+                const RECT& ref = atEnd ? cards.back().card : cards[idx].card;
+                int cx = atEnd ? ref.right + S(6) : ref.left - S(6);
+                RECT bar = { cx - S(1), ref.top, cx + S(2), ref.bottom };
+                fill(h, bar, col::accent);
+            }
         }
         RestoreDC(h, -1);
     }
@@ -1052,6 +1079,19 @@ struct App {
     const CardLayout* cardAt(POINT p) {
         for (auto& c : cards) if (PtInRect(&c.card, p)) return &c;
         return nullptr;
+    }
+    // Reading-order insertion index for a library drag/drop at p (0..cards.size()).
+    // A card comes before the cursor if it's on an earlier row, or on the same row
+    // and its centre is left of the cursor.
+    int libInsertIndex(POINT p) const {
+        for (int i = 0; i < (int)cards.size(); ++i) {
+            const RECT& r = cards[i].card;
+            int cx = (r.left + r.right) / 2;
+            bool earlierRow = p.y < r.top;
+            bool sameRow = p.y >= r.top && p.y < r.bottom;
+            if (earlierRow || (sameRow && p.x < cx)) return i;
+        }
+        return (int)cards.size();
     }
     const PlacedLayout* placedAt(POINT p) {
         for (auto& pl : placed) if (PtInRect(&pl.rc, p)) return &pl;
@@ -1799,6 +1839,10 @@ struct App {
                             MessageBoxW(hwnd, L"Clips can't overlap on a track.", L"Can't place", MB_ICONINFORMATION);
                         else afterPlaceRefresh();
                     }
+                } else if (PtInRect(&rcLibrary, p)) {
+                    // dropped back inside the library -> reorder to the drop position
+                    doc.moveClipInLibrary(dragClipId, libInsertIndex(p));
+                    clampScroll(); refresh();
                 }
             }
         } else if (m == Mode::ClipMove) {
@@ -1826,6 +1870,7 @@ struct App {
         if (PtInRect(&rcLibrary, p)) {
             const CardLayout* cl = cardAt(p);
             if (cl) { clipContextMenu(cl->clipId, p); return; }
+            libraryContextMenu(p); return;
         }
         if (PtInRect(&rcTimeline, p)) {
             const PlacedLayout* pl = placedAt(p);
@@ -1869,6 +1914,19 @@ struct App {
         else if (cmd == IDM_TRK_REMOVE) {
             if (doc.project().tracks.size() > 1) { doc.removeTrack(trackId); afterHistory(); }
         }
+    }
+
+    // Right-click on the empty library area: sort the clip grid.
+    void libraryContextMenu(POINT p) {
+        HMENU m = CreatePopupMenu();
+        UINT flags = doc.project().library.size() > 1 ? MF_STRING : (MF_STRING | MF_GRAYED);
+        AppendMenuW(m, flags, IDM_SORT_NAME, L"Sort clips by name (A\u2013Z)");
+        AppendMenuW(m, flags, IDM_SORT_TIME, L"Sort clips by time (oldest first)");
+        POINT sp = p; ClientToScreen(hwnd, &sp);
+        int cmd = TrackPopupMenu(m, TPM_RETURNCMD, sp.x, sp.y, 0, hwnd, nullptr);
+        DestroyMenu(m);
+        if (cmd == IDM_SORT_NAME) { doc.sortLibrary(true);  clampScroll(); refresh(); }
+        else if (cmd == IDM_SORT_TIME) { doc.sortLibrary(false); clampScroll(); refresh(); }
     }
 
     void clipContextMenu(int clipId, POINT p) {
@@ -2126,8 +2184,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SETCURSOR:
         if (a && LOWORD(lp) == HTCLIENT) {
             if (a->draggingSelEdge()) { SetCursor(LoadCursor(nullptr, IDC_SIZEWE)); return TRUE; }
+            if (a->draggingCard())   { SetCursor(LoadCursor(nullptr, IDC_SIZEALL)); return TRUE; }
             POINT cp; GetCursorPos(&cp); ScreenToClient(hwnd, &cp);
-            if (a->overSelEdge(cp)) { SetCursor(LoadCursor(nullptr, IDC_SIZEWE)); return TRUE; }
+            if (a->overSelEdge(cp))        { SetCursor(LoadCursor(nullptr, IDC_SIZEWE)); return TRUE; }
+            if (a->overCardDragHandle(cp)) { SetCursor(LoadCursor(nullptr, IDC_SIZEALL)); return TRUE; }
         }
         break;
     case WM_LBUTTONDOWN: a->onLDown({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }, false); return 0;

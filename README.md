@@ -15,6 +15,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   envelope that turns into a real sample-accurate scope trace as you zoom in). Card widths
   are **proportional to clip length** at the same scale as the timeline, and a
   global **Scale** slider in the toolbar zooms both together.
+- **Rearrange the clip library.** Drag a card by its title bar and drop it in a
+  new spot to reorder the grid (a caret shows where it will land), or **right-click
+  the empty library area** to sort every clip **by name (A–Z)** or **by time
+  (oldest first)** — the time being the source file's date, or when a derived clip
+  was created. Reorders and sorts are each a single undo step.
 - **Play any clip** with a per-card play/pause button. Click the waveform to
   seek / skip around. Playback is real, mixed, low-latency WASAPI.
 - **Select a section** of any clip by dragging across its waveform. While a
@@ -132,6 +137,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Crop / save a selection | **Crop** and **Save sel** buttons on the card while a selection is active |
 | Clip actions | **right-click a card**: play selection, save selection as new clip, crop, normalize, voice cleaner, rename, delete, add to a track |
 | Rename a clip | right-click → Rename |
+| Reorder clips | drag a card by its title bar to a new spot in the library (caret shows the drop point) |
+| Sort clips | right-click the empty library area → *Sort clips by name* / *by time* |
 | Set clip / track volume | drag the volume slider on the card or track header |
 | Normalize volume | right-click a card → *Normalize to match other clips* / *Normalize all clips* |
 | Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |

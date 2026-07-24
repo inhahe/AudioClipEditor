@@ -5,6 +5,7 @@
 #include "decoder.h"
 #include "encoder.h"
 #include "dsp.h"
+#include "document.h"
 #include <windows.h>
 #include <shlwapi.h>
 #include <string>
@@ -255,6 +256,43 @@ int runSelfTest() {
     slice->samples.assign(sine->samples.begin() + f0 * 2, sine->samples.begin() + f1 * 2);
     check(slice->frames() == (f1 - f0), L"Buffer slice length",
           L"got=" + std::to_wstring(slice->frames()) + L" want=" + std::to_wstring(f1 - f0));
+
+    // Document project round-trip (.acep v2) + library sort / reorder
+    {
+        Document d; d.init(rate);
+        auto mk = [&](const wchar_t* nm, uint64_t ts) {
+            int id = d.addClip(nm, makeSine(rate, 0.2, 300.0), L"", L"add");
+            if (Clip* c = d.project().findClip(id)) c->timestamp = ts;
+            return id;
+        };
+        mk(L"Charlie", 300); mk(L"alpha", 100); mk(L"Bravo", 200);
+
+        std::wstring proj = dir + L"\\_selftest.acep";
+        check(d.saveProject(proj), L"project save (.acep)");
+        Document d2; d2.init(rate);
+        bool lok = d2.loadProject(proj);
+        auto& lib = d2.project().library;
+        check(lok && lib.size() == 3, L"project load (.acep)", L"clips=" + std::to_wstring(lib.size()));
+        if (lok && lib.size() == 3) {
+            check(lib[0].name == L"Charlie" && lib[1].name == L"alpha" && lib[2].name == L"Bravo",
+                  L"project load preserves order");
+            check(lib[0].timestamp == 300 && lib[1].timestamp == 100 && lib[2].timestamp == 200,
+                  L"project load preserves timestamps");
+            d2.sortLibrary(true);   // case-insensitive name: alpha, Bravo, Charlie
+            auto& L2 = d2.project().library;
+            check(L2[0].name == L"alpha" && L2[1].name == L"Bravo" && L2[2].name == L"Charlie",
+                  L"sortLibrary by name");
+            d2.sortLibrary(false);  // time oldest-first: 100, 200, 300
+            auto& L3 = d2.project().library;
+            check(L3[0].timestamp == 100 && L3[1].timestamp == 200 && L3[2].timestamp == 300,
+                  L"sortLibrary by time");
+            int firstId = L3[0].id;
+            d2.moveClipInLibrary(firstId, 3);   // move head to the end
+            auto& L4 = d2.project().library;
+            check(L4[2].id == firstId, L"moveClipInLibrary reorder");
+        }
+        DeleteFileW(proj.c_str());
+    }
 
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");

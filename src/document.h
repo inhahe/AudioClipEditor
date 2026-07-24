@@ -21,6 +21,12 @@ public:
                  const std::wstring& sourcePath, const std::wstring& undoDesc);
     void renameClip(int id, const std::wstring& name);
     void removeClip(int id);
+    // Reorder the library: move `clipId` so it lands at `targetIndex` in reading
+    // order (as if the item hadn't been removed first). One undo step; no-op if the
+    // position doesn't actually change.
+    void moveClipInLibrary(int clipId, int targetIndex);
+    // Sort the library by clip name (A→Z) or by timestamp (oldest→newest). One undo step.
+    void sortLibrary(bool byName);
     void replaceClipBuffer(int id, AudioBufferPtr newBuf, const std::wstring& desc);
     // Replace several clip buffers in one undo step (e.g. denoise a whole track).
     void replaceClipBuffers(const std::vector<std::pair<int, AudioBufferPtr>>& updates,
