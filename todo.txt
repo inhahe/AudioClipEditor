@@ -1,6 +1,1 @@
-let's have save/load project if it doesn't already exist, and ask to save project before exiting if any changes haven't been saved
-
---
-
-yes, let's add 'capture from whole clip' and also capturing from directly inside the editor
-^ doing
+Make it so I can rearrange the order in which the clips are displayed by dragging and dropping them, or right-click the area and sort alphabetically or by time stamp

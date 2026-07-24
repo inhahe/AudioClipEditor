@@ -53,6 +53,7 @@ enum {
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE,
+    IDM_SORT_NAME = 340, IDM_SORT_TIME,
     IDM_REDO_BASE = 400,
     IDM_APPLYCAP_BASE = 500   // + recent-capture index (apply to the clicked clip)
 };
@@ -113,6 +114,8 @@ struct App {
     // selection (belongs to selClipId)
     int selClipId = -1;
     int64_t selStart = 0, selEnd = 0;
+    int64_t waveAnchor = 0;        // fixed edge while sweeping/edge-dragging a card selection
+    bool waveEdgeDrag = false;     // true when a card WaveSelect drag grabbed an existing edge
 
     // voice cleaner session state: last-used options + captured noise profile
     // (Audacity-style; profile lives for the session, like Audacity's)
@@ -142,6 +145,7 @@ struct App {
     int64_t stripFixedEdge = 0;    // the opposite (non-dragged) selection edge, captured at drag start
     int64_t stripDragFrame = 0;    // frame under the cursor for the strip currently being dragged
     int64_t mainDragAnchor = 0;    // fixed anchor frame while sweeping a selection on the main waveform
+    bool mainEdgeDrag = false;     // true when an editor main-view drag grabbed an existing selection edge
     int edHot = 0;                 // hovered editor button (see EB_* below)
     // editor layout rects (rebuilt in computeEditorLayout)
     RECT edMain{}, edRuler{}, edLeft{}, edRight{};
@@ -153,6 +157,62 @@ struct App {
     bool hasSel() const { return selClipId >= 0 && selEnd > selStart; }
     // Play All has something to play only when clips are on the timeline.
     bool timelineHasContent() const { return doc.project().timelineLengthFrames() > 0; }
+
+    // How close (px, each side) the cursor must be to a selection edge to grab it.
+    // Kept generous so the edge is easy to click without a pixel-perfect aim.
+    int selEdgeGrab() const { return S(8); }
+    // Which edge of a selection drawn at [sx0, sx1] the cursor at x is grabbing:
+    // 0 = neither, 1 = left/start edge, 2 = right/end edge. When both are in range
+    // (a tiny selection) the nearer edge wins.
+    int hitSelEdge(int x, int sx0, int sx1) const {
+        int g = selEdgeGrab();
+        int dl = std::abs(x - sx0), dr = std::abs(x - sx1);
+        bool nl = dl <= g, nr = dr <= g;
+        if (nl && nr) return dl <= dr ? 1 : 2;
+        if (nl) return 1;
+        if (nr) return 2;
+        return 0;
+    }
+    // Is an edge-drag currently in progress? (used to keep the resize cursor.)
+    bool draggingSelEdge() const {
+        return editDrag == 2 || editDrag == 3 || mainEdgeDrag ||
+               (mode == Mode::WaveSelect && waveEdgeDrag);
+    }
+    // Would a click at p grab a selection edge (card wave, editor main view, or a
+    // fine-tune strip)? Drives the horizontal-resize cursor hint.
+    bool overSelEdge(POINT p) const {
+        if (!hasSel()) return false;
+        if (editorActive()) {
+            if (selClipId != editClipId) return false;
+            if (editFineNeeded() && (PtInRect(&edLeft, p) || PtInRect(&edRight, p))) return true;
+            if (PtInRect(&edMain, p)) return hitSelEdge(p.x, edMainX(selStart), edMainX(selEnd)) != 0;
+            return false;
+        }
+        if (!PtInRect(&rcLibrary, p)) return false;
+        for (auto& c : cards) if (c.clipId == selClipId) {
+            if (!PtInRect(&c.wave, p)) return false;
+            const Clip* cl = doc.project().findClip(selClipId);
+            int64_t nf = cl ? cl->frames() : 0;
+            if (nf <= 0) return false;
+            int ww = std::max(1, (int)(c.wave.right - c.wave.left));
+            int sx0 = c.wave.left + (int)((double)selStart / nf * ww);
+            int sx1 = c.wave.left + (int)((double)selEnd / nf * ww);
+            return hitSelEdge(p.x, sx0, sx1) != 0;
+        }
+        return false;
+    }
+    // A card is being dragged to reorder / place it.
+    bool draggingCard() const { return mode == Mode::CardDrag && dragged; }
+    // Is p over a card's title-bar drag handle (the grab area for reordering /
+    // dragging to a track), excluding the play / delete buttons that sit in it?
+    bool overCardDragHandle(POINT p) const {
+        if (editorActive() || !PtInRect(&rcLibrary, p)) return false;
+        for (auto& c : cards) if (PtInRect(&c.top, p)) {
+            if (PtInRect(&c.play, p) || PtInRect(&c.del, p)) return false;
+            return true;
+        }
+        return false;
+    }
 
     void makeFonts() {
         if (fNorm) { DeleteObject(fNorm); DeleteObject(fSmall); DeleteObject(fBold); DeleteObject(fBig); }
@@ -296,8 +356,17 @@ struct App {
             if (PtInRect(&edRight, p)) { beginStripDrag(3, selEnd, edRight, p.x);    return; }
         }
         if (PtInRect(&edMain, p)) {
+            int64_t f = edMainFrame(p.x);
+            // Grab an existing selection edge (if the cursor is near one) so the
+            // user can nudge one side without redrawing the whole selection.
+            mainEdgeDrag = false;
+            if (hasSel() && selClipId == editClipId) {
+                int edge = hitSelEdge(p.x, edMainX(selStart), edMainX(selEnd));
+                if (edge == 1)      { mainDragAnchor = selEnd;   mainEdgeDrag = true; }
+                else if (edge == 2) { mainDragAnchor = selStart; mainEdgeDrag = true; }
+            }
             editDrag = 1; selClipId = editClipId;
-            int64_t f = edMainFrame(p.x); mainDragAnchor = f; selStart = selEnd = f;
+            if (!mainEdgeDrag) { mainDragAnchor = f; selStart = selEnd = f; }
             SetCapture(hwnd); refresh();
         }
     }
@@ -321,9 +390,11 @@ struct App {
         if (GetCapture() == hwnd) ReleaseCapture();
         int d = editDrag; editDrag = 0;
         if (d == 1) {
-            if (!dragged) { selClipId = editClipId; selStart = selEnd = 0; seekClip(editClipId, edMainFrame(p.x)); }
-            // (selStart/selEnd stay sorted during the sweep, so no swap needed)
+            if (!dragged && !mainEdgeDrag) { selClipId = editClipId; selStart = selEnd = 0; seekClip(editClipId, edMainFrame(p.x)); }
+            // (selStart/selEnd stay sorted during the sweep, so no swap needed; a
+            //  no-move edge grab simply leaves the selection unchanged.)
         }
+        mainEdgeDrag = false;
         refresh();
     }
     void edWheel(POINT p, int delta) {
@@ -768,7 +839,9 @@ struct App {
             const Clip* c = doc.project().findClip(cl.clipId);
             if (!c) continue;
             bool selHere = (selClipId == cl.clipId);
-            roundFill(h, cl.card, selHere ? col::cardSel : col::card, col::cardEdge, S(8));
+            bool dragThis = (mode == Mode::CardDrag && dragged && cl.clipId == dragClipId);
+            roundFill(h, cl.card, selHere ? col::cardSel : col::card,
+                      dragThis ? col::accent : col::cardEdge, S(8));
 
             // play/pause button
             bool playingThis = (previewClipId == cl.clipId) && engine.isPlaying();
@@ -827,6 +900,18 @@ struct App {
             drawSlider(h, cl.vol, c->gain);
             RECT pct = { cl.vol.right + S(4), cl.vol.top - S(2), cl.card.right - S(6), cl.vol.bottom + S(2) };
             textOut(h, pct, gainLabel(c->gain), col::dim, fSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        }
+        // insertion caret while reordering a clip within the library
+        if (mode == Mode::CardDrag && dragged && !cards.empty()) {
+            POINT cp; GetCursorPos(&cp); ScreenToClient(hwnd, &cp);
+            if (PtInRect(&rcLibrary, cp)) {
+                int idx = libInsertIndex(cp);
+                bool atEnd = idx >= (int)cards.size();
+                const RECT& ref = atEnd ? cards.back().card : cards[idx].card;
+                int cx = atEnd ? ref.right + S(6) : ref.left - S(6);
+                RECT bar = { cx - S(1), ref.top, cx + S(2), ref.bottom };
+                fill(h, bar, col::accent);
+            }
         }
         RestoreDC(h, -1);
     }
@@ -994,6 +1079,19 @@ struct App {
     const CardLayout* cardAt(POINT p) {
         for (auto& c : cards) if (PtInRect(&c.card, p)) return &c;
         return nullptr;
+    }
+    // Reading-order insertion index for a library drag/drop at p (0..cards.size()).
+    // A card comes before the cursor if it's on an earlier row, or on the same row
+    // and its centre is left of the cursor.
+    int libInsertIndex(POINT p) const {
+        for (int i = 0; i < (int)cards.size(); ++i) {
+            const RECT& r = cards[i].card;
+            int cx = (r.left + r.right) / 2;
+            bool earlierRow = p.y < r.top;
+            bool sameRow = p.y >= r.top && p.y < r.bottom;
+            if (earlierRow || (sameRow && p.x < cx)) return i;
+        }
+        return (int)cards.size();
     }
     const PlacedLayout* placedAt(POINT p) {
         for (auto& pl : placed) if (PtInRect(&pl.rc, p)) return &pl;
@@ -1578,8 +1676,20 @@ struct App {
                 // begin selection / seek
                 mode = Mode::WaveSelect; dragClipId = cl->clipId;
                 const Clip* c = doc.project().findClip(cl->clipId);
-                int64_t f = waveFrameAt(*cl, c ? c->frames() : 0, p.x);
-                selClipId = cl->clipId; selStart = f; selEnd = f;
+                int64_t nf = c ? c->frames() : 0;
+                int64_t f = waveFrameAt(*cl, nf, p.x);
+                // If a selection already exists on this clip, grab its nearer edge
+                // so one side can be adjusted without redrawing the whole selection.
+                waveEdgeDrag = false;
+                if (hasSel() && selClipId == cl->clipId && nf > 0) {
+                    int ww = std::max(1, (int)(cl->wave.right - cl->wave.left));
+                    int sx0 = cl->wave.left + (int)((double)selStart / nf * ww);
+                    int sx1 = cl->wave.left + (int)((double)selEnd / nf * ww);
+                    int edge = hitSelEdge(p.x, sx0, sx1);
+                    if (edge == 1)      { waveAnchor = selEnd;   waveEdgeDrag = true; }
+                    else if (edge == 2) { waveAnchor = selStart; waveEdgeDrag = true; }
+                }
+                if (!waveEdgeDrag) { selClipId = cl->clipId; selStart = selEnd = f; waveAnchor = f; }
                 SetCapture(hwnd); refresh(); return;
             }
             if (PtInRect(&cl->top, p)) {
@@ -1676,7 +1786,11 @@ struct App {
             if (cl) {
                 const Clip* c = doc.project().findClip(dragClipId);
                 int64_t f = waveFrameAt(*cl, c ? c->frames() : 0, p.x);
-                selEnd = f; refresh();
+                // Anchor-based min/max keeps the selection sorted even when the
+                // dragged edge crosses the fixed one (no blink, no swap on up).
+                selStart = std::min(waveAnchor, f);
+                selEnd   = std::max(waveAnchor, f);
+                refresh();
             }
         } else if (mode == Mode::ClipVolume) {
             const CardLayout* cl = nullptr; for (auto& c : cards) if (c.clipId == dragClipId) cl = &c;
@@ -1701,17 +1815,18 @@ struct App {
         Mode m = mode; mode = Mode::None;
 
         if (m == Mode::WaveSelect) {
-            if (!dragged) {
-                // plain click => seek, clear selection
+            if (!dragged && !waveEdgeDrag) {
+                // plain click (not on an edge) => seek, clear selection
                 selClipId = -1; selStart = selEnd = 0;
                 const CardLayout* cl = nullptr; for (auto& c : cards) if (c.clipId == dragClipId) cl = &c;
                 if (cl) {
                     const Clip* c = doc.project().findClip(dragClipId);
                     seekClip(dragClipId, waveFrameAt(*cl, c ? c->frames() : 0, p.x));
                 }
-            } else {
-                if (selEnd < selStart) std::swap(selStart, selEnd);
             }
+            // (anchor-based sweep keeps selStart/selEnd sorted; a no-move edge grab
+            //  simply leaves the selection unchanged.)
+            waveEdgeDrag = false;
             refresh();
         } else if (m == Mode::CardDrag) {
             if (dragged) {
@@ -1724,6 +1839,10 @@ struct App {
                             MessageBoxW(hwnd, L"Clips can't overlap on a track.", L"Can't place", MB_ICONINFORMATION);
                         else afterPlaceRefresh();
                     }
+                } else if (PtInRect(&rcLibrary, p)) {
+                    // dropped back inside the library -> reorder to the drop position
+                    doc.moveClipInLibrary(dragClipId, libInsertIndex(p));
+                    clampScroll(); refresh();
                 }
             }
         } else if (m == Mode::ClipMove) {
@@ -1751,6 +1870,7 @@ struct App {
         if (PtInRect(&rcLibrary, p)) {
             const CardLayout* cl = cardAt(p);
             if (cl) { clipContextMenu(cl->clipId, p); return; }
+            libraryContextMenu(p); return;
         }
         if (PtInRect(&rcTimeline, p)) {
             const PlacedLayout* pl = placedAt(p);
@@ -1794,6 +1914,19 @@ struct App {
         else if (cmd == IDM_TRK_REMOVE) {
             if (doc.project().tracks.size() > 1) { doc.removeTrack(trackId); afterHistory(); }
         }
+    }
+
+    // Right-click on the empty library area: sort the clip grid.
+    void libraryContextMenu(POINT p) {
+        HMENU m = CreatePopupMenu();
+        UINT flags = doc.project().library.size() > 1 ? MF_STRING : (MF_STRING | MF_GRAYED);
+        AppendMenuW(m, flags, IDM_SORT_NAME, L"Sort clips by name (A\u2013Z)");
+        AppendMenuW(m, flags, IDM_SORT_TIME, L"Sort clips by time (oldest first)");
+        POINT sp = p; ClientToScreen(hwnd, &sp);
+        int cmd = TrackPopupMenu(m, TPM_RETURNCMD, sp.x, sp.y, 0, hwnd, nullptr);
+        DestroyMenu(m);
+        if (cmd == IDM_SORT_NAME) { doc.sortLibrary(true);  clampScroll(); refresh(); }
+        else if (cmd == IDM_SORT_TIME) { doc.sortLibrary(false); clampScroll(); refresh(); }
     }
 
     void clipContextMenu(int clipId, POINT p) {
@@ -2048,6 +2181,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EndPaint(hwnd, &ps);
         return 0;
     }
+    case WM_SETCURSOR:
+        if (a && LOWORD(lp) == HTCLIENT) {
+            if (a->draggingSelEdge()) { SetCursor(LoadCursor(nullptr, IDC_SIZEWE)); return TRUE; }
+            if (a->draggingCard())   { SetCursor(LoadCursor(nullptr, IDC_SIZEALL)); return TRUE; }
+            POINT cp; GetCursorPos(&cp); ScreenToClient(hwnd, &cp);
+            if (a->overSelEdge(cp))        { SetCursor(LoadCursor(nullptr, IDC_SIZEWE)); return TRUE; }
+            if (a->overCardDragHandle(cp)) { SetCursor(LoadCursor(nullptr, IDC_SIZEALL)); return TRUE; }
+        }
+        break;
     case WM_LBUTTONDOWN: a->onLDown({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }, false); return 0;
     case WM_LBUTTONDBLCLK: a->onLDown({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }, true); return 0;
     case WM_MOUSEMOVE: a->onMouseMove({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }); return 0;
