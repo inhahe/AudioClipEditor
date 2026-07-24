@@ -1,1 +1,0 @@
-Make it so I can rearrange the order in which the clips are displayed by dragging and dropping them, or right-click the area and sort alphabetically or by time stamp
