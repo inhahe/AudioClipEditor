@@ -20,7 +20,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
 - **Select a section** of any clip by dragging across its waveform. While a
   selection is active the card shows **Crop** and **Save sel** buttons, and the
   card's play button auditions **only the selected part** (so you can preview
-  before committing).
+  before committing). Once you have a selection you can **adjust either edge on its
+  own** — grab the left or right boundary and drag it (the cursor turns into a
+  ↔ resize arrow when you're near an edge) instead of redrawing the whole
+  selection. This works on the clip cards, in the full-window editor's main view,
+  and via the editor's fine-tune edge strips.
 - **Save selection as a new clip** — the **Save sel** button (or right-click →
   Save selection) slices the selection into a new clip you name (rename any time).
 - **Full-window clip editor.** Double-click a clip card (or right-click
@@ -121,6 +125,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Play / pause a clip | green button on the card, or `Space` on the active clip (plays only the selection when one is active) |
 | Seek within a clip | click the waveform |
 | Make a selection | drag across the waveform |
+| Adjust one selection edge | grab the left or right edge of an existing selection and drag it (cursor shows ↔); works on cards, the editor main view, and the fine-tune strips |
 | Open the full-window editor | **double-click** a clip card, or right-click → *Open in editor* |
 | Fine-tune selection edges | in the editor, drag the **Start edge** / **End edge** strip knobs (wheel over a strip to zoom); toggle with **Fine-tune edges** |
 | Close the full-window editor | `Esc` or the **Done** button |

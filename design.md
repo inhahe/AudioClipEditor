@@ -149,6 +149,26 @@ happens on `onLUp`. The ghost mirrors the existing `Mode::CardDrag`
 `Track::overlaps(start, len, ignore)` logic as the commit, so what you see is
 where it lands.
 
+## Selection editing (independent edges)
+
+A selection can be adjusted one edge at a time instead of redrawn. All three
+selection surfaces use the same anchor-based sweep: the grabbed edge follows the
+cursor while the opposite edge is pinned as the anchor, and `selStart/selEnd` are
+kept sorted via `min/max` so the highlight never blinks or needs a swap on mouse-up.
+
+- **Card waveform** (`Mode::WaveSelect`): on `onLDown`, if a selection already
+  exists on the clicked clip, `hitSelEdge` (grab band `selEdgeGrab() == S(8)` px
+  each side, nearer edge wins) decides whether the press grabbed the start edge,
+  the end edge, or neither. An edge grab pins the opposite edge in `waveAnchor` and
+  sets `waveEdgeDrag`; otherwise a fresh selection starts at the click. A no-move
+  edge grab leaves the selection intact (only a non-edge plain click seeks/clears).
+- **Editor main view** (`editDrag == 1`): same logic against `edMainX(selStart/End)`,
+  pinning `mainDragAnchor` and setting `mainEdgeDrag`.
+- **Editor fine-tune strips** (`editDrag == 2/3`): each strip is a dedicated edge
+  control — the whole lane is the grab zone (`beginStripDrag`/`updateStripEdge`).
+- **Cursor hint**: `WM_SETCURSOR` shows `IDC_SIZEWE` when `overSelEdge(p)` (hover
+  near an edge on any surface) or `draggingSelEdge()` (an edge drag in progress).
+
 ## Voice-cleaner dialog (`dialogs.cpp`)
 
 Manual modal (no resource script), same pattern as the export dialog:

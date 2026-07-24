@@ -113,6 +113,8 @@ struct App {
     // selection (belongs to selClipId)
     int selClipId = -1;
     int64_t selStart = 0, selEnd = 0;
+    int64_t waveAnchor = 0;        // fixed edge while sweeping/edge-dragging a card selection
+    bool waveEdgeDrag = false;     // true when a card WaveSelect drag grabbed an existing edge
 
     // voice cleaner session state: last-used options + captured noise profile
     // (Audacity-style; profile lives for the session, like Audacity's)
@@ -142,6 +144,7 @@ struct App {
     int64_t stripFixedEdge = 0;    // the opposite (non-dragged) selection edge, captured at drag start
     int64_t stripDragFrame = 0;    // frame under the cursor for the strip currently being dragged
     int64_t mainDragAnchor = 0;    // fixed anchor frame while sweeping a selection on the main waveform
+    bool mainEdgeDrag = false;     // true when an editor main-view drag grabbed an existing selection edge
     int edHot = 0;                 // hovered editor button (see EB_* below)
     // editor layout rects (rebuilt in computeEditorLayout)
     RECT edMain{}, edRuler{}, edLeft{}, edRight{};
@@ -153,6 +156,50 @@ struct App {
     bool hasSel() const { return selClipId >= 0 && selEnd > selStart; }
     // Play All has something to play only when clips are on the timeline.
     bool timelineHasContent() const { return doc.project().timelineLengthFrames() > 0; }
+
+    // How close (px, each side) the cursor must be to a selection edge to grab it.
+    // Kept generous so the edge is easy to click without a pixel-perfect aim.
+    int selEdgeGrab() const { return S(8); }
+    // Which edge of a selection drawn at [sx0, sx1] the cursor at x is grabbing:
+    // 0 = neither, 1 = left/start edge, 2 = right/end edge. When both are in range
+    // (a tiny selection) the nearer edge wins.
+    int hitSelEdge(int x, int sx0, int sx1) const {
+        int g = selEdgeGrab();
+        int dl = std::abs(x - sx0), dr = std::abs(x - sx1);
+        bool nl = dl <= g, nr = dr <= g;
+        if (nl && nr) return dl <= dr ? 1 : 2;
+        if (nl) return 1;
+        if (nr) return 2;
+        return 0;
+    }
+    // Is an edge-drag currently in progress? (used to keep the resize cursor.)
+    bool draggingSelEdge() const {
+        return editDrag == 2 || editDrag == 3 || mainEdgeDrag ||
+               (mode == Mode::WaveSelect && waveEdgeDrag);
+    }
+    // Would a click at p grab a selection edge (card wave, editor main view, or a
+    // fine-tune strip)? Drives the horizontal-resize cursor hint.
+    bool overSelEdge(POINT p) const {
+        if (!hasSel()) return false;
+        if (editorActive()) {
+            if (selClipId != editClipId) return false;
+            if (editFineNeeded() && (PtInRect(&edLeft, p) || PtInRect(&edRight, p))) return true;
+            if (PtInRect(&edMain, p)) return hitSelEdge(p.x, edMainX(selStart), edMainX(selEnd)) != 0;
+            return false;
+        }
+        if (!PtInRect(&rcLibrary, p)) return false;
+        for (auto& c : cards) if (c.clipId == selClipId) {
+            if (!PtInRect(&c.wave, p)) return false;
+            const Clip* cl = doc.project().findClip(selClipId);
+            int64_t nf = cl ? cl->frames() : 0;
+            if (nf <= 0) return false;
+            int ww = std::max(1, (int)(c.wave.right - c.wave.left));
+            int sx0 = c.wave.left + (int)((double)selStart / nf * ww);
+            int sx1 = c.wave.left + (int)((double)selEnd / nf * ww);
+            return hitSelEdge(p.x, sx0, sx1) != 0;
+        }
+        return false;
+    }
 
     void makeFonts() {
         if (fNorm) { DeleteObject(fNorm); DeleteObject(fSmall); DeleteObject(fBold); DeleteObject(fBig); }
@@ -296,8 +343,17 @@ struct App {
             if (PtInRect(&edRight, p)) { beginStripDrag(3, selEnd, edRight, p.x);    return; }
         }
         if (PtInRect(&edMain, p)) {
+            int64_t f = edMainFrame(p.x);
+            // Grab an existing selection edge (if the cursor is near one) so the
+            // user can nudge one side without redrawing the whole selection.
+            mainEdgeDrag = false;
+            if (hasSel() && selClipId == editClipId) {
+                int edge = hitSelEdge(p.x, edMainX(selStart), edMainX(selEnd));
+                if (edge == 1)      { mainDragAnchor = selEnd;   mainEdgeDrag = true; }
+                else if (edge == 2) { mainDragAnchor = selStart; mainEdgeDrag = true; }
+            }
             editDrag = 1; selClipId = editClipId;
-            int64_t f = edMainFrame(p.x); mainDragAnchor = f; selStart = selEnd = f;
+            if (!mainEdgeDrag) { mainDragAnchor = f; selStart = selEnd = f; }
             SetCapture(hwnd); refresh();
         }
     }
@@ -321,9 +377,11 @@ struct App {
         if (GetCapture() == hwnd) ReleaseCapture();
         int d = editDrag; editDrag = 0;
         if (d == 1) {
-            if (!dragged) { selClipId = editClipId; selStart = selEnd = 0; seekClip(editClipId, edMainFrame(p.x)); }
-            // (selStart/selEnd stay sorted during the sweep, so no swap needed)
+            if (!dragged && !mainEdgeDrag) { selClipId = editClipId; selStart = selEnd = 0; seekClip(editClipId, edMainFrame(p.x)); }
+            // (selStart/selEnd stay sorted during the sweep, so no swap needed; a
+            //  no-move edge grab simply leaves the selection unchanged.)
         }
+        mainEdgeDrag = false;
         refresh();
     }
     void edWheel(POINT p, int delta) {
@@ -1578,8 +1636,20 @@ struct App {
                 // begin selection / seek
                 mode = Mode::WaveSelect; dragClipId = cl->clipId;
                 const Clip* c = doc.project().findClip(cl->clipId);
-                int64_t f = waveFrameAt(*cl, c ? c->frames() : 0, p.x);
-                selClipId = cl->clipId; selStart = f; selEnd = f;
+                int64_t nf = c ? c->frames() : 0;
+                int64_t f = waveFrameAt(*cl, nf, p.x);
+                // If a selection already exists on this clip, grab its nearer edge
+                // so one side can be adjusted without redrawing the whole selection.
+                waveEdgeDrag = false;
+                if (hasSel() && selClipId == cl->clipId && nf > 0) {
+                    int ww = std::max(1, (int)(cl->wave.right - cl->wave.left));
+                    int sx0 = cl->wave.left + (int)((double)selStart / nf * ww);
+                    int sx1 = cl->wave.left + (int)((double)selEnd / nf * ww);
+                    int edge = hitSelEdge(p.x, sx0, sx1);
+                    if (edge == 1)      { waveAnchor = selEnd;   waveEdgeDrag = true; }
+                    else if (edge == 2) { waveAnchor = selStart; waveEdgeDrag = true; }
+                }
+                if (!waveEdgeDrag) { selClipId = cl->clipId; selStart = selEnd = f; waveAnchor = f; }
                 SetCapture(hwnd); refresh(); return;
             }
             if (PtInRect(&cl->top, p)) {
@@ -1676,7 +1746,11 @@ struct App {
             if (cl) {
                 const Clip* c = doc.project().findClip(dragClipId);
                 int64_t f = waveFrameAt(*cl, c ? c->frames() : 0, p.x);
-                selEnd = f; refresh();
+                // Anchor-based min/max keeps the selection sorted even when the
+                // dragged edge crosses the fixed one (no blink, no swap on up).
+                selStart = std::min(waveAnchor, f);
+                selEnd   = std::max(waveAnchor, f);
+                refresh();
             }
         } else if (mode == Mode::ClipVolume) {
             const CardLayout* cl = nullptr; for (auto& c : cards) if (c.clipId == dragClipId) cl = &c;
@@ -1701,17 +1775,18 @@ struct App {
         Mode m = mode; mode = Mode::None;
 
         if (m == Mode::WaveSelect) {
-            if (!dragged) {
-                // plain click => seek, clear selection
+            if (!dragged && !waveEdgeDrag) {
+                // plain click (not on an edge) => seek, clear selection
                 selClipId = -1; selStart = selEnd = 0;
                 const CardLayout* cl = nullptr; for (auto& c : cards) if (c.clipId == dragClipId) cl = &c;
                 if (cl) {
                     const Clip* c = doc.project().findClip(dragClipId);
                     seekClip(dragClipId, waveFrameAt(*cl, c ? c->frames() : 0, p.x));
                 }
-            } else {
-                if (selEnd < selStart) std::swap(selStart, selEnd);
             }
+            // (anchor-based sweep keeps selStart/selEnd sorted; a no-move edge grab
+            //  simply leaves the selection unchanged.)
+            waveEdgeDrag = false;
             refresh();
         } else if (m == Mode::CardDrag) {
             if (dragged) {
@@ -2048,6 +2123,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EndPaint(hwnd, &ps);
         return 0;
     }
+    case WM_SETCURSOR:
+        if (a && LOWORD(lp) == HTCLIENT) {
+            if (a->draggingSelEdge()) { SetCursor(LoadCursor(nullptr, IDC_SIZEWE)); return TRUE; }
+            POINT cp; GetCursorPos(&cp); ScreenToClient(hwnd, &cp);
+            if (a->overSelEdge(cp)) { SetCursor(LoadCursor(nullptr, IDC_SIZEWE)); return TRUE; }
+        }
+        break;
     case WM_LBUTTONDOWN: a->onLDown({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }, false); return 0;
     case WM_LBUTTONDBLCLK: a->onLDown({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }, true); return 0;
     case WM_MOUSEMOVE: a->onMouseMove({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }); return 0;
