@@ -36,6 +36,12 @@ struct VoiceCleanerContext {
 };
 bool voiceCleaner(HWND parent, VoiceCleanerContext& ctx);
 
+// Voice isolation ("remove non-voice") options modal. `opts` carries the
+// last-used settings in and the chosen settings out; `scopeLabel` describes what
+// the operation will be applied to (e.g. "'interview take 2'", "all clips").
+// Returns true on Apply.
+bool voiceIsolate(HWND parent, dsp::VoiceIsolateOptions& opts, const std::wstring& scopeLabel);
+
 // Project open/save file dialogs (.acep). Return empty string on cancel.
 std::wstring openProject(HWND parent);
 std::wstring saveProject(HWND parent, const std::wstring& suggested);

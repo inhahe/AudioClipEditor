@@ -294,6 +294,90 @@ int runSelfTest() {
         DeleteFileW(proj.c_str());
     }
 
+    // Voice isolation ("remove non-voice"): a harmonic speech-like stretch plus a
+    // low-frequency bump and a broadband shuffle burst, separated by room tone.
+    {
+        const double dur = 5.2;
+        auto sig = std::make_shared<AudioBuffer>();
+        sig->sampleRate = rate; sig->channels = 2;
+        const int64_t nf = (int64_t)(rate * dur);
+        sig->samples.assign((size_t)nf * 2, 0.0f);
+        uint32_t rng = 12345u;
+        auto urand = [&]() {                      // deterministic white noise in [-1,1)
+            rng = rng * 1664525u + 1013904223u;
+            return (double)(int32_t)rng / 2147483648.0;
+        };
+        const double vA = 0.80, vB = 2.00;        // voice
+        const double bA = 3.00, bB = 3.30;        // bump (60 Hz thump)
+        const double sA = 4.00, sB = 4.50;        // shuffle (broadband burst)
+        for (int64_t i = 0; i < nf; ++i) {
+            const double t = (double)i / rate;
+            double v = 0.004 * urand();           // room tone everywhere
+            if (t >= vA && t < vB) {              // harmonic voice: F0 140 Hz + 12 harmonics
+                double s = 0;
+                for (int k = 1; k <= 12; ++k)
+                    s += std::sin(2.0 * 3.14159265358979 * 140.0 * k * (t - vA)) / k;
+                v += 0.18 * s;
+            }
+            if (t >= bA && t < bB)                // decaying low thump
+                v += 0.6 * std::exp(-(t - bA) * 12.0) * std::sin(2.0 * 3.14159265358979 * 60.0 * (t - bA));
+            if (t >= sA && t < sB)                // shuffling / rustle
+                v += 0.15 * urand();
+            sig->samples[i * 2] = (float)v;
+            sig->samples[i * 2 + 1] = (float)v;
+        }
+        auto regionRms = [](const AudioBuffer& b, double t0, double t1) {
+            int64_t a = (int64_t)(t0 * b.sampleRate) * b.channels;
+            int64_t z = std::min<int64_t>((int64_t)(t1 * b.sampleRate) * b.channels, (int64_t)b.samples.size());
+            double s = 0; int64_t n = 0;
+            for (int64_t i = a; i < z; ++i) { s += (double)b.samples[i] * b.samples[i]; ++n; }
+            return n ? std::sqrt(s / n) : 0.0;
+        };
+        auto dbDrop = [](double before, double after) {
+            return 20.0 * std::log10(std::max(after, 1e-12) / std::max(before, 1e-12));
+        };
+
+        dsp::VoiceIsolateOptions vio;             // defaults: balanced, 60 dB, 200 ms hold
+        dsp::VoiceIsolateStats vst;
+        LARGE_INTEGER qf, q0, q1; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
+        auto clean = dsp::isolateVoice(*sig, vio, &vst);
+        QueryPerformanceCounter(&q1);
+        const double secs = (double)(q1.QuadPart - q0.QuadPart) / qf.QuadPart;
+        out(L"Voice isolation: " + std::to_wstring(secs) + L" s for " + std::to_wstring(dur) +
+            L" s of audio (" + std::to_wstring(dur / std::max(secs, 1e-9)) + L"x realtime)");
+        check(clean && clean->frames() == nf, L"voice isolation preserves length",
+              L"frames=" + std::to_wstring(clean ? clean->frames() : 0));
+        if (clean) {
+            double vKept = regionRms(*clean, 1.0, 1.9) / std::max(1e-12, regionRms(*sig, 1.0, 1.9));
+            check(vKept > 0.95, L"voice isolation keeps speech",
+                  L"kept=" + std::to_wstring(vKept * 100.0) + L"%");
+            double bump = dbDrop(regionRms(*sig, bA + 0.02, bB), regionRms(*clean, bA + 0.02, bB));
+            check(bump < -20.0, L"voice isolation removes bumps",
+                  std::to_wstring(bump) + L" dB");
+            double shuf = dbDrop(regionRms(*sig, sA + 0.05, sB - 0.05), regionRms(*clean, sA + 0.05, sB - 0.05));
+            check(shuf < -20.0, L"voice isolation removes shuffling",
+                  std::to_wstring(shuf) + L" dB");
+            double tone = dbDrop(regionRms(*sig, 0.0, 0.6), regionRms(*clean, 0.0, 0.6));
+            check(tone < -20.0, L"voice isolation removes room tone",
+                  std::to_wstring(tone) + L" dB");
+            check(vst.segments == 1 && vst.voiceSeconds > 0.9 && vst.voiceSeconds < 2.5,
+                  L"voice isolation segment stats",
+                  L"segments=" + std::to_wstring(vst.segments) +
+                  L" voice=" + std::to_wstring(vst.voiceSeconds) + L"s");
+
+            // reduce + residue == original (nothing invented, nothing lost)
+            dsp::VoiceIsolateOptions rio = vio; rio.residue = true;
+            auto res = dsp::isolateVoice(*sig, rio, nullptr);
+            double maxDiff = 0.0;
+            if (res && res->samples.size() == sig->samples.size())
+                for (size_t i = 0; i < sig->samples.size(); ++i)
+                    maxDiff = std::max(maxDiff,
+                        std::fabs((double)clean->samples[i] + res->samples[i] - sig->samples[i]));
+            check(res && maxDiff < 1e-5, L"voice isolation reduce+residue == original",
+                  L"maxDiff=" + std::to_wstring(maxDiff));
+        }
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);

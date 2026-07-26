@@ -49,10 +49,10 @@ enum {
     IDM_PLAY = 100, IDM_PLAYSEL, IDM_CLEARSEL, IDM_SAVESEL, IDM_CROP,
     IDM_EDIT, IDM_RENAME, IDM_DELETE,
     IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE, IDM_DENOISE_ALL, IDM_GETPROFILE,
-    IDM_GETPROFILE_CLIP,
+    IDM_GETPROFILE_CLIP, IDM_VOICEISO, IDM_VOICEISO_ALL,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
-    IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE,
+    IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE, IDM_TRK_VOICEISO,
     IDM_SORT_NAME = 340, IDM_SORT_TIME,
     IDM_REDO_BASE = 400,
     IDM_APPLYCAP_BASE = 500   // + recent-capture index (apply to the clicked clip)
@@ -123,6 +123,9 @@ struct App {
     dsp::NoiseProfile noiseProfile;        // the "active" capture (used by the dialog)
     std::wstring noiseProfileDesc;
     std::vector<NoiseCapture> noiseCaptures;  // recent captures, most-recent first
+
+    // "Remove non-voice" (voice isolation) options, persisted for the session
+    dsp::VoiceIsolateOptions viOpts;
 
     // interaction
     Mode mode = Mode::None;
@@ -1320,6 +1323,77 @@ struct App {
             MessageBoxW(hwnd, L"Some clips could not be cleaned.", L"Voice cleaner", MB_ICONWARNING);
     }
 
+    // ---- Remove non-voice (voice isolation) ----
+    void removeNonVoiceClip(int clipId) {
+        const Clip* c = doc.project().findClip(clipId);
+        if (!c) return;
+        removeNonVoiceClips({ clipId }, L"'" + c->name + L"'");
+    }
+    void removeNonVoiceAllClips() {
+        std::vector<int> ids;
+        for (auto& c : doc.project().library) ids.push_back(c.id);
+        removeNonVoiceClips(ids, L"all clips");
+    }
+    void removeNonVoiceTrack(int trackId) {
+        const Track* t = doc.project().findTrack(trackId);
+        if (!t) return;
+        std::vector<int> ids;
+        for (auto& pc : t->clips) ids.push_back(pc.clipId);
+        removeNonVoiceClips(ids, L"track '" + t->name + L"'");
+    }
+    // Show the isolation options once, then process the given clips as a single
+    // undo step. Duplicate / empty clips are skipped.
+    void removeNonVoiceClips(const std::vector<int>& ids, const std::wstring& scopeLabel) {
+        std::vector<int> targets;
+        for (int id : ids) {
+            bool dup = false;
+            for (int t : targets) if (t == id) { dup = true; break; }
+            if (dup) continue;
+            const Clip* c = doc.project().findClip(id);
+            if (c && c->buffer && c->buffer->frames() > 0) targets.push_back(id);
+        }
+        if (targets.empty()) {
+            MessageBoxW(hwnd, L"No audio to process here.", L"Remove non-voice", MB_ICONINFORMATION);
+            return;
+        }
+        std::wstring scope = scopeLabel;
+        if (targets.size() > 1) scope += L" (" + std::to_wstring(targets.size()) + L" clips)";
+        if (!dlg::voiceIsolate(hwnd, viOpts, scope)) return;
+
+        HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+        std::vector<std::pair<int, AudioBufferPtr>> updates;
+        double removedSec = 0.0; int segments = 0;
+        for (int id : targets) {
+            const Clip* c = doc.project().findClip(id);
+            if (!c || !c->buffer) continue;
+            dsp::VoiceIsolateStats st;
+            auto processed = dsp::isolateVoice(*c->buffer, viOpts, &st);
+            if (!processed) continue;
+            removedSec += st.removedSeconds;
+            segments += st.segments;
+            updates.push_back({ id, processed });
+        }
+        SetCursor(old);
+        if (updates.empty()) {
+            MessageBoxW(hwnd, L"Nothing could be processed.", L"Remove non-voice", MB_ICONWARNING);
+            return;
+        }
+        stopAll();   // buffers are changing under any active playback
+        std::wstring desc = (viOpts.residue ? L"Preview removed non-voice in "
+                                            : L"Remove non-voice from ") + scopeLabel;
+        doc.replaceClipBuffers(updates, desc);
+        refresh();
+        wchar_t msg[256];
+        swprintf(msg, 256,
+                 viOpts.residue
+                     ? L"Kept only the non-voice material: %.1f s across %d voice segment(s).\n\n"
+                       L"Undo (Ctrl+Z) to go back."
+                     : L"Silenced %.1f s of non-voice, keeping %d voice segment(s).\n\n"
+                       L"Undo (Ctrl+Z) to go back.",
+                 removedSec, segments);
+        MessageBoxW(hwnd, msg, L"Remove non-voice", MB_ICONINFORMATION);
+    }
+
     // Capture the Audacity-style noise profile from the current selection
     // (right-click shortcut; the voice cleaner dialog has the same button).
     void captureNoiseProfileFromSelection() {
@@ -1526,6 +1600,7 @@ struct App {
             L"  \u2022 Drag a clip up onto a track to place it (drops at any offset)\n"
             L"  \u2022 Right-click for save-selection, crop, normalize, voice cleaner\u2026\n"
             L"  \u2022 Voice cleaner cleans one clip, or all clips in the project\n"
+            L"  \u2022 Remove non-voice silences bumps, shuffling and room tone\n"
             L"  \u2022 Drag the volume slider to change a clip's level\n\n"
             L"Full-window editor:\n"
             L"  \u2022 Drag across the big waveform to select; buttons to play/crop/save\n"
@@ -1535,7 +1610,7 @@ struct App {
             L"Timeline:\n"
             L"  \u2022 Drag placed clips to move them (snaps to neighbours)\n"
             L"  \u2022 Drag a track's volume slider to change the track level\n"
-            L"  \u2022 Right-click a track header to voice-clean/rename/remove the track\n"
+            L"  \u2022 Right-click a track header to clean/isolate voice, rename or remove the track\n"
             L"  \u2022 Click a lane or the ruler to move the playhead\n"
             L"  \u2022 Ctrl+wheel zooms, Shift+wheel scrolls vertically\n\n"
             L"Keys:  Space = play/pause   Ctrl+Z = undo   Ctrl+Shift+Z = redo",
@@ -1899,6 +1974,8 @@ struct App {
         HMENU m = CreatePopupMenu();
         AppendMenuW(m, MF_STRING | (hasClips ? 0 : MF_GRAYED), IDM_TRK_DENOISE,
                     L"Voice cleaner \u2014 this track\u2026");
+        AppendMenuW(m, MF_STRING | (hasClips ? 0 : MF_GRAYED), IDM_TRK_VOICEISO,
+                    L"Remove non-voice \u2014 this track\u2026");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_TRK_RENAME, L"Rename track\u2026");
         AppendMenuW(m, MF_STRING | (doc.project().tracks.size() > 1 ? 0 : MF_GRAYED),
@@ -1907,6 +1984,7 @@ struct App {
         int cmd = TrackPopupMenu(m, TPM_RETURNCMD, sp.x, sp.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         if (cmd == IDM_TRK_DENOISE) voiceCleanTrack(trackId);
+        else if (cmd == IDM_TRK_VOICEISO) removeNonVoiceTrack(trackId);
         else if (cmd == IDM_TRK_RENAME) {
             std::wstring nm = t->name;
             if (dlg::promptText(hwnd, L"Rename track", L"Track name:", nm)) { doc.renameTrack(trackId, nm); refresh(); }
@@ -1970,6 +2048,10 @@ struct App {
         }
         AppendMenuW(vc, MF_POPUP, (UINT_PTR)rec, L"Apply noise capture \u25B8");
         AppendMenuW(m, MF_POPUP, (UINT_PTR)vc, L"Voice cleaner (reduce noise)");
+        HMENU vi = CreatePopupMenu();
+        AppendMenuW(vi, MF_STRING, IDM_VOICEISO, L"This clip\u2026");
+        AppendMenuW(vi, MF_STRING, IDM_VOICEISO_ALL, L"All clips (whole project)\u2026");
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)vi, L"Remove non-voice (bumps, shuffling)");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_RENAME, L"Rename\u2026");
         AppendMenuW(m, MF_STRING, IDM_DELETE, L"Delete clip");
@@ -1990,6 +2072,8 @@ struct App {
         else if (cmd == IDM_DENOISE_ALL) voiceCleanAllClips();
         else if (cmd == IDM_GETPROFILE) captureNoiseProfileFromSelection();
         else if (cmd == IDM_GETPROFILE_CLIP) captureNoiseProfileFromClip(clipId);
+        else if (cmd == IDM_VOICEISO) removeNonVoiceClip(clipId);
+        else if (cmd == IDM_VOICEISO_ALL) removeNonVoiceAllClips();
         else if (cmd >= IDM_APPLYCAP_BASE && cmd < IDM_APPLYCAP_BASE + 100)
             applyCaptureToClip(clipId, cmd - IDM_APPLYCAP_BASE);
         else if (cmd == IDM_RENAME) renameClip(clipId);

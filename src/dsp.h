@@ -63,4 +63,37 @@ AudioBufferPtr denoiseWithProfile(const AudioBuffer& buf, const NoiseProfile& pr
 // captured opts.noiseProfile is used (nullptr / mismatched rate -> nullptr).
 AudioBufferPtr denoise(const AudioBuffer& buf, const NROptions& opts);
 
+// --- Voice isolation (remove everything that isn't speech) ---
+// Where noise reduction attacks *steady* background noise, this attacks
+// *non-speech events*: bumps, thumps, chair/paper shuffling, door slams, clicks,
+// keyboard, and the room tone between sentences. Speech is detected per analysis
+// frame (harmonic structure + speech-band energy + level), the detections are
+// grown to cover consonants and merged across short gaps, and everything outside
+// the resulting voice segments is attenuated. The clip's length and timing are
+// never changed — non-voice is silenced in place, not cut out.
+struct VoiceIsolateOptions {
+    float sensitivity = 0.5f;    // 0 = keep more (lenient) .. 1 = remove more (strict)
+    float reductionDb = 60.0f;   // attenuation applied to non-voice, 0 .. 96 (96 ~ silence)
+    float holdMs      = 200.0f;  // keep the gate open this long after voice stops, 0 .. 2000
+    float fadeMs      = 25.0f;   // gate ramp length, 0 .. 500 (avoids clicks)
+    bool  residue     = false;   // keep only what would be removed (audition what's lost)
+};
+
+struct VoiceIsolateStats {
+    double voiceSeconds   = 0.0;  // audio kept at full gain
+    double removedSeconds = 0.0;  // audio attenuated
+    int    segments       = 0;    // number of detected voice segments
+};
+
+// Returns a new buffer with non-voice attenuated (or, with `residue`, only the
+// removed material). Never returns nullptr for a non-empty buffer: audio too
+// short to analyse (< one 2048-frame window) is treated as all-voice.
+AudioBufferPtr isolateVoice(const AudioBuffer& buf, const VoiceIsolateOptions& opts,
+                            VoiceIsolateStats* stats = nullptr);
+
+// Frame-level voice mask, one flag per hop (frame f covers samples
+// [f*hop, f*hop + win)). Exposed for tests / future visualisation.
+std::vector<uint8_t> detectVoiceFrames(const AudioBuffer& buf, const VoiceIsolateOptions& opts,
+                                       int* winOut = nullptr, int* hopOut = nullptr);
+
 } // namespace dsp

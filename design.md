@@ -17,7 +17,7 @@ sync with behavior changes.
 | `engine.{h,cpp}` | WASAPI shared-mode render thread; `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
 | `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker |
 | `document.{h,cpp}` | Owns `Project` + undo tree; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`) |
-| `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms (see below) |
+| `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms + voice isolation (see below) |
 | `waveform.{h,cpp}` | GDI oscilloscope: min/max envelope zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, file/project pickers |
 | `ui.cpp` | The whole main window: `App` struct, layout, painting, hit-testing, menus, drag/drop, full-window clip editor |
@@ -137,6 +137,61 @@ apply" maps onto this app's clip model:
 - Captures are **session-scoped** (not written to the `.acep` project), matching
   Audacity's session profile behavior.
 
+## DSP: voice isolation — "remove non-voice" (`dsp.{h,cpp}`)
+
+Complementary to noise reduction: NR removes *steady* noise from the whole
+signal, voice isolation removes *non-speech events* (bumps, shuffling, door
+slams, keyboard, and the room tone between sentences) by gating on speech
+detection. Entry point `dsp::isolateVoice(buf, VoiceIsolateOptions, stats*)`;
+the frame-level decision is exposed separately as `dsp::detectVoiceFrames` for
+tests / future waveform overlays.
+
+- **Analysis**: mono downmix, window 2048 / hop 512 (≈43 ms / ≈11 ms at 48 kHz),
+  periodic Hann. Each frame does **one zero-padded FFT (4096)**, from which both
+  the band powers *and* — via the inverse FFT of the power spectrum — the linear
+  autocorrelation are derived. Two FFTs per frame total; ≈37× realtime.
+- **Features per frame**
+  - `harmonicity` — largest **interior local maximum** of the autocorrelation over
+    F0 lags (70–400 Hz), normalised by `r[0]` and **de-biased by the analysis
+    window's own autocorrelation**. Requiring an interior local max is what stops
+    a sub-70 Hz thump from faking a peak at the edge of the lag range.
+  - `lowFrac` — energy below 150 Hz as a fraction of the total. A bump / desk
+    knock / footstep is almost all sub-150 Hz; speech never is.
+  - `spFrac` — energy in the 250–4000 Hz speech band as a fraction of the total.
+  - `rms` — frame level against a **95th-percentile loud-frame reference**, so
+    room tone and distant rustle fall below the gate.
+- **Thresholds slide with `sensitivity` (0…1)**: `harmThr = 0.12 + 0.33·s`,
+  `lowThr = 0.85 − 0.10·s`, `spThr = 0.06 + 0.10·s`, level factor
+  `0.010 + 0.060·s`. The dialog exposes three presets (Gentle 0.25 / Balanced
+  0.50 / Strict 0.75).
+- **Segment shaping** (this is what makes it usable on real speech): voiced runs
+  shorter than **60 ms** are dropped (transients can ring briefly and look
+  pitched); surviving runs are grown by a **120 ms pre-roll** and the user's
+  **hold** (default 200 ms) — the growth is what preserves unvoiced consonants
+  (`s`, `f`, `t`) that flank voiced speech; then gaps shorter than **150 ms** are
+  merged so words aren't chopped mid-utterance.
+- **Application**: the frame mask becomes sample segments, then the output is
+  written in one pass with a moving segment index — gain 1 inside a segment,
+  `10^(−reductionDb/20)` outside, with a raised-cosine ramp of `fadeMs` on each
+  side (no per-sample envelope array, so a long clip costs no extra memory).
+  `residue` outputs `1 − gain`, so **reduce + residue == original exactly**
+  (selftest asserts maxDiff < 1e-5).
+- **Length is never changed** — non-voice is attenuated in place, never cut, so
+  timeline placements and selections stay valid. `VoiceIsolateStats` reports
+  kept/removed seconds and the segment count for the confirmation message.
+- Audio shorter than one window (2048 frames) is treated as all-voice rather than
+  failing, so the call never returns nullptr for non-empty input.
+
+### Voice isolation in the app
+
+`App::viOpts` (session-persisted options) → `removeNonVoiceClip/Track/AllClips`
+funnel into `removeNonVoiceClips(ids, scopeLabel)`, mirroring the voice cleaner's
+scope model: one options dialog (`dlg::voiceIsolate`), then every target clip is
+processed and committed through `Document::replaceClipBuffers` as **one undo
+step**. Menu ids `IDM_VOICEISO` / `IDM_VOICEISO_ALL` (clip menu submenu *Remove
+non-voice*) and `IDM_TRK_VOICEISO` (track header menu). A summary message box
+reports how much was silenced across how many voice segments.
+
 ## Timeline: moving a placed clip (drag feedback)
 
 `Mode::ClipMove` (started in `onLDown` when `placedAt(p)` hits) drags a placed
@@ -194,7 +249,7 @@ kept sorted via `min/max` so the highlight never blinks or needs a swap on mouse
 - **Cursor hint**: `WM_SETCURSOR` shows `IDC_SIZEWE` when `overSelEdge(p)` (hover
   near an edge on any surface) or `draggingSelEdge()` (an edge drag in progress).
 
-## Voice-cleaner dialog (`dialogs.cpp`)
+## Voice-cleaner / remove-non-voice dialogs (`dialogs.cpp`)
 
 Manual modal (no resource script), same pattern as the export dialog:
 `VoiceCleanerContext` carries `opts`/`profile`/`profileDesc` in/out plus the
@@ -204,6 +259,12 @@ show the Strength combo; Profile shows Get-profile button + status line +
 dB/Sensitivity/Bands edits + Reduce/Residue radios. Apply is blocked (message
 box) when Profile is chosen without a captured profile. Numeric edits parse with
 `wcstod`, clamp to Audacity's ranges, and fall back to defaults on garbage.
+
+`dlg::voiceIsolate(parent, VoiceIsolateOptions&, scopeLabel)` follows the same
+pattern: a Sensitivity preset combo, numeric Attenuation / Hold / Fade edits
+(same `vcReadDouble` clamp-and-fallback parsing) and Keep-voice / Preview-removed
+radios, with the scope (`'clip name'`, `all clips (N clips)`, `track 'x'`) shown
+in the dialog so a project-wide run can't be triggered by accident.
 
 ## Selftest
 
@@ -215,10 +276,18 @@ dispatch through `denoise()` incl. missing-profile rejection. Also covers a
 `Document` `.acep` **v2 round-trip** (library order + per-clip timestamps
 preserved) and library **sort-by-name / sort-by-time / reorder**.
 
+Voice-isolation coverage builds a synthetic 5.2 s signal — harmonic speech-like
+stretch (F0 140 Hz + 12 harmonics), a 60 Hz decaying thump, a broadband shuffle
+burst, room tone throughout — and asserts: length preserved, speech kept (100%),
+bump / shuffle / room tone each attenuated ≥ 20 dB (measured −60 dB, i.e. the
+full requested reduction), exactly one detected voice segment, and
+reduce + residue == original. It also logs the throughput (≈37× realtime).
+
 ## Undo / scopes
 
-Voice cleaning (any algorithm) replaces clip buffers and commits **one snapshot
-per operation** — a track-wide or project-wide clean is a single undo step.
+Voice cleaning (any algorithm) and voice isolation replace clip buffers and
+commit **one snapshot per operation** — a track-wide or project-wide clean /
+isolation is a single undo step.
 
 ## Unsaved-changes guard
 

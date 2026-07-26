@@ -454,6 +454,118 @@ bool voiceCleaner(HWND parent, VoiceCleanerContext& ctx) {
     return st.ok;
 }
 
+// ------------------------------------------------------------------ voice isolation
+struct VIState {
+    dsp::VoiceIsolateOptions* opts = nullptr;
+    HWND cbSens = 0, edDb = 0, edHold = 0, edFade = 0;
+    HWND rbPreview = 0;   // checkbox: output the removed material instead (residue)
+    bool ok = false;
+};
+
+// Sensitivity presets shown in the combo (kept in sync with the labels below).
+static const float kVISens[3] = { 0.25f, 0.50f, 0.75f };
+
+static LRESULT CALLBACK VIProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    auto* st = (VIState*)GetWindowLongPtrW(h, GWLP_USERDATA);
+    switch (m) {
+    case WM_COMMAND:
+        if (LOWORD(w) == IDCANCEL) { st->ok = false; DestroyWindow(h); return 0; }
+        if (LOWORD(w) == IDOK) {
+            dsp::VoiceIsolateOptions& o = *st->opts;
+            int si = (int)SendMessageW(st->cbSens, CB_GETCURSEL, 0, 0);
+            if (si < 0 || si > 2) si = 1;
+            o.sensitivity = kVISens[si];
+            o.reductionDb = (float)vcReadDouble(st->edDb, 0.0, 96.0, 60.0);
+            o.holdMs      = (float)vcReadDouble(st->edHold, 0.0, 2000.0, 200.0);
+            o.fadeMs      = (float)vcReadDouble(st->edFade, 0.0, 500.0, 25.0);
+            o.residue     = SendMessageW(st->rbPreview, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            st->ok = true; DestroyWindow(h); return 0;
+        }
+        break;
+    case WM_CLOSE: st->ok = false; DestroyWindow(h); return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+bool voiceIsolate(HWND parent, dsp::VoiceIsolateOptions& opts, const std::wstring& scopeLabel) {
+    static bool reg = false;
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    if (!reg) {
+        WNDCLASSW wc{}; wc.lpfnWndProc = VIProc; wc.hInstance = hInst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"ACE_VI"; RegisterClassW(&wc); reg = true;
+    }
+    VIState st; st.opts = &opts;
+    RECT pr; GetWindowRect(parent, &pr);
+    int W = 430, H = 336;
+    int x = pr.left + ((pr.right - pr.left) - W) / 2;
+    int y = pr.top + ((pr.bottom - pr.top) - H) / 2;
+    HWND h = CreateWindowExW(WS_EX_DLGMODALFRAME, L"ACE_VI", L"Remove Non-Voice",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, W, H, parent, nullptr, hInst, nullptr);
+    SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
+
+    HWND info = CreateWindowW(L"STATIC",
+        L"Silences everything that isn't speech \u2014 bumps, shuffling, clicks, door\n"
+        L"slams and the room tone between sentences. The clip's length and timing\n"
+        L"are unchanged; non-voice is attenuated in place, not cut out.",
+        WS_CHILD | WS_VISIBLE, 16, 12, 396, 50, h, nullptr, hInst, nullptr);
+    SendMessageW(info, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+    HWND scope = CreateWindowW(L"STATIC", (L"Applies to: " + scopeLabel).c_str(),
+        WS_CHILD | WS_VISIBLE, 16, 64, 396, 18, h, nullptr, hInst, nullptr);
+    SendMessageW(scope, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+
+    auto label = [&](const wchar_t* t, int yy) {
+        HWND c = CreateWindowW(L"STATIC", t, WS_CHILD | WS_VISIBLE, 16, yy, 190, 20, h, nullptr, hInst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+        return c;
+    };
+    auto edit = [&](int yy, const std::wstring& text) {
+        HWND c = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", text.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            210, yy, 80, 22, h, nullptr, hInst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+        return c;
+    };
+
+    label(L"Sensitivity:", 92);
+    st.cbSens = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+        210, 90, 202, 200, h, nullptr, hInst, nullptr);
+    SendMessageW(st.cbSens, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+    for (auto* s : { L"Gentle (keep more)", L"Balanced", L"Strict (remove more)" })
+        SendMessageW(st.cbSens, CB_ADDSTRING, 0, (LPARAM)s);
+    int si = 1;
+    for (int i = 0; i < 3; ++i)
+        if (std::fabs(opts.sensitivity - kVISens[i]) < std::fabs(opts.sensitivity - kVISens[si])) si = i;
+    SendMessageW(st.cbSens, CB_SETCURSEL, si, 0);
+
+    wchar_t num[64];
+    swprintf(num, 64, L"%g", (double)opts.reductionDb);
+    label(L"Attenuation (dB):", 126);      st.edDb   = edit(124, num);
+    swprintf(num, 64, L"%g", (double)opts.holdMs);
+    label(L"Hold after speech (ms):", 158); st.edHold = edit(156, num);
+    swprintf(num, 64, L"%g", (double)opts.fadeMs);
+    label(L"Fade (ms):", 190);              st.edFade = edit(188, num);
+
+    label(L"Output:", 222);
+    st.rbPreview = CreateWindowW(L"BUTTON", L"Preview what would be removed",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        210, 220, 202, 20, h, nullptr, hInst, nullptr);
+    SendMessageW(st.rbPreview, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+    SendMessageW(st.rbPreview, BM_SETCHECK, opts.residue ? BST_CHECKED : BST_UNCHECKED, 0);
+
+    HWND ok = CreateWindowW(L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        218, 254, 88, 30, h, (HMENU)IDOK, hInst, nullptr);
+    HWND cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        314, 254, 88, 30, h, (HMENU)IDCANCEL, hInst, nullptr);
+    SendMessageW(ok, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+    SendMessageW(cancel, WM_SETFONT, (WPARAM)guiFont(), TRUE);
+
+    SetFocus(st.cbSens);
+    runModal(h, parent);
+    return st.ok;
+}
+
 // ------------------------------------------------------------------ project files
 std::wstring openProject(HWND parent) {
     wchar_t buf[1024] = { 0 };

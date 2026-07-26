@@ -16,7 +16,7 @@ if not exist "%DST%"      mkdir "%DST%"
 if not exist "%DST%\src"  mkdir "%DST%\src"
 
 rem --- root files ---
-robocopy "." "%DST%" CMakeLists.txt README.md .gitignore todo.txt copy-to-github.bat /NFL /NDL /NJH /NJS /NP
+robocopy "." "%DST%" CMakeLists.txt README.md .gitignore copy-to-github.bat /NFL /NDL /NJH /NJS /NP
 
 rem --- source tree (headers, sources, resource + manifest) ---
 robocopy "src" "%DST%\src" *.h *.cpp *.rc *.manifest /E /NFL /NDL /NJH /NJS /NP

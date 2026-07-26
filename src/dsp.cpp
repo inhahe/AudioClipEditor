@@ -382,4 +382,258 @@ AudioBufferPtr denoise(const AudioBuffer& buf, const NROptions& opts) {
     return out;
 }
 
+// ---------------- voice isolation (remove non-speech) ----------------
+// Frame analysis at 2048/512 (≈43 ms window, ≈11 ms hop at 48 kHz). Three
+// features decide whether a frame is *voiced speech*:
+//
+//   harmonicity  normalised autocorrelation peak over F0 lags (70–400 Hz),
+//                de-biased by the analysis window's own autocorrelation and
+//                required to be an interior local maximum, so a sub-70 Hz thump
+//                cannot fake a peak at the edge of the search range,
+//   spectrum     fraction of energy in the speech band (250–4000 Hz) must be
+//                non-trivial, and the fraction below 150 Hz must not dominate
+//                (that is the signature of a bump / desk knock / footstep),
+//   level        frame RMS relative to the clip's loud-frame reference, so room
+//                tone and distant rustle drop out.
+//
+// Voiced frames are then: runs shorter than ~60 ms dropped (transients can ring
+// briefly), grown by a pre-roll and the user's hold (this is what preserves
+// unvoiced consonants attached to voiced speech), and gaps shorter than ~150 ms
+// merged so words aren't chopped mid-utterance.
+
+static const int kVIWin = 2048;
+static const int kVIHop = 512;
+
+static std::vector<float> viMonoMix(const AudioBuffer& buf) {
+    const int ch = std::max(1, buf.channels);
+    const int64_t nf = buf.frames();
+    std::vector<float> m((size_t)std::max<int64_t>(0, nf));
+    const float inv = 1.0f / (float)ch;
+    for (int64_t i = 0; i < nf; ++i) {
+        float a = 0.0f;
+        for (int c = 0; c < ch; ++c) a += buf.samples[i * ch + c];
+        m[(size_t)i] = a * inv;
+    }
+    return m;
+}
+
+// Autocorrelation of a real sequence via FFT (returns lags 0..n-1).
+static void viAutocorr(const std::vector<float>& x, std::vector<cf>& scratch,
+                       std::vector<double>& out) {
+    const size_t n = scratch.size();
+    for (size_t i = 0; i < n; ++i) scratch[i] = cf(i < x.size() ? x[i] : 0.0f, 0.0f);
+    fft(scratch, false);
+    for (size_t i = 0; i < n; ++i) scratch[i] = cf(std::norm(scratch[i]), 0.0f);
+    fft(scratch, true);
+    out.resize(n);
+    for (size_t i = 0; i < n; ++i) out[i] = scratch[i].real();
+}
+
+std::vector<uint8_t> detectVoiceFrames(const AudioBuffer& buf, const VoiceIsolateOptions& opts,
+                                       int* winOut, int* hopOut) {
+    if (winOut) *winOut = kVIWin;
+    if (hopOut) *hopOut = kVIHop;
+    std::vector<uint8_t> mask;
+    const int64_t nf = buf.frames();
+    if (nf < kVIWin || buf.channels <= 0) return mask;
+    const int rate = buf.sampleRate > 0 ? buf.sampleRate : 48000;
+    const float s = std::max(0.0f, std::min(1.0f, opts.sensitivity));
+
+    const std::vector<float> mono = viMonoMix(buf);
+    const size_t nFrames = (size_t)(1 + (nf - kVIWin) / kVIHop);
+
+    // Periodic Hann + its own autocorrelation (to de-bias the signal ACF).
+    std::vector<float> win(kVIWin);
+    for (int i = 0; i < kVIWin; ++i)
+        win[i] = 0.5f * (1.0f - (float)std::cos(2.0 * PI * i / kVIWin));
+    std::vector<cf> scratch(kVIWin * 2);          // zero-padded: linear autocorrelation
+    std::vector<double> wac;
+    viAutocorr(win, scratch, wac);
+    const double wac0 = wac[0] > 0 ? wac[0] : 1.0;
+
+    const int N2 = kVIWin * 2;                             // zero-padded FFT size
+    const int lagMin = std::max(2, rate / 400);            // 400 Hz
+    const int lagMax = std::min(kVIWin - 2, rate / 70);    // 70 Hz
+    const int binLow    = std::max(1, 150 * N2 / rate);
+    const int binSpLo   = std::max(1, 250 * N2 / rate);
+    const int binSpHi   = std::min(N2 / 2, 4000 * N2 / rate);
+    const int binTop    = N2 / 2;
+
+    std::vector<double> rms(nFrames, 0.0), harm(nFrames, 0.0),
+                        lowFrac(nFrames, 0.0), spFrac(nFrames, 0.0);
+
+    for (size_t fr = 0; fr < nFrames; ++fr) {
+        const size_t s0 = fr * (size_t)kVIHop;
+        double raw = 0.0;
+        for (int i = 0; i < kVIWin; ++i) {
+            const float v = mono[s0 + i];
+            raw += (double)v * v;
+            scratch[i] = cf(v * win[i], 0.0f);
+        }
+        for (int i = kVIWin; i < N2; ++i) scratch[i] = cf(0.0f, 0.0f);
+        rms[fr] = std::sqrt(raw / kVIWin);
+
+        // One padded FFT yields both the band powers and (via its inverse) the
+        // linear autocorrelation used for harmonicity.
+        fft(scratch, false);
+        double pLow = 0, pSpeech = 0, pAll = 0;
+        for (int k = 1; k <= binTop; ++k) {
+            const double p = std::norm(scratch[k]);
+            pAll += p;
+            if (k < binLow) pLow += p;
+            if (k >= binSpLo && k <= binSpHi) pSpeech += p;
+        }
+        const double inv = pAll > 1e-20 ? 1.0 / pAll : 0.0;
+        lowFrac[fr] = pLow * inv;
+        spFrac[fr]  = pSpeech * inv;
+
+        for (int k = 0; k < N2; ++k) scratch[k] = cf((float)std::norm(scratch[k]), 0.0f);
+        fft(scratch, true);
+
+        // Harmonicity: strongest interior local maximum of the de-biased ACF.
+        const double r0 = scratch[0].real();
+        double best = 0.0;
+        if (r0 > 1e-12) {
+            for (int lag = lagMin + 1; lag < lagMax; ++lag) {
+                const double a0 = scratch[lag - 1].real(), a1 = scratch[lag].real(),
+                             a2 = scratch[lag + 1].real();
+                if (!(a1 > a0 && a1 >= a2)) continue;
+                const double bias = wac[lag] / wac0;
+                if (bias <= 0.05) continue;
+                const double v = a1 / (r0 * bias);
+                if (v > best) best = v;
+            }
+        }
+        harm[fr] = std::max(0.0, std::min(1.0, best));
+    }
+
+    // Loud-frame reference level (95th percentile) → relative silence gate.
+    std::vector<double> sorted = rms;
+    std::sort(sorted.begin(), sorted.end());
+    const double loud = sorted[(size_t)((sorted.size() - 1) * 95 / 100)];
+    const double levelThr = std::max(loud * (0.010 + 0.060 * s), 2e-5);
+
+    const double harmThr = 0.12 + 0.33 * s;    // 0.12 (lenient) .. 0.45 (strict)
+    const double lowThr  = 0.85 - 0.10 * s;    // bump signature: mostly < 150 Hz
+    const double spThr   = 0.06 + 0.10 * s;    // speech always has mid-band energy
+
+    std::vector<uint8_t> core(nFrames, 0);
+    for (size_t fr = 0; fr < nFrames; ++fr)
+        core[fr] = (rms[fr] >= levelThr && harm[fr] >= harmThr &&
+                    lowFrac[fr] <= lowThr && spFrac[fr] >= spThr) ? 1 : 0;
+
+    const double hopSec = (double)kVIHop / rate;
+    auto frames = [&](double ms) { return (int)std::ceil(ms / 1000.0 / hopSec); };
+
+    // Drop runs too short to be an utterance (rings, clicks, tonal knocks).
+    const int minRun = std::max(1, frames(60.0));
+    for (size_t i = 0; i < nFrames; ) {
+        if (!core[i]) { ++i; continue; }
+        size_t j = i; while (j < nFrames && core[j]) ++j;
+        if ((int)(j - i) < minRun) for (size_t k = i; k < j; ++k) core[k] = 0;
+        i = j;
+    }
+
+    // Grow: pre-roll (onsets) + hold (trailing consonants / breath).
+    const int pre  = frames(120.0);
+    const int post = std::max(0, frames(std::max(0.0f, opts.holdMs)));
+    mask.assign(nFrames, 0);
+    for (size_t i = 0; i < nFrames; ++i) {
+        if (!core[i]) continue;
+        const size_t a = (size_t)std::max<int64_t>(0, (int64_t)i - pre);
+        const size_t b = std::min(nFrames, i + (size_t)post + 1);
+        for (size_t k = a; k < b; ++k) mask[k] = 1;
+    }
+
+    // Merge short gaps so words aren't chopped mid-utterance.
+    const int mergeGap = frames(150.0);
+    for (size_t i = 0; i < nFrames; ) {
+        if (mask[i]) { ++i; continue; }
+        size_t j = i; while (j < nFrames && !mask[j]) ++j;
+        if (i > 0 && j < nFrames && (int)(j - i) <= mergeGap)
+            for (size_t k = i; k < j; ++k) mask[k] = 1;
+        i = j;
+    }
+    return mask;
+}
+
+AudioBufferPtr isolateVoice(const AudioBuffer& buf, const VoiceIsolateOptions& opts,
+                            VoiceIsolateStats* stats) {
+    const int ch = std::max(1, buf.channels);
+    const int64_t nf = buf.frames();
+    const int rate = buf.sampleRate > 0 ? buf.sampleRate : 48000;
+    auto out = std::make_shared<AudioBuffer>();
+    out->sampleRate = buf.sampleRate;
+    out->channels = buf.channels;
+    out->samples.resize(buf.samples.size());
+    if (stats) *stats = VoiceIsolateStats{};
+    if (nf <= 0) return out;
+
+    int win = kVIWin, hop = kVIHop;
+    std::vector<uint8_t> mask = detectVoiceFrames(buf, opts, &win, &hop);
+
+    // Frame mask → sample segments. Frame f is centred on f*hop + win/2, so a
+    // run of frames [a,b] covers samples [a*hop + win/2, b*hop + win/2).
+    struct Seg { int64_t a, b; };
+    std::vector<Seg> segs;
+    for (size_t i = 0; i < mask.size(); ) {
+        if (!mask[i]) { ++i; continue; }
+        size_t j = i; while (j < mask.size() && mask[j]) ++j;
+        int64_t a = (int64_t)i * hop;
+        int64_t b = (int64_t)(j - 1) * hop + win;
+        if (i == 0) a = 0;
+        if (j == mask.size()) b = nf;
+        a = std::max<int64_t>(0, a);
+        b = std::min<int64_t>(nf, b);
+        // A frame's support is wider than the hop, so neighbouring runs could in
+        // principle produce touching segments; coalesce instead of overlapping
+        // (the walk below assumes sorted, disjoint segments).
+        if (!segs.empty() && a <= segs.back().b) segs.back().b = std::max(segs.back().b, b);
+        else segs.push_back({ a, b });
+        i = j;
+    }
+    if (mask.empty()) segs.push_back({ 0, nf });   // too short to analyse: all voice
+
+    const float g0 = (float)std::pow(10.0, -std::max(0.0f, opts.reductionDb) / 20.0);
+    const int64_t fade = std::max<int64_t>(0, (int64_t)(std::max(0.0f, opts.fadeMs) * 0.001 * rate));
+
+    int64_t voiceFrames = 0;
+    for (auto& sg : segs) voiceFrames += sg.b - sg.a;
+    if (stats) {
+        stats->segments = (int)segs.size();
+        stats->voiceSeconds = (double)voiceFrames / rate;
+        stats->removedSeconds = (double)(nf - voiceFrames) / rate;
+    }
+
+    // Walk samples with a moving segment index; outside a segment the gain ramps
+    // between g0 and 1 with a raised cosine over `fade` samples on each side.
+    size_t si = 0;
+    const float* in = buf.samples.data();
+    float* op = out->samples.data();
+    for (int64_t i = 0; i < nf; ++i) {
+        while (si < segs.size() && i >= segs[si].b) ++si;
+        float g;
+        if (si < segs.size() && i >= segs[si].a) {
+            g = 1.0f;
+        } else if (fade <= 0) {
+            g = g0;
+        } else {
+            double t = 0.0;
+            if (si > 0) {                                   // leaving the previous segment
+                const int64_t d = i - segs[si - 1].b;
+                if (d < fade) t = std::max(t, 1.0 - (double)d / fade);
+            }
+            if (si < segs.size()) {                         // approaching the next
+                const int64_t d = segs[si].a - i;
+                if (d < fade) t = std::max(t, 1.0 - (double)d / fade);
+            }
+            const double smooth = 0.5 - 0.5 * std::cos(PI * std::max(0.0, std::min(1.0, t)));
+            g = (float)(g0 + (1.0 - g0) * smooth);
+        }
+        if (opts.residue) g = 1.0f - g;
+        for (int c = 0; c < ch; ++c) op[i * ch + c] = in[i * ch + c] * g;
+    }
+    return out;
+}
+
 } // namespace dsp
