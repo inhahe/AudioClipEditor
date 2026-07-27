@@ -103,7 +103,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   used floats to the top). Captures live for the session.
 - **Save / load projects.** Projects are saved as a single `.acep` file with the
   whole library and timeline (audio embedded), so a project is fully
-  self-contained. `Ctrl+S` saves; the File menu has Open / Save / Save As. The
+  self-contained. Your **current selection and playhead position are saved too**,
+  so reopening a project puts you back exactly where you left off (a selection
+  whose clip has since gone is quietly dropped). Changing the selection doesn't
+  count as an unsaved change, so it never triggers a save prompt on its own.
+  `Ctrl+S` saves; the File menu has Open / Save / Save As. The
   title bar shows a `*` while there are unsaved changes, and the app **prompts you
   to save** (Save / Don't Save / Cancel) before closing or opening another project
   if the current one has unsaved edits — so you never lose work by accident.

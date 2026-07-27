@@ -16,7 +16,7 @@ sync with behavior changes.
 | `encoder.{h,cpp}` | WAV writer (manual RIFF; 16/24-bit PCM, 32-bit float) + MF Sink Writer (MP3/AAC/WMA); output-rate resampling |
 | `engine.{h,cpp}` | WASAPI shared-mode render thread; `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
 | `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker |
-| `document.{h,cpp}` | Owns `Project` + undo tree; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`) |
+| `document.{h,cpp}` | Owns `Project` + undo tree + `ViewState`; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`) |
 | `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms + voice isolation (see below) |
 | `waveform.{h,cpp}` | GDI oscilloscope: min/max envelope zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, file/project pickers |
@@ -226,8 +226,30 @@ The clip library's display order **is** `Project::library`'s vector order
 - **`Clip::timestamp`** (FILETIME ticks) is set in `Document::addClip` from the
   source file's last-write time, or the current time for derived clips (crop /
   save-selection, no source path). It is persisted in the `.acep` file (**format
-  bumped to v2**); loading a v1 project falls back to the source file's current
-  mtime so time-sort still works.
+  v2**); loading a v1 project falls back to the source file's current mtime so
+  time-sort still works.
+
+## Project view state (selection + playhead persistence)
+
+The waveform selection (`selClipId`/`selStart`/`selEnd`) and the playhead are
+*UI* state and live in `App`, but they're saved with the project so reopening
+puts you back where you left off. `Document` holds a `ViewState` struct
+alongside — deliberately **not inside** — `Project`:
+
+- Being outside `Project` keeps it out of the undo snapshots, so dragging a
+  selection neither creates an undo step nor gets rewritten by undo/redo, and it
+  never trips `isModified()` (a selection drag must not produce a "save changes?"
+  prompt on exit).
+- `App::storeViewState()` copies the live selection/playhead into `doc.view()`
+  right before every save; `App::restoreViewState()` reads it back after a load.
+  Those are the only two sync points, so there is no shadow-state to keep
+  coherent during editing.
+- `.acep` **format v3** appends the block (`selClipId`, `selStart`, `selEnd`,
+  `playheadFrame`) **after the tracks**, so the older sections parse identically;
+  v1/v2 files simply load with a default (empty) view state.
+- `Document::loadProject` validates on the way in: a selection whose clip is gone,
+  or whose bounds fall outside the clip (e.g. the clip was cropped in another
+  session), is dropped rather than restored as a bogus highlight.
 
 ## Selection editing (independent edges)
 
@@ -273,8 +295,9 @@ capture validity + too-short rejection, 20 dB reduction attenuates a noise-only
 region by ≈20 dB (measured −20.00 dB) while preserving ≥70% of an embedded tone
 (measured 99.5%), reduce−residue==original identity, rate-mismatch rejection,
 dispatch through `denoise()` incl. missing-profile rejection. Also covers a
-`Document` `.acep` **v2 round-trip** (library order + per-clip timestamps
-preserved) and library **sort-by-name / sort-by-time / reorder**.
+`Document` `.acep` **v3 round-trip** (library order, per-clip timestamps, and the
+saved selection + playhead preserved; a stale selection is dropped on load) and
+library **sort-by-name / sort-by-time / reorder**.
 
 Voice-isolation coverage builds a synthetic 5.2 s signal — harmonic speech-like
 stretch (F0 140 Hz + 12 harmonics), a 60 Hz decaying thump, a broadband shuffle

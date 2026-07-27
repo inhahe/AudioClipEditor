@@ -5,6 +5,18 @@
 #include <vector>
 #include <utility>
 
+// Where the user was working: the active waveform selection and the playhead.
+// This is UI state, not project data — it rides along in the .acep file (so
+// reopening a project puts you back where you left off) but is deliberately
+// *outside* the undo tree and does not mark the project modified: dragging a
+// selection must not create an undo step or a "save changes?" prompt.
+struct ViewState {
+    int     selClipId = -1;      // clip that owns the selection, -1 = none
+    int64_t selStart = 0;        // selection bounds, in frames of that clip
+    int64_t selEnd = 0;
+    int64_t playheadFrame = 0;   // timeline playhead
+};
+
 // Owns the project state and the undo/redo tree. Every mutation goes through a
 // method here that records a snapshot, so Ctrl+Z can undo anything.
 class Document {
@@ -13,6 +25,11 @@ public:
 
     Project& project() { return project_; }
     const Project& project() const { return project_; }
+
+    // Saved/loaded with the project; see ViewState. The UI syncs its live
+    // selection in before saving and reads it back after loading.
+    ViewState& view() { return view_; }
+    const ViewState& view() const { return view_; }
 
     static PeakCachePtr buildPeaks(const AudioBufferPtr& buf);
 
@@ -81,6 +98,7 @@ private:
     void commit(const std::wstring& desc) { undo_.commit(project_, desc); }
 
     Project project_;
+    ViewState view_;
     UndoTree undo_;
     const UndoNode* savedNode_ = nullptr;
 };

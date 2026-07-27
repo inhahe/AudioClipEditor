@@ -1540,19 +1540,39 @@ struct App {
         rate = doc.project().sampleRate > 0 ? doc.project().sampleRate : rate;
         engine.setSourceRate(rate);
         projectPath = path;
-        selClipId = -1; selStart = selEnd = 0; previewClipId = -1; timelinePlaying = false; playheadFrame = 0;
+        previewClipId = -1; timelinePlaying = false;
         libScroll = tlScrollX = tlScrollY = 0;
+        restoreViewState();   // selection + playhead saved with the project
         setTitle(); clampScroll(); refresh();
+    }
+    // The waveform selection and playhead ride along in the .acep file; they are
+    // UI state, so they live in App and are synced to/from Document at I/O time
+    // (never through the undo tree, and they never mark the project modified).
+    void storeViewState() {
+        ViewState& v = doc.view();
+        v.selClipId = hasSel() ? selClipId : -1;
+        v.selStart = hasSel() ? selStart : 0;
+        v.selEnd = hasSel() ? selEnd : 0;
+        v.playheadFrame = playheadFrame;
+    }
+    void restoreViewState() {
+        const ViewState& v = doc.view();   // loadProject already validated it
+        selClipId = v.selClipId;
+        selStart = v.selStart;
+        selEnd = v.selEnd;
+        playheadFrame = v.playheadFrame;
     }
     bool saveProjectAs() {
         std::wstring suggested = projectPath.empty() ? L"Untitled" : PathFindFileNameW(projectPath.c_str());
         std::wstring path = dlg::saveProject(hwnd, suggested);
         if (path.empty()) return false;
+        storeViewState();
         if (!doc.saveProject(path)) { MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING); return false; }
         projectPath = path; setTitle(); return true;
     }
     bool saveProjectFile() {
         if (projectPath.empty()) return saveProjectAs();
+        storeViewState();
         if (!doc.saveProject(projectPath)) {
             MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING);
             return false;

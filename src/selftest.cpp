@@ -257,7 +257,7 @@ int runSelfTest() {
     check(slice->frames() == (f1 - f0), L"Buffer slice length",
           L"got=" + std::to_wstring(slice->frames()) + L" want=" + std::to_wstring(f1 - f0));
 
-    // Document project round-trip (.acep v2) + library sort / reorder
+    // Document project round-trip (.acep v3) + library sort / reorder
     {
         Document d; d.init(rate);
         auto mk = [&](const wchar_t* nm, uint64_t ts) {
@@ -265,7 +265,12 @@ int runSelfTest() {
             if (Clip* c = d.project().findClip(id)) c->timestamp = ts;
             return id;
         };
-        mk(L"Charlie", 300); mk(L"alpha", 100); mk(L"Bravo", 200);
+        int charlieId = mk(L"Charlie", 300); mk(L"alpha", 100); mk(L"Bravo", 200);
+
+        // View state (selection + playhead) rides along with the project.
+        d.view().selClipId = charlieId;
+        d.view().selStart = 1000; d.view().selEnd = 5000;
+        d.view().playheadFrame = 7777;
 
         std::wstring proj = dir + L"\\_selftest.acep";
         check(d.saveProject(proj), L"project save (.acep)");
@@ -278,6 +283,12 @@ int runSelfTest() {
                   L"project load preserves order");
             check(lib[0].timestamp == 300 && lib[1].timestamp == 100 && lib[2].timestamp == 200,
                   L"project load preserves timestamps");
+            const ViewState& v = d2.view();
+            check(v.selClipId == charlieId && v.selStart == 1000 && v.selEnd == 5000 &&
+                  v.playheadFrame == 7777, L"project load preserves selection + playhead",
+                  L"clip=" + std::to_wstring(v.selClipId) + L" sel=" +
+                  std::to_wstring(v.selStart) + L".." + std::to_wstring(v.selEnd) +
+                  L" playhead=" + std::to_wstring(v.playheadFrame));
             d2.sortLibrary(true);   // case-insensitive name: alpha, Bravo, Charlie
             auto& L2 = d2.project().library;
             check(L2[0].name == L"alpha" && L2[1].name == L"Bravo" && L2[2].name == L"Charlie",
@@ -290,6 +301,13 @@ int runSelfTest() {
             d2.moveClipInLibrary(firstId, 3);   // move head to the end
             auto& L4 = d2.project().library;
             check(L4[2].id == firstId, L"moveClipInLibrary reorder");
+
+            // A selection pointing at a clip that no longer exists is dropped.
+            d2.view().selClipId = 4242; d2.view().selStart = 10; d2.view().selEnd = 20;
+            d2.saveProject(proj);
+            Document d3; d3.init(rate);
+            check(d3.loadProject(proj) && d3.view().selClipId == -1 &&
+                  d3.view().selEnd == 0, L"project load drops a stale selection");
         }
         DeleteFileW(proj.c_str());
     }
