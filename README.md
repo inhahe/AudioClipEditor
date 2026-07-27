@@ -64,7 +64,10 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   **Save sel** (save the selection as a new clip) or export.
 - **Undo/redo tree.** `Ctrl+Z` undoes anything. `Ctrl+Shift+Z` redoes — and when
   the history has branched, it pops up a menu of the redo branches with
-  descriptions so you can pick which future to walk into.
+  descriptions so you can pick which future to walk into. Selections are undoable
+  too: `Ctrl+Z` first walks back through the selections you've made since the last
+  edit, so a stray click that wipes a carefully-placed selection costs one
+  keystroke, and only once those run out does it undo the edit itself.
 - **Tracks & timeline.** The timeline sits on top (sized to just fit the current
   number of tracks) with the clip library below it. Start with one track, add as
   many as you like — once there are more tracks than fit, the tracks pane grows a
@@ -201,6 +204,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Make a selection | drag across the waveform |
 | Adjust one selection edge | grab the left or right edge of an existing selection and drag it (cursor shows ↔); works on cards, the editor main view, and the fine-tune strips |
 | Cancel a drag in progress | `Esc` — abandons the drag and puts things back as they were when it started: a selection sweep or edge-nudge restores the previous selection, a clip drag drops nothing |
+| Undo a selection | `Ctrl+Z` steps back through the selections you have made since the last edit (and `Ctrl+Shift+Z` / `Ctrl+Y` forward again); once they run out it undoes the edit itself |
 | Open the full-window editor | **double-click** a clip card, or right-click → *Open in editor* |
 | Fine-tune selection edges | in the editor, drag the **Start edge** / **End edge** strip knobs (wheel over a strip to zoom); toggle with **Fine-tune edges** |
 | Close the full-window editor | `Esc` (when no drag is in progress) or the **Done** button |

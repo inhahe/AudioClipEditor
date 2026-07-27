@@ -98,6 +98,12 @@ public:
     int  defaultRedoBranch() const { return undo_.defaultRedoBranch(); }
     void redo(int branch);
 
+    // Identifies *where* in the history we currently are. The UI keeps its own
+    // selection-undo stack alongside this one and uses the node's identity to tell
+    // when the document has moved out from under it (see selection history in
+    // ui.cpp); the same pointer-as-a-bookmark trick as savedNode_ below.
+    const UndoNode* historyNode() const { return undo_.current(); }
+
     int newClipId();  // allocate without committing (caller commits)
 
     // --- Unsaved-changes tracking ---

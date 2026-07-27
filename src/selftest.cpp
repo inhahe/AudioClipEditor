@@ -9,6 +9,7 @@
 #include "engine.h"
 #include "layout.h"
 #include "transport.h"
+#include "selhistory.h"
 #include "waveform.h"
 #include <windows.h>
 #include <shlwapi.h>
@@ -1027,6 +1028,65 @@ int runSelfTest() {
         { State s = armed(false, true); s.timeline = true;
           check(decide(s, press(false, true)).act == Act::Restart,
                 L"transport: a preview press during timeline playback takes the engine over"); }
+    }
+
+    // ---- selection history (Ctrl+Z stepping back through selections)
+    {
+        using selhist::History; using selhist::Sel; using selhist::same;
+        // Stand-ins for document undo-tree nodes; only their identity matters.
+        const int nodeA = 1, nodeB = 2;   // distinct values, so the addresses cannot be folded
+        const void* A = &nodeA; const void* B = &nodeB;
+
+        const Sel none{ -1, 0, 0 }, s1{ 7, 100, 200 }, s2{ 7, 300, 900 }, s3{ 9, 0, 50 };
+
+        { History h; check(!h.canUndo(A) && !h.canRedo(A),
+                           L"selection history: nothing to undo before any selection"); }
+
+        // The basic ask: two selections, then step back to the first.
+        { History h;
+          h.record(A, none, s1);
+          h.record(A, s1, s2);
+          check(h.canUndo(A), L"selection history: a change is undoable");
+          check(same(h.undo(s2), s1), L"selection history: undo returns the previous selection");
+          check(same(h.undo(s1), none), L"selection history: undo again reaches the empty selection");
+          check(!h.canUndo(A), L"selection history: undo stops at the start"); }
+
+        // Redo has to retrace exactly, including the state undone from.
+        { History h;
+          h.record(A, none, s1); h.record(A, s1, s2);
+          h.undo(s2);
+          check(h.canRedo(A), L"selection history: an undone change is redoable");
+          check(same(h.redo(s1), s2), L"selection history: redo returns the undone selection"); }
+
+        // A gesture that ends where it began (a click re-picking the same range)
+        // must not leave a dead entry that Ctrl+Z appears to ignore.
+        { History h; h.record(A, s1, s1);
+          check(!h.canUndo(A), L"selection history: an unchanged selection records nothing"); }
+
+        // Making a new selection after undoing abandons the redo branch.
+        { History h;
+          h.record(A, none, s1); h.record(A, s1, s2);
+          h.undo(s2);
+          h.record(A, s1, s3);
+          check(!h.canRedo(A), L"selection history: a new selection clears the redo branch");
+          check(same(h.undo(s3), s1), L"selection history: the new change is itself undoable"); }
+
+        // The whole point of the base token: once the document moves, these
+        // entries describe states that are no longer reachable.
+        { History h;
+          h.record(A, none, s1); h.record(A, s1, s2);
+          check(!h.canUndo(B), L"selection history: a document edit invalidates the stack");
+          check(h.canUndo(A), L"selection history: the stack is keyed to its own history node");
+          // Recording against the new node rebuilds from scratch rather than
+          // appending to entries belonging to the old one.
+          h.record(B, s2, s3);
+          check(h.undoDepth() == 1 && same(h.undo(s3), s2),
+                L"selection history: recording after an edit starts a fresh stack"); }
+
+        { History h;
+          h.record(A, none, s1);
+          h.reset(A);
+          check(!h.canUndo(A) && h.undoDepth() == 0, L"selection history: reset empties the stack"); }
     }
 
     // ---- waveform rendering, off-screen

@@ -8,6 +8,7 @@
 #include "dsp.h"
 #include "layout.h"
 #include "transport.h"
+#include "selhistory.h"
 #include <commctrl.h>
 #include <shlwapi.h>
 #include <windowsx.h>
@@ -135,6 +136,11 @@ struct App {
     // if the pointer leaves the library, and that conversion clears the selection.
     int selSaveClipId = -1;
     int64_t selSaveStart = 0, selSaveEnd = 0;
+
+    // Selection history, so Ctrl+Z steps back through selections as well as edits.
+    // The state machine lives in selhistory.h; the document's current undo node is
+    // the token that tells it when the document has moved out from under it.
+    selhist::History selHist;
 
     // voice cleaner session state: last-used options + captured noise profile
     // (Audacity-style; profile lives for the session, like Audacity's)
@@ -345,7 +351,13 @@ struct App {
         case EB_DELSEL: removeSelectedRange(editClipId, false); break;
         case EB_SAVE: if (hasSel() && selClipId == editClipId) saveSelectionAsClip(); break;
         case EB_CAPTURE: captureNoiseProfileFromEditor(); break;
-        case EB_CLEAR: selClipId = editClipId; selStart = selEnd = 0; break;
+        case EB_CLEAR: {
+            // Undoable like a drag: this is the one-click way to lose a selection.
+            selhist::Sel prev = curSel();
+            selClipId = editClipId; selStart = selEnd = 0;
+            recordSelChange(prev);
+            break;
+        }
         case EB_DONE: closeClipEditor(); return;
         }
         refresh();
@@ -420,6 +432,9 @@ struct App {
             //  no-move edge grab simply leaves the selection unchanged.)
         }
         mainEdgeDrag = false;
+        // d == 0 means the drag was already cancelled with Esc, which put the
+        // selection back itself and so must not leave a history entry.
+        if (d != 0) recordSelChangeFromDrag();
         refresh();
     }
     void edWheel(POINT p, int delta) {
@@ -907,8 +922,10 @@ struct App {
         RECT tr = { tbRects[TB_STOP].right + S(16), rcTransport.top, zlab.left - S(8), rcTransport.bottom };
         textOut(h, tr, fmtTime(posSec) + L"  /  " + fmtTime(totSec), col::text, fBig, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        COLORREF uf = doc.canUndo() ? col::text : col::dim;
-        COLORREF rf = doc.canRedo() ? col::text : col::dim;
+        // A pending selection undo counts: the buttons are the same action as
+        // Ctrl+Z, so greying them while that would still do something would lie.
+        COLORREF uf = (doc.canUndo() || canSelUndo()) ? col::text : col::dim;
+        COLORREF rf = (doc.canRedo() || canSelRedo()) ? col::text : col::dim;
         button(h, tbRects[TB_UNDO], L"\u21B6 Undo", col::btn, uf, hotTB == TB_UNDO, fNorm);
         button(h, tbRects[TB_REDO], L"\u21B7 Redo", col::btn, rf, hotTB == TB_REDO, fNorm);
     }
@@ -1898,8 +1915,27 @@ struct App {
     }
 
     // --------------------------------------------------------- undo / redo
-    void doUndo() { if (doc.canUndo()) { doc.undo(); afterHistory(); } }
+    // The document history node doubles as the "are these entries still reachable"
+    // token for the selection stack.
+    const void* selHistBase() const { return doc.historyNode(); }
+    selhist::Sel curSel() const { return { selClipId, selStart, selEnd }; }
+    void applySel(const selhist::Sel& s) { selClipId = s.clipId; selStart = s.start; selEnd = s.end; }
+
+    bool canSelUndo() const { return selHist.canUndo(selHistBase()); }
+    bool canSelRedo() const { return selHist.canRedo(selHistBase()); }
+    void resetSelHistory() { selHist.reset(selHistBase()); }
+
+    // `prev` is normally the snapshot taken on mouse-down (the same one Esc uses),
+    // so a gesture that ends where it began records nothing.
+    void recordSelChange(const selhist::Sel& prev) { selHist.record(selHistBase(), prev, curSel()); }
+    void recordSelChangeFromDrag() { recordSelChange({ selSaveClipId, selSaveStart, selSaveEnd }); }
+
+    void doUndo() {
+        if (canSelUndo()) { applySel(selHist.undo(curSel())); validateSelection(); refresh(); return; }
+        if (doc.canUndo()) { doc.undo(); afterHistory(); }
+    }
     void doRedo() {
+        if (canSelRedo()) { applySel(selHist.redo(curSel())); validateSelection(); refresh(); return; }
         if (!doc.canRedo()) return;
         int branch = doc.defaultRedoBranch();
         if (doc.redoBranchCount() > 1) {
@@ -1918,6 +1954,10 @@ struct App {
     void afterHistory() {
         stopAll();            // playback may reference buffers this edit replaced
         validateSelection();
+        // The document has moved, so the selection stack no longer describes
+        // reachable states. Dropping it here (rather than only letting the base
+        // check ignore it) stops an undo-then-redo from reviving a stale stack.
+        resetSelHistory();
         clampScroll(); refresh();
     }
 
@@ -2166,6 +2206,7 @@ struct App {
             // (anchor-based sweep keeps selStart/selEnd sorted; a no-move edge grab
             //  simply leaves the selection unchanged.)
             waveEdgeDrag = false;
+            recordSelChangeFromDrag();   // covers the sweep and the click-that-clears
             refresh();
         } else if (m == Mode::CardDrag) {
             if (dragged) {
@@ -2354,7 +2395,11 @@ struct App {
         else if (cmd == IDM_CROP) { selClipId = clipId; cropSelection(); }
         else if (cmd == IDM_SILENCESEL) removeSelectedRange(clipId, true);
         else if (cmd == IDM_DELETESEL) removeSelectedRange(clipId, false);
-        else if (cmd == IDM_CLEARSEL) { selClipId = -1; selStart = selEnd = 0; refresh(); }
+        else if (cmd == IDM_CLEARSEL) {
+            selhist::Sel prev = curSel();
+            selClipId = -1; selStart = selEnd = 0;
+            recordSelChange(prev); refresh();      // undoable, like the editor's Clear selection
+        }
         else if (cmd == IDM_EXPORTCLIP) exportClipAudio(clipId, false);
         else if (cmd == IDM_EXPORTSEL) exportClipAudio(clipId, true);
         else if (cmd == IDM_NORM_MATCH) normalizeClip(clipId, false);

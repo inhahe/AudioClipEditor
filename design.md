@@ -22,6 +22,7 @@ sync with behavior changes.
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, file/project pickers |
 | `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`) and toolbar row wrapping (`flowButtons`) |
 | `transport.h` | Pure play/pause decision logic, likewise split out to be testable: `decide(State, Press)` → pause / resume / restart-from-where, for both the single combined control and the editor's labelled button pair |
+| `selhistory.h` | Pure undo/redo state machine for the waveform selection, kept out of the document's snapshot tree; a `base` token ties the stack to a point in the document history |
 | `ui.cpp` | The whole main window: `App` struct, layout, painting, hit-testing, menus, drag/drop, full-window clip editor |
 | `main.cpp` | `wWinMain` → `--selftest` or `runApp()` |
 | `selftest.cpp` | Headless `--selftest`: decode/encode round-trips, DSP checks, writes `bin/selftest.log` |
@@ -702,6 +703,43 @@ both meanings in the editor: mid-drag it abandons the gesture, and only otherwis
 does it close the editor. It clears the drag state, releases capture and restores
 the snapshot; the mouse-up that eventually arrives finds `mode == None` /
 `editDrag == 0` and so does nothing.
+
+## Selection undo — `selhist::History` (`selhistory.h`)
+
+**Ctrl+Z steps back through selections as well as edits.** A selection is
+positioned by hand and one stray click destroys it, so it needs to be undoable —
+but it is *not* project state, and putting it in the document's snapshot tree
+would copy the whole `Project` per drag and fill the redo-branch picker with
+entries that change no audio. So it gets its own stack.
+
+The stack is valid only while the document stays put. Every call carries a
+`base` token — the UI passes `doc.historyNode()`, the current undo-tree node,
+the same pointer-as-a-bookmark trick `savedNode_` already uses — and when that
+changes the entries describe states that are no longer reachable and are
+dropped. No hooks into the many `commitEdit` call sites are needed; the check is
+self-synchronising. `afterHistory()` additionally calls `resetSelHistory()` so an
+undo-then-redo cannot revive a stale stack by landing back on the original node.
+
+That single rule is also what makes the precedence easy to state, and it is the
+behaviour to preserve if this is ever revisited: **Ctrl+Z walks back the
+selections made since the last edit; once they run out, it undoes the edit
+itself.** Undo is never ambiguous about which of the two it is about to do.
+
+Changes are recorded at gesture *end*, reusing the same mouse-down snapshot that
+Esc uses (`recordSelChangeFromDrag`), which covers the sweep, the single-edge
+nudge, and the plain click that clears — and, because `record` ignores a no-op,
+a click that re-picks the same range leaves no dead entry to step through. The
+two one-click destroyers, the editor's **Clear selection** button and the card
+context menu's *Clear selection*, record explicitly. A drag cancelled with Esc
+records nothing: it already put the selection back itself (`edUp` checks
+`d != 0`, i.e. that the drag was not already cancelled).
+
+`doUndo`/`doRedo` are the single choke point, so the toolbar buttons and the menu
+items behave identically to the keys; the buttons' enabled colour is
+`doc.canUndo() || canSelUndo()`, since greying them while Ctrl+Z would still do
+something would be a lie. The state machine is Win32- and document-free, so all
+of it — including redo-branch invalidation and the base-token rule — is exercised
+headlessly in the "selection history" block of `selftest.cpp`.
 
 ## Dialog layout scaffolding — `DlgUI` (`dialogs.cpp`)
 
