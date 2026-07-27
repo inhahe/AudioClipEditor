@@ -131,6 +131,11 @@ struct PlaybackEngine::Impl {
 
     RenderTimeline heard;                 // device frames played -> source frames heard
 
+    // Why the last position() answered what it did. Diagnostic only; written
+    // under the lock by position(), read by the selftest when the playhead
+    // checks fail. See "playback position" in selftest.cpp.
+    mutable PlaybackEngine::PosDiag diag{};
+
     // Device frames played, extrapolated from the last clock sample to now.
     bool devicePlayed(int deviceRate, int64_t& out) const {
         if (clockFreq == 0) return false;
@@ -410,7 +415,21 @@ int64_t PlaybackEngine::position() const {
     if (!d_->devicePlayed(sampleRate_, devPlayed)) return rendered;
     // Never report past what has been rendered: the extrapolation is a
     // prediction, and overshooting would let the playhead run off the end.
-    return std::max<int64_t>(0, std::min(d_->heard.sourceAt(devPlayed), rendered));
+    const int64_t heard = d_->heard.sourceAt(devPlayed);
+    d_->diag.devPlayed = devPlayed;
+    d_->diag.heard = heard;
+    d_->diag.rendered = rendered;
+    d_->diag.recCount = d_->heard.recCount;
+    const RenderTimeline::Write& nw =
+        d_->heard.recs[(d_->heard.recHead - 1 + RenderTimeline::kRecs) % RenderTimeline::kRecs];
+    d_->diag.devEnd = nw.devEnd;
+    d_->diag.drained = devPlayed >= nw.devEnd;
+    d_->diag.clamped = heard > rendered;
+    return std::max<int64_t>(0, std::min(heard, rendered));
+}
+PlaybackEngine::PosDiag PlaybackEngine::posDiag() const {
+    std::lock_guard<std::mutex> lk(d_->mtx);
+    return d_->diag;
 }
 int64_t PlaybackEngine::total() const {
     std::lock_guard<std::mutex> lk(d_->mtx);
