@@ -21,6 +21,16 @@ struct ViewState {
     int64_t playheadFrame = 0;   // timeline playhead
 };
 
+// Trim a selection to what `project` can actually honour, and drop it (clipId = -1,
+// bounds zeroed) when nothing of it survives — its clip is gone, or the range no
+// longer overlaps the clip's audio.
+//
+// A selection is work the user did by hand, so it is only ever narrowed by this,
+// never discarded as a blanket precaution. Both places that can invalidate one go
+// through here — loading a project, and any edit that may have replaced or removed
+// clips — so the two rules cannot drift apart.
+void clampSelection(const Project& project, int& clipId, int64_t& start, int64_t& end);
+
 // Owns the project state and the undo/redo tree. Every mutation goes through a
 // method here that records a snapshot, so Ctrl+Z can undo anything.
 class Document {

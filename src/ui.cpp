@@ -6,6 +6,7 @@
 #include "waveform.h"
 #include "dialogs.h"
 #include "dsp.h"
+#include "layout.h"
 #include <commctrl.h>
 #include <shlwapi.h>
 #include <windowsx.h>
@@ -911,11 +912,7 @@ struct App {
         if (mode == Mode::CardDrag && dragged && !cards.empty()) {
             POINT cp; GetCursorPos(&cp); ScreenToClient(hwnd, &cp);
             if (PtInRect(&rcLibrary, cp)) {
-                int idx = libInsertIndex(cp);
-                bool atEnd = idx >= (int)cards.size();
-                const RECT& ref = atEnd ? cards.back().card : cards[idx].card;
-                int cx = atEnd ? ref.right + S(6) : ref.left - S(6);
-                RECT bar = { cx - S(1), ref.top, cx + S(2), ref.bottom };
+                RECT bar = libDropCaret(cp, libInsertIndex(cp));
                 fill(h, bar, col::accent);
             }
         }
@@ -1086,18 +1083,24 @@ struct App {
         for (auto& c : cards) if (PtInRect(&c.card, p)) return &c;
         return nullptr;
     }
+    // The laid-out card frames, in library order — the input to the drop geometry
+    // in layout.h. Only built while a drag is live, so the copy is not hot.
+    std::vector<RECT> cardRects() const {
+        std::vector<RECT> r; r.reserve(cards.size());
+        for (auto& c : cards) r.push_back(c.card);
+        return r;
+    }
     // Reading-order insertion index for a library drag/drop at p (0..cards.size()).
-    // A card comes before the cursor if it's on an earlier row, or on the same row
-    // and its centre is left of the cursor.
-    int libInsertIndex(POINT p) const {
-        for (int i = 0; i < (int)cards.size(); ++i) {
-            const RECT& r = cards[i].card;
-            int cx = (r.left + r.right) / 2;
-            bool earlierRow = p.y < r.top;
-            bool sameRow = p.y >= r.top && p.y < r.bottom;
-            if (earlierRow || (sameRow && p.x < cx)) return i;
-        }
-        return (int)cards.size();
+    int libInsertIndex(POINT p) const { return layout::insertIndex(cardRects(), p); }
+    // The insertion caret to paint for that drop. See layout::caretAnchor for why the
+    // caret can sit *after* a card rather than always before the one it inserts at.
+    RECT libDropCaret(POINT p, int idx) const {
+        const std::vector<RECT> rects = cardRects();
+        const layout::CaretAnchor a = layout::caretAnchor(rects, p, idx);
+        if (a.card < 0) return RECT{};
+        const RECT& r = rects[a.card];
+        const int cx = a.trailing ? r.right + S(6) : r.left - S(6);
+        return RECT{ cx - S(1), r.top, cx + S(2), r.bottom };
     }
     const PlacedLayout* placedAt(POINT p) {
         for (auto& pl : placed) if (PtInRect(&pl.rc, p)) return &pl;
@@ -1750,7 +1753,7 @@ struct App {
     }
 
     // --------------------------------------------------------- undo / redo
-    void doUndo() { if (doc.canUndo()) { syncSelectionAfterEdit(); doc.undo(); afterHistory(); } }
+    void doUndo() { if (doc.canUndo()) { doc.undo(); afterHistory(); } }
     void doRedo() {
         if (!doc.canRedo()) return;
         int branch = doc.defaultRedoBranch();
@@ -1765,13 +1768,21 @@ struct App {
         }
         doc.redo(branch); afterHistory();
     }
-    void syncSelectionAfterEdit() {}
+    // Called after an edit that may have replaced or removed clips: undo / redo, or
+    // deleting a clip, a track, or a clip's placement on a track.
     void afterHistory() {
-        // invalidate playback that may reference stale buffers
-        stopAll();
-        selClipId = -1; selStart = selEnd = 0;
+        stopAll();            // playback may reference buffers this edit replaced
+        validateSelection();
         clampScroll(); refresh();
     }
+
+    // Keep the waveform selection across such an edit unless it can no longer be
+    // honoured. Most of these edits don't touch the selected clip's audio at all --
+    // removing a clip's placement from a track leaves the library clip untouched --
+    // and a selection is something the user positioned by hand, so throwing it away
+    // as a blanket precaution loses their work for no reason. `clampSelection` is
+    // the same rule a loaded project's selection goes through.
+    void validateSelection() { clampSelection(doc.project(), selClipId, selStart, selEnd); }
 
     // --------------------------------------------------------- scroll
     // Vertical scrollbar for the tracks pane. Returns false when all tracks fit
@@ -2293,7 +2304,6 @@ struct App {
             else playAll();
             return;
         }
-        if (k == VK_DELETE && selClipId < 0 && previewClipId >= 0) { }
     }
 
     void onWheel(POINT p, int delta, bool ctrl, bool shift) {

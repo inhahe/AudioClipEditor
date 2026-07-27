@@ -7,6 +7,7 @@
 #include "dsp.h"
 #include "document.h"
 #include "engine.h"
+#include "layout.h"
 #include <windows.h>
 #include <shlwapi.h>
 #include <string>
@@ -311,6 +312,111 @@ int runSelfTest() {
                   d3.view().selEnd == 0, L"project load drops a stale selection");
         }
         DeleteFileW(proj.c_str());
+    }
+
+    // clampSelection: the rule that decides whether a waveform selection survives an
+    // edit. It is only allowed to narrow a selection, never to discard one that still
+    // works -- removing a clip's placement from a track used to wipe the selection on
+    // the corresponding library clip even though its audio was untouched.
+    {
+        Document d; d.init(rate);
+        int keep = d.addClip(L"keep", makeSine(rate, 1.0, 300.0), L"", L"add");
+        int other = d.addClip(L"other", makeSine(rate, 1.0, 400.0), L"", L"add");
+        const int64_t nf = d.project().findClip(keep)->frames();
+        int trackId = d.project().tracks[0].id;
+        d.placeClip(trackId, other, 0, L"place");
+
+        // The reported bug: an edit elsewhere in the project leaves it alone.
+        int id = keep; int64_t s = 1000, e = 5000;
+        d.removePlaced(trackId, 0, L"remove placement");
+        clampSelection(d.project(), id, s, e);
+        check(id == keep && s == 1000 && e == 5000,
+              L"selection survives removing an unrelated placement",
+              L"clip=" + std::to_wstring(id) + L" " + std::to_wstring(s) +
+              L".." + std::to_wstring(e));
+
+        // Deleting a *different* clip likewise leaves it alone.
+        id = keep; s = 1000; e = 5000;
+        d.removeClip(other);
+        clampSelection(d.project(), id, s, e);
+        check(id == keep && s == 1000 && e == 5000,
+              L"selection survives deleting another clip");
+
+        // Deleting the clip it belongs to drops it.
+        id = keep; s = 1000; e = 5000;
+        Document d2; d2.init(rate);
+        int gone = d2.addClip(L"gone", makeSine(rate, 1.0, 300.0), L"", L"add");
+        id = gone;
+        d2.removeClip(gone);
+        clampSelection(d2.project(), id, s, e);
+        check(id == -1 && s == 0 && e == 0, L"selection dropped when its clip is deleted");
+
+        // A range running past the end of a shortened buffer is narrowed, not lost.
+        id = keep; s = nf - 100; e = nf + 5000;
+        clampSelection(d.project(), id, s, e);
+        check(id == keep && s == nf - 100 && e == nf,
+              L"selection past the buffer end is clamped, not dropped",
+              L"clip=" + std::to_wstring(id) + L" " + std::to_wstring(s) +
+              L".." + std::to_wstring(e) + L" (nf=" + std::to_wstring(nf) + L")");
+
+        // ...but one that survives as an empty range is dropped.
+        id = keep; s = nf + 10; e = nf + 20;
+        clampSelection(d.project(), id, s, e);
+        check(id == -1 && s == 0 && e == 0, L"selection entirely past the end is dropped");
+
+        // "No selection" stays that way.
+        id = -1; s = 0; e = 0;
+        clampSelection(d.project(), id, s, e);
+        check(id == -1 && s == 0 && e == 0, L"clampSelection leaves an empty selection alone");
+    }
+
+    // Library drop geometry (layout.h): a 5-card grid reflowed 3-per-row.
+    //   row 0: [0][1][2]   x = 0,100,200   y = 0..80
+    //   row 1: [3][4]      x = 0,100       y = 100..180
+    // Row 0's tail (x >= 300) and row 1's head are the same *index* but different
+    // *places*; the caret must follow the cursor, or dropping at the end of a row
+    // looks impossible.
+    {
+        std::vector<RECT> g;
+        for (int i = 0; i < 5; ++i) {
+            int col = i % 3, row = i / 3;
+            g.push_back(RECT{ col * 100, row * 100, col * 100 + 90, row * 100 + 80 });
+        }
+        auto idx = [&](int x, int y) { return layout::insertIndex(g, POINT{ x, y }); };
+        auto anc = [&](int x, int y) {
+            POINT p{ x, y }; return layout::caretAnchor(g, p, layout::insertIndex(g, p));
+        };
+        check(idx(10, 40) == 0, L"library drop: left of the first card inserts at 0");
+        check(idx(160, 40) == 2, L"library drop: past a card's centre inserts after it");
+        check(idx(350, 40) == 3, L"library drop: row 0's empty tail inserts at 3");
+        check(idx(10, 140) == 3, L"library drop: row 1's head also inserts at 3");
+        check(idx(350, 140) == 5, L"library drop: past the last card appends");
+        check(idx(200, 400) == 5, L"library drop: below every row appends");
+
+        // The regression: aiming at the end of row 0 used to draw the caret at the
+        // head of row 1, so there appeared to be no way to drop there.
+        layout::CaretAnchor tail = anc(350, 40);
+        check(tail.card == 2 && tail.trailing,
+              L"library caret: row 0's tail trails card 2",
+              L"card=" + std::to_wstring(tail.card) +
+              L" trailing=" + std::to_wstring((int)tail.trailing));
+        layout::CaretAnchor head = anc(10, 140);
+        check(head.card == 3 && !head.trailing,
+              L"library caret: row 1's head leads card 3",
+              L"card=" + std::to_wstring(head.card) +
+              L" trailing=" + std::to_wstring((int)head.trailing));
+        // Same index, two different carets -- that is the whole point.
+        check(idx(350, 40) == idx(10, 140) && tail.card != head.card,
+              L"library caret: one index, two places");
+
+        layout::CaretAnchor end = anc(350, 140);
+        check(end.card == 4 && end.trailing, L"library caret: append trails the last card");
+        layout::CaretAnchor first = anc(10, 40);
+        check(first.card == 0 && !first.trailing, L"library caret: index 0 leads card 0");
+
+        std::vector<RECT> none;
+        check(layout::caretAnchor(none, POINT{ 0, 0 }, 0).card < 0,
+              L"library caret: an empty library has no caret");
     }
 
     // Unsaved-changes flag: edits and selection changes count, playhead doesn't.

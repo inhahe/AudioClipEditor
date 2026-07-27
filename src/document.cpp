@@ -64,6 +64,17 @@ void Document::renameClip(int id, const std::wstring& name) {
     commit(L"Rename to '" + name + L"'");
 }
 
+void clampSelection(const Project& project, int& clipId, int64_t& start, int64_t& end) {
+    const Clip* c = clipId >= 0 ? project.findClip(clipId) : nullptr;
+    if (c) {
+        const int64_t nf = c->frames();
+        start = std::max<int64_t>(0, std::min(start, nf));
+        end   = std::max<int64_t>(0, std::min(end, nf));
+        if (end > start) return;     // still a usable range — leave it alone
+    }
+    clipId = -1; start = end = 0;
+}
+
 void Document::removeClip(int id) {
     Clip* c = project_.findClip(id);
     if (!c) return;
@@ -409,15 +420,7 @@ bool Document::loadProject(const std::wstring& path) {
     fclose(f);
     if (p.tracks.empty()) { Track t; t.id = p.nextTrackId++; t.name = L"Track 1"; p.tracks.push_back(t); }
 
-    // Drop a selection that no longer fits (clip gone, or bounds past its end).
-    const Clip* sc = v.selClipId >= 0 ? p.findClip(v.selClipId) : nullptr;
-    if (!sc) { v.selClipId = -1; v.selStart = v.selEnd = 0; }
-    else {
-        const int64_t nf = sc->frames();
-        v.selStart = std::max<int64_t>(0, std::min(v.selStart, nf));
-        v.selEnd = std::max<int64_t>(0, std::min(v.selEnd, nf));
-        if (v.selEnd <= v.selStart) { v.selClipId = -1; v.selStart = v.selEnd = 0; }
-    }
+    clampSelection(p, v.selClipId, v.selStart, v.selEnd);
     v.playheadFrame = std::max<int64_t>(0, v.playheadFrame);
 
     view_ = v;
