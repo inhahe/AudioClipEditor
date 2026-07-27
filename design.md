@@ -685,6 +685,24 @@ kept sorted via `min/max` so the highlight never blinks or needs a swap on mouse
 - **Cursor hint**: `WM_SETCURSOR` shows `IDC_SIZEWE` when `overSelEdge(p)` (hover
   near an edge on any surface) or `draggingSelEdge()` (an edge drag in progress).
 
+**Esc cancels a drag in progress** (`cancelDrag`). Every one of these gestures
+mutates `selStart`/`selEnd` live as the cursor moves, so abandoning one has to
+*restore* the previous selection, not merely stop tracking. `onLDown` therefore
+snapshots the selection into `selSaveClipId`/`selSaveStart`/`selSaveEnd` on
+**every** button-press, not only on the presses that start a selection drag: a
+press cannot yet tell what it will become — a card sweep turns into a
+drag-to-timeline the moment the pointer leaves the library, and that conversion
+clears the selection. `Mode::CardDrag` and `Mode::ClipMove` are cancellable for
+the same reason (and so a mis-aimed drag drops nothing); the continuous drags —
+volume, zoom, the scrollbar — are not, because they show their value moving under
+the cursor and have no half-finished result to abandon.
+
+`cancelDrag` returns whether it cancelled anything, which is what lets Esc keep
+both meanings in the editor: mid-drag it abandons the gesture, and only otherwise
+does it close the editor. It clears the drag state, releases capture and restores
+the snapshot; the mouse-up that eventually arrives finds `mode == None` /
+`editDrag == 0` and so does nothing.
+
 ## Dialog layout scaffolding — `DlgUI` (`dialogs.cpp`)
 
 Every dialog in the app is built in code (no `.rc` resources), so nothing lays

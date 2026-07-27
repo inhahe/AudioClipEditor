@@ -200,9 +200,10 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Seek within a clip | click the waveform |
 | Make a selection | drag across the waveform |
 | Adjust one selection edge | grab the left or right edge of an existing selection and drag it (cursor shows ↔); works on cards, the editor main view, and the fine-tune strips |
+| Cancel a drag in progress | `Esc` — abandons the drag and puts things back as they were when it started: a selection sweep or edge-nudge restores the previous selection, a clip drag drops nothing |
 | Open the full-window editor | **double-click** a clip card, or right-click → *Open in editor* |
 | Fine-tune selection edges | in the editor, drag the **Start edge** / **End edge** strip knobs (wheel over a strip to zoom); toggle with **Fine-tune edges** |
-| Close the full-window editor | `Esc` or the **Done** button |
+| Close the full-window editor | `Esc` (when no drag is in progress) or the **Done** button |
 | Crop / save a selection | **Crop** and **Save sel** buttons on the card while a selection is active |
 | Clip actions | **right-click a card**: play selection, save selection as new clip, crop, export clip / selection to a file, normalize, voice cleaner, remove non-voice, rename, delete, add to a track |
 | Rename a clip | right-click → Rename |

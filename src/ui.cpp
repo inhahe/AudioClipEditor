@@ -128,6 +128,14 @@ struct App {
     int64_t waveAnchor = 0;        // fixed edge while sweeping/edge-dragging a card selection
     bool waveEdgeDrag = false;     // true when a card WaveSelect drag grabbed an existing edge
 
+    // The selection as it stood when the current mouse gesture began, so Esc can
+    // put it back (see cancelDrag). Captured on every button-press rather than
+    // only on the presses that start a selection drag: a press cannot always tell
+    // yet what it will turn into -- a sweep on a card becomes a drag-to-timeline
+    // if the pointer leaves the library, and that conversion clears the selection.
+    int selSaveClipId = -1;
+    int64_t selSaveStart = 0, selSaveEnd = 0;
+
     // voice cleaner session state: last-used options + captured noise profile
     // (Audacity-style; profile lives for the session, like Audacity's)
     dsp::NROptions nrOpts;
@@ -1969,6 +1977,7 @@ struct App {
 
     // --------------------------------------------------------- mouse
     void onLDown(POINT p, bool dbl) {
+        selSaveClipId = selClipId; selSaveStart = selStart; selSaveEnd = selEnd;
         if (editorActive()) { edDown(p, dbl); return; }
         SetFocus(hwnd);
         downPt = p; dragged = false;
@@ -2442,11 +2451,40 @@ struct App {
     }
 
     // --------------------------------------------------------- keyboard
+    // Esc abandons the gesture in progress and puts things back as they were when
+    // it started: a selection sweep or edge-nudge restores the previous selection,
+    // a clip drag drops nothing. Returns false when no such drag was running, so
+    // the caller can fall through to Esc's other meaning (closing the editor).
+    //
+    // Only gestures with a discrete outcome are cancellable here. The continuous
+    // ones -- volume, zoom, the scrollbar -- show their value moving under the
+    // cursor as you drag, so there is no half-finished result to abandon.
+    bool cancelDrag() {
+        if (editorActive()) {
+            if (editDrag == 0) return false;    // main sweep, or either fine-tune strip
+            editDrag = 0; mainEdgeDrag = false;
+        } else {
+            // CardDrag is included because a sweep on a card *becomes* one when the
+            // pointer leaves the library, and that conversion clears the selection;
+            // cancelling has to undo that too, not just skip the drop.
+            if (mode != Mode::WaveSelect && mode != Mode::CardDrag && mode != Mode::ClipMove)
+                return false;
+            mode = Mode::None; waveEdgeDrag = false;
+        }
+        selClipId = selSaveClipId; selStart = selSaveStart; selEnd = selSaveEnd;
+        if (GetCapture() == hwnd) ReleaseCapture();
+        dragged = false;
+        refresh();
+        return true;
+    }
+
     void onKey(WPARAM k) {
         bool ctrl = GetKeyState(VK_CONTROL) & 0x8000;
         bool shift = GetKeyState(VK_SHIFT) & 0x8000;
         if (editorActive()) {
-            if (k == VK_ESCAPE) { closeClipEditor(); return; }
+            // Cancelling a drag takes precedence over closing: mid-gesture, Esc
+            // means "undo what I'm doing", not "throw away the whole editor".
+            if (k == VK_ESCAPE) { if (!cancelDrag()) closeClipEditor(); return; }
             // Space is the universal play/pause, not a third transport: it acts
             // on whatever is armed (so it resumes a paused selection audition as
             // a selection audition) and pauses anything playing, rather than
@@ -2458,6 +2496,7 @@ struct App {
             if (ctrl && (k == 'Z')) { if (shift) doRedo(); else doUndo(); return; }
             return;
         }
+        if (k == VK_ESCAPE) { cancelDrag(); return; }
         if (ctrl && (k == 'Z')) { if (shift) doRedo(); else doUndo(); return; }
         if (ctrl && (k == 'Y')) { doRedo(); return; }
         if (ctrl && (k == 'S')) { saveProjectFile(); return; }
