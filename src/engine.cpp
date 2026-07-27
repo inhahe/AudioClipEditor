@@ -110,6 +110,46 @@ struct PlaybackEngine::Impl {
 
     void resetRs() { rsPrimed = false; rsFrac = 0.0; }
 
+    // ---- where the audio you can actually *hear* is --------------------------
+    // A source's own position() is the *render* position: how many frames have
+    // been pushed into the WASAPI buffer. It is wrong for a playhead in two
+    // ways. It jumps forward by a whole chunk on each audio-thread wakeup rather
+    // than advancing continuously, and it leads what is coming out of the
+    // speakers by the whole buffer depth (~30 ms here). So the playhead both
+    // stuttered and ran early.
+    //
+    // Instead, keep a short history mapping "device frames written" to "source
+    // frames consumed", and ask IAudioClock how far the device has actually
+    // played. The clock is sampled on the audio thread (it is a COM object owned
+    // by this apartment, and this keeps the UI thread off it entirely) together
+    // with its own QPC timestamp, so a reader can extrapolate to the present
+    // moment -- without that the answer would still only change once per device
+    // period and the playhead would still visibly step.
+    ComPtr<IAudioClock> clock;
+    UINT64 clockFreq = 0;                 // 0 when the clock is unavailable
+    UINT64 clkPos = 0, clkQpc = 0;        // last clock sample (units of clockFreq / 100 ns)
+
+    RenderTimeline heard;                 // device frames played -> source frames heard
+
+    // Device frames played, extrapolated from the last clock sample to now.
+    bool devicePlayed(int deviceRate, int64_t& out) const {
+        if (clockFreq == 0) return false;
+        double sec = (double)clkPos / (double)clockFreq;
+        LARGE_INTEGER f, n;
+        if (QueryPerformanceFrequency(&f) && f.QuadPart && QueryPerformanceCounter(&n)) {
+            // IAudioClock reports its timestamp in 100 ns units, the counter in
+            // QPF ticks.
+            const double now100ns = (double)n.QuadPart * 1e7 / (double)f.QuadPart;
+            // Never extrapolate backwards, and never further than one buffer:
+            // if the audio thread has stalled, freezing the playhead is far
+            // better than letting it run away from the sound.
+            const double ahead = std::min(std::max((now100ns - (double)clkQpc) / 1e7, 0.0), 0.100);
+            sec += ahead;
+        }
+        out = (int64_t)(sec * deviceRate);
+        return true;
+    }
+
     // Pull one stereo source frame; false when the source is drained.
     bool pullSrcFrame(float o[2]) {
         float tmp[2];
@@ -191,6 +231,13 @@ bool PlaybackEngine::init(std::wstring* err) {
     hr = d_->client->GetService(__uuidof(IAudioRenderClient),
         (void**)d_->render.GetAddressOf());
     if (FAILED(hr)) return fail(L"Could not get render client.");
+
+    // Optional: without it position() falls back to the render position, which
+    // is what it always used to report -- less smooth, but playback still works.
+    if (SUCCEEDED(d_->client->GetService(__uuidof(IAudioClock),
+                                         (void**)d_->clock.GetAddressOf()))) {
+        if (FAILED(d_->clock->GetFrequency(&d_->clockFreq))) d_->clockFreq = 0;
+    }
 
     d_->mixbuf.resize((size_t)d_->bufferFrames * 2);
     // apply any source rate requested before init()
@@ -276,6 +323,13 @@ void PlaybackEngine::threadMain() {
         int produced = 0;
         {
             std::lock_guard<std::mutex> lk(d_->mtx);
+            // Sample the clock next to the write it will be compared against, and
+            // on this thread: the UI thread then never touches the COM object.
+            if (d_->clockFreq) {
+                UINT64 cp = 0, cq = 0;
+                if (SUCCEEDED(d_->clock->GetPosition(&cp, &cq))) { d_->clkPos = cp; d_->clkQpc = cq; }
+            }
+            const int64_t srcBefore = d_->source ? d_->source->position() : 0;
             if (d_->source && !d_->paused && !d_->drained) {
                 produced = d_->rsActive ? d_->renderResampled(d_->mixbuf.data(), (int)avail)
                                         : d_->source->render(d_->mixbuf.data(), (int)avail);
@@ -290,6 +344,8 @@ void PlaybackEngine::threadMain() {
                 std::memset(d_->mixbuf.data(), 0, sizeof(float) * 2 * avail);
             }
             writeFrames(pData, d_->mixbuf.data(), (int)avail);
+            const int64_t srcAfter = d_->source ? d_->source->position() : srcBefore;
+            d_->heard.push((int32_t)avail, (int32_t)(srcAfter - srcBefore), srcAfter);
         }
         d_->render->ReleaseBuffer(avail, 0);
 
@@ -307,6 +363,7 @@ void PlaybackEngine::play(std::shared_ptr<IPlaybackSource> src, int64_t startFra
     d_->paused = false;
     d_->drained = false;
     d_->resetRs();
+    d_->heard.reset(d_->source ? d_->source->position() : 0);
 }
 void PlaybackEngine::pause() {
     std::lock_guard<std::mutex> lk(d_->mtx);
@@ -322,6 +379,7 @@ void PlaybackEngine::stop() {
     d_->paused = true;
     d_->drained = false;
     d_->resetRs();
+    d_->heard.reset(0);
 }
 void PlaybackEngine::seek(int64_t frame) {
     std::lock_guard<std::mutex> lk(d_->mtx);
@@ -329,6 +387,7 @@ void PlaybackEngine::seek(int64_t frame) {
         d_->source->seek(frame);
         d_->drained = false;
         d_->resetRs();
+        d_->heard.reset(d_->source->position());
     }
 }
 bool PlaybackEngine::isPlaying() const {
@@ -345,7 +404,13 @@ bool PlaybackEngine::hasSource() const {
 }
 int64_t PlaybackEngine::position() const {
     std::lock_guard<std::mutex> lk(d_->mtx);
-    return d_->source ? d_->source->position() : 0;
+    if (!d_->source) return 0;
+    const int64_t rendered = d_->source->position();
+    int64_t devPlayed = 0;
+    if (!d_->devicePlayed(sampleRate_, devPlayed)) return rendered;
+    // Never report past what has been rendered: the extrapolation is a
+    // prediction, and overshooting would let the playhead run off the end.
+    return std::max<int64_t>(0, std::min(d_->heard.sourceAt(devPlayed), rendered));
 }
 int64_t PlaybackEngine::total() const {
     std::lock_guard<std::mutex> lk(d_->mtx);

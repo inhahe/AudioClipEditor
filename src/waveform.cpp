@@ -64,8 +64,22 @@ void draw(HDC hdc, const RECT& rc, const AudioBuffer& buf, const PeakCache& pc,
     // enough that the bucket cache would look blocky, else the cache for speed.
     const bool useRaw = haveSamples && framesPerPx < (double)pc.bucketFrames;
 
+    // One two-point polyline per pixel column, issued as a single PolyPolyline.
+    //
+    // This used to be a single Polygon tracing the max edge left-to-right and the
+    // min edge back again. That looks the same but is enormously more expensive:
+    // GDI has to scan-convert a ~3000-vertex, wildly self-overlapping outline,
+    // intersecting every edge with every scanline. Measured on a 20 s clip across
+    // 1478 px it cost 11 ms per call -- and the editor makes two calls per paint
+    // (waveform, then the selection-coloured overlay), which put a floor of ~30 ms
+    // under the whole redraw and was what actually made the playhead look jumpy.
+    // Stroking vertical segments is trivial by comparison and, because each column
+    // is drawn independently, it also can't produce the tangles the polygon did
+    // where the two edges crossed.
     std::vector<POINT> pts;
-    pts.reserve((size_t)W * 2 + 2);
+    std::vector<DWORD> counts;
+    pts.reserve((size_t)W * 2);
+    counts.assign((size_t)W, 2);
 
     auto colMinMax = [&](int64_t a, int64_t b, float& lo, float& hi) {
         if (useRaw) {
@@ -79,24 +93,21 @@ void draw(HDC hdc, const RECT& rc, const AudioBuffer& buf, const PeakCache& pc,
         }
     };
 
-    // top edge (max) left->right
     for (int x = 0; x < W; ++x) {
         int64_t a = f0 + (int64_t)(x * framesPerPx);
         int64_t b = f0 + (int64_t)((x + 1) * framesPerPx);
         if (b <= a) b = a + 1;
         float lo, hi; colMinMax(a, b, lo, hi);
-        pts.push_back({ rc.left + x, cy - (int)(companded(hi) * halfH) });
-    }
-    // bottom edge (min) right->left
-    for (int x = W - 1; x >= 0; --x) {
-        int64_t a = f0 + (int64_t)(x * framesPerPx);
-        int64_t b = f0 + (int64_t)((x + 1) * framesPerPx);
-        if (b <= a) b = a + 1;
-        float lo, hi; colMinMax(a, b, lo, hi);
-        pts.push_back({ rc.left + x, cy - (int)(companded(lo) * halfH) });
+        int yTop = cy - (int)(companded(hi) * halfH);
+        int yBot = cy - (int)(companded(lo) * halfH);
+        // Polyline stops one short of its final point, so a silent column would
+        // otherwise vanish entirely instead of leaving the centre line.
+        if (yBot <= yTop) yBot = yTop + 1;
+        pts.push_back({ rc.left + x, yTop });
+        pts.push_back({ rc.left + x, yBot });
     }
 
-    Polygon(hdc, pts.data(), (int)pts.size());
+    PolyPolyline(hdc, pts.data(), counts.data(), (DWORD)counts.size());
     SelectObject(hdc, op); SelectObject(hdc, ob);
     DeleteObject(pen); DeleteObject(br);
 }

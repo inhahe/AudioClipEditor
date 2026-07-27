@@ -24,7 +24,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   seek / skip around — the yellow cursor is always where playback will pick up,
   so clicking while paused (or stopped) moves the restart point. Pause always
   pauses, including in the middle of a selection audition, and play continues
-  from where it stopped. Playback is real, mixed, low-latency WASAPI.
+  from where it stopped. Playback is real, mixed, low-latency WASAPI, and the
+  cursor follows the audio you are **actually hearing** rather than the audio
+  already handed to the sound card, moving smoothly at the screen refresh rate
+  instead of hopping in lumps — so it lines up with the waveform under it even at
+  the fine-tune strips' zoom.
 - **Select a section** of any clip by dragging across its waveform. While a
   selection is active the card shows **Crop** and **Save sel** buttons, and the
   card's play button auditions **only the selected part** (so you can preview
@@ -37,13 +41,20 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   Save selection) slices the selection into a new clip you name (rename any time).
 - **Full-window clip editor.** Double-click a clip card (or right-click
   → *Open in editor*) to blow the clip up to a full-window view for precise work.
-  It has its own toolbar (play, play selection, crop, save selection, capture noise, clear, done)
-  and — because dragging a pixel-precise edge on a zoomed-out waveform is fiddly —
+  It has its own toolbar (play, play selection, crop, save selection, capture noise, clear, done).
+  **Play** and **Play selection** are two independent transports: each pauses only
+  what it started, each turns into its own **Pause** button while it is the one
+  running, and pressing one while the other is playing switches straight over — so
+  the button you press is always the button that reacts. `Space` is the universal
+  play/pause and acts on whatever is armed. Because dragging a pixel-precise edge
+  on a zoomed-out waveform is fiddly, the editor also has
   a pair of **fine-tune edge strips**: two zoomed lanes, one centred on the
   selection's **start** and one on its **end**, so you can nudge each boundary
   exactly. The strips appear automatically when the main view is too coarse, or any
   time via the **Fine-tune edges** toggle, and each strip **wheel-zooms** to dial in
-  the window. `Esc` closes the editor.
+  the window. The play cursor is drawn in the strips too whenever playback passes
+  through their window, so you can watch (and hear) exactly where an edge falls
+  relative to the audio. `Esc` closes the editor.
 - **Crop a clip** to the selection — the **Crop** button (or right-click → Crop).
   Cropping only trims the clip inside the editor (a single undo step); it **never
   overwrites or deletes the original file on disk**. To keep a cropped copy, use
@@ -110,6 +121,18 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   inside the selection is exactly what a whole-clip run would have put there. Handy
   for killing one door slam, or one noisy passage, without touching the rest of the
   take. Track- and project-wide runs are always whole-clip.
+- **Silence or delete a selection.** *Remove non-voice* can only remove what it can
+  recognise, and some noises genuinely aren't recognisable: a chair creak, a
+  swallow, a shuffle that happens to ring is harmonic, mid-band and about as long
+  as a syllable — which is to say it looks exactly like a spoken vowel to any
+  detector, at any sensitivity. When you can hear it but the machine can't, say so
+  directly: drag a selection, then right-click the clip (or use the full-window
+  editor's toolbar) and pick **Silence selection (keep timing)** or
+  **Delete selection (close gap)**. Silencing leaves the clip exactly as long as it
+  was, so a pause between sentences stays the length it was and nothing downstream
+  on the timeline shifts; deleting cuts the range out and closes the gap. Both fade
+  at the edges so the edit can't click, both are a single undo step, and neither
+  touches the file on disk.
 - **Reusable noise captures.** Each captured noise profile is remembered as a
   **recent capture** (its computed spectral profile — the per-capture work that's
   shared across every clip it cleans — is cached, so re-using it is instant). Any
@@ -128,6 +151,14 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   title bar shows a `*` while there are unsaved changes, and the app **prompts you
   to save** (Save / Don't Save / Cancel) before closing or opening another project
   if the current one has unsaved edits — so you never lose work by accident.
+- **Export a single clip, or just the selection.** Right-click a clip card →
+  *Export clip to file…* or *Export selection to file…*, which opens the same
+  audio dialog as the mixdown. Edits live in the project file and the original
+  source file on disk is **never written to**, so this is how you get an edited
+  (cleaned, normalized, cropped) clip back out as audio. The defaults follow the
+  clip — its own sample rate, and a mono clip stays mono. (*Save selection as new
+  clip* is the in-project counterpart: it adds a clip to the library rather than
+  writing a file.)
 - **Export the mixdown.** *File → Export Mixdown* renders all tracks together and
   saves through the same audio dialog — pick **format, sample rate, bit depth**
   (16/24-bit PCM or 32-bit float for WAV), **bitrate** (compressed formats), and
@@ -162,6 +193,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 |---|---|
 | Add clips | **+ Add Files** (multi-select) |
 | Play / pause a clip | green button on the card, or `Space` on the active clip (plays only the selection when one is active) |
+| Audition the whole clip vs. the selection | in the editor, **▶ Play** and **▶ Play selection** are separate transports — each becomes its own **Pause**, and pressing one while the other plays switches over |
 | Seek within a clip | click the waveform |
 | Make a selection | drag across the waveform |
 | Adjust one selection edge | grab the left or right edge of an existing selection and drag it (cursor shows ↔); works on cards, the editor main view, and the fine-tune strips |
@@ -169,7 +201,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Fine-tune selection edges | in the editor, drag the **Start edge** / **End edge** strip knobs (wheel over a strip to zoom); toggle with **Fine-tune edges** |
 | Close the full-window editor | `Esc` or the **Done** button |
 | Crop / save a selection | **Crop** and **Save sel** buttons on the card while a selection is active |
-| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, normalize, voice cleaner, remove non-voice, rename, delete, add to a track |
+| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, export clip / selection to a file, normalize, voice cleaner, remove non-voice, rename, delete, add to a track |
 | Rename a clip | right-click → Rename |
 | Reorder clips | drag a card by its title bar to a new spot in the library (caret shows the drop point) |
 | Sort clips | right-click the empty library area → *Sort clips by name* / *by time* |
@@ -178,6 +210,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |
 | Remove bumps / shuffling (keep only voice) | right-click a card → *Remove non-voice → This clip / All clips*, or right-click a track header → *Remove non-voice — this track* |
 | Clean / de-noise only part of a clip | drag a selection, then right-click a card → *Voice cleaner* / *Remove non-voice* → **This clip (selection)…** |
+| Get rid of a noise *Remove non-voice* won't touch | drag a selection over it, then right-click a card (or use the editor toolbar) → *Silence selection (keep timing)* / *Delete selection (close gap)* |
 | Capture a noise profile | select a noise-only stretch, then right-click → *Voice cleaner → Capture noise from selection* (or the **Get noise profile** button in the dialog); or *Capture noise from whole clip*; or the **Capture noise** button in the full-window editor |
 | Apply a saved noise capture | right-click a card → *Voice cleaner → Apply noise capture ▸* and pick a recent capture |
 | Track actions | **right-click a track header/lane**: voice-clean the track, rename, remove |

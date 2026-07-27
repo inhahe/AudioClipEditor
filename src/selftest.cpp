@@ -8,11 +8,14 @@
 #include "document.h"
 #include "engine.h"
 #include "layout.h"
+#include "transport.h"
+#include "waveform.h"
 #include <windows.h>
 #include <shlwapi.h>
 #include <string>
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 static std::wstring exeDir() {
     wchar_t path[MAX_PATH]; GetModuleFileNameW(nullptr, path, MAX_PATH);
@@ -593,6 +596,556 @@ int runSelfTest() {
                   L"segments=" + std::to_wstring(rst.segments) +
                   L" removed=" + std::to_wstring(rst.removedSeconds) + L"s");
         }
+    }
+
+    // Clip names are free text but get offered as the default export file name.
+    {
+        auto sfn = [](const wchar_t* s) { return mfio::safeFileName(s); };
+        check(sfn(L"take 2") == L"take 2", L"safeFileName leaves a clean name alone",
+              sfn(L"take 2"));
+        check(sfn(L"re: take 2/3 <best?>") == L"re_ take 2_3 _best__",
+              L"safeFileName replaces path-illegal characters", sfn(L"re: take 2/3 <best?>"));
+        // Windows drops these silently, so the file would not match the dialog.
+        check(sfn(L"take 2. ") == L"take 2", L"safeFileName drops trailing dots and spaces",
+              L"[" + sfn(L"take 2. ") + L"]");
+        check(sfn(L"  take 2") == L"take 2", L"safeFileName drops leading spaces",
+              L"[" + sfn(L"  take 2") + L"]");
+        // Illegal characters still leave a usable name; only a name that sanitises
+        // away to nothing falls back.
+        check(sfn(L"???") == L"___", L"safeFileName keeps a fully-substituted name",
+              sfn(L"???"));
+        check(sfn(L"") == L"clip" && sfn(L"...") == L"clip" && sfn(L"   ") == L"clip",
+              L"safeFileName never returns an empty name", sfn(L"..."));
+    }
+
+    // A bump next to speech must be removed just like one in the middle of a
+    // silence. The gate's pre-roll / hold / gap-merge used to protect it, so a
+    // take whose bumps cluster around the speech -- the normal case, and exactly
+    // what a user selects when they want one gone -- came back barely changed
+    // (measured -0.9 dB) while an identical isolated bump went to -60 dB.
+    {
+        const int rate = 48000;
+        const double dur = 7.0;
+        const int64_t nf = (int64_t)(dur * rate);
+        auto sig = std::make_shared<AudioBuffer>();
+        sig->sampleRate = rate; sig->channels = 2; sig->samples.assign(nf * 2, 0.0f);
+        uint32_t rng = 99u;
+        auto urand = [&]() { rng = rng * 1664525u + 1013904223u;
+                             return (double)(int32_t)rng / 2147483648.0; };
+        auto voice = [&](double t, double a, double b) {
+            if (t < a || t >= b) return 0.0;
+            double s = 0;
+            for (int k = 1; k <= 12; ++k) s += std::sin(2.0 * 3.14159265358979 * 140.0 * k * (t - a)) / k;
+            return 0.18 * s;
+        };
+        auto thump = [&](double t, double a, double b) {
+            if (t < a || t >= b) return 0.0;
+            return 0.6 * std::exp(-(t - a) * 12.0) * std::sin(2.0 * 3.14159265358979 * 60.0 * (t - a));
+        };
+        for (int64_t i = 0; i < nf; ++i) {
+            const double t = (double)i / rate;
+            double v = 0.004 * urand();
+            v += voice(t, 0.50, 2.00);      // speech
+            v += thump(t, 2.15, 2.45);      // bump 150 ms after speech ends
+            v += voice(t, 3.00, 4.50);      // speech
+            v += thump(t, 6.00, 6.30);      // bump far from any speech
+            sig->samples[i * 2] = (float)v; sig->samples[i * 2 + 1] = (float)v;
+        }
+        auto regionRms = [](const AudioBuffer& b, double t0, double t1) {
+            int64_t a = (int64_t)(t0 * b.sampleRate) * b.channels;
+            int64_t z = std::min<int64_t>((int64_t)(t1 * b.sampleRate) * b.channels, (int64_t)b.samples.size());
+            double s = 0; int64_t n = 0;
+            for (int64_t i = a; i < z; ++i) { s += (double)b.samples[i] * b.samples[i]; ++n; }
+            return n ? std::sqrt(s / n) : 0.0;
+        };
+        dsp::VoiceIsolateOptions vio;
+        auto clean = dsp::isolateVoice(*sig, vio, nullptr);
+        auto db = [&](double t0, double t1) {
+            return 20.0 * std::log10(std::max(regionRms(*clean, t0, t1), 1e-12) /
+                                     std::max(regionRms(*sig, t0, t1), 1e-12));
+        };
+        check(clean != nullptr, L"near-speech bump: isolation ran");
+        if (clean) {
+            // 150 ms after the speech ends, i.e. inside the 200 ms hold window.
+            const double adjacent = db(2.17, 2.45);
+            check(adjacent < -15.0, L"bump 150 ms after speech is removed",
+                  std::to_wstring(adjacent) + L" dB");
+            // The same bump far from any speech, as the upper bound to compare to.
+            // The near one can't quite reach this: its energy is concentrated in
+            // the first few ms and the gate needs fadeMs to close.
+            const double isolated = db(6.02, 6.30);
+            check(isolated < -20.0, L"bump far from speech is removed",
+                  std::to_wstring(isolated) + L" dB");
+            // The override must not eat the speech it sits next to.
+            const double sp = db(0.60, 1.90);
+            check(sp > -0.5, L"speech next to a bump is kept",
+                  std::to_wstring(sp) + L" dB");
+        }
+    }
+
+    // ---- playback position (device frames played -> source frames heard)
+    {
+        // A 48 kHz device fed in 480-frame (10 ms) chunks, no resampling.
+        RenderTimeline t;
+        t.reset(0);
+        check(t.sourceAt(0) == 0, L"playback position: empty history reads the reset point");
+        for (int i = 0; i < 5; ++i) t.push(480, 480, 480 * (i + 1));
+        // The whole point: a query landing *inside* a chunk interpolates rather
+        // than snapping to the chunk boundary. Without this the playhead steps
+        // by 10 ms at a time however fast the UI repaints.
+        check(t.sourceAt(1200) == 1200, L"playback position interpolates inside a chunk",
+              std::to_wstring(t.sourceAt(1200)));
+        check(t.sourceAt(480) == 480, L"playback position is exact on a chunk boundary",
+              std::to_wstring(t.sourceAt(480)));
+        // It must never read ahead of the audio: 5 chunks written, 2 played
+        // means the listener is at 960, not at the render position of 2400.
+        check(t.sourceAt(960) == 960, L"playback position lags the render position",
+              std::to_wstring(t.sourceAt(960)));
+        check(t.sourceAt(99999) == 2400, L"playback position saturates once everything has played",
+              std::to_wstring(t.sourceAt(99999)));
+
+        // Resampling: a 44.1 kHz source into a 48 kHz device consumes fewer
+        // source frames than it writes device frames, and the mapping has to
+        // follow the *source*, which is what the playhead is drawn against.
+        RenderTimeline r;
+        r.reset(0);
+        for (int i = 0; i < 4; ++i) r.push(480, 441, 441 * (i + 1));
+        check(r.sourceAt(480) == 441, L"playback position follows a resampled source",
+              std::to_wstring(r.sourceAt(480)));
+        // 720 device frames is 720 * 441/480 = 661.5 source frames.
+        check(r.sourceAt(720) == 661, L"playback position interpolates a resampled chunk",
+              std::to_wstring(r.sourceAt(720)));
+
+        // A seek drops the history, so the position reads as the new one
+        // immediately rather than tracking the stale audio still draining out of
+        // the device buffer -- that is what makes seeking feel instant.
+        RenderTimeline s;
+        s.reset(0);
+        for (int i = 0; i < 3; ++i) s.push(480, 480, 480 * (i + 1));
+        s.reset(96000);
+        check(s.sourceAt(480) == 96000, L"playback position jumps immediately on a seek",
+              std::to_wstring(s.sourceAt(480)));
+        check(s.devWritten == 1440, L"playback position keeps counting device frames across a seek",
+              std::to_wstring(s.devWritten));
+
+        // History older than the ring falls back to the reset point rather than
+        // reading a recycled entry.
+        RenderTimeline w;
+        w.reset(7);
+        for (int i = 0; i < RenderTimeline::kRecs + 20; ++i) w.push(480, 480, 480 * (i + 1));
+        check(w.sourceAt(0) == 7, L"playback position falls back when history has been recycled",
+              std::to_wstring(w.sourceAt(0)));
+        const int64_t newestSrc = 480 * (RenderTimeline::kRecs + 20);
+        check(w.sourceAt(w.devWritten) == newestSrc, L"playback position still tracks after wrapping",
+              std::to_wstring(w.sourceAt(w.devWritten)));
+
+        // A paused or silent fill consumes no source, so the position must hold
+        // still rather than sliding forward with the device clock.
+        RenderTimeline p;
+        p.reset(0);
+        p.push(480, 480, 480);
+        p.push(480, 0, 480);
+        check(p.sourceAt(720) == 480, L"playback position holds still through a silent fill",
+              std::to_wstring(p.sourceAt(720)));
+    }
+
+    // ---- playback position, end to end through a real device
+    // RenderTimeline above covers the arithmetic; this covers the wiring that
+    // feeds it -- the audio clock's frequency units and the QPC extrapolation,
+    // which are exactly the parts that would silently report nonsense. Plays one
+    // second of digital silence, so it is inaudible.
+    {
+        PlaybackEngine eng;
+        std::wstring engErr;
+        if (!eng.init(&engErr)) {
+            out(L"[SKIP] playback engine: no audio device (" + engErr + L")");
+        } else {
+            auto silence = std::make_shared<AudioBuffer>();
+            silence->sampleRate = eng.sampleRate(); silence->channels = 2;
+            silence->samples.assign((size_t)eng.sampleRate() * 2 * 2, 0.0f);   // 2 s
+            eng.setSourceRate(silence->sampleRate);
+            eng.play(std::make_shared<BufferSource>(silence, 0, silence->frames()), 0);
+
+            // Sample the position repeatedly, timing each sample with QPC --
+            // Sleep(20) really sleeps ~30 ms at the default timer resolution, so
+            // the ticks have to be measured rather than assumed.
+            LARGE_INTEGER qf; QueryPerformanceFrequency(&qf);
+            auto nowSec = [&] {
+                LARGE_INTEGER q; QueryPerformanceCounter(&q);
+                return (double)q.QuadPart / (double)qf.QuadPart;
+            };
+            std::vector<int64_t> pos; std::vector<double> at;
+            const double t0 = nowSec();
+            for (int i = 0; i < 35; ++i) { Sleep(20); pos.push_back(eng.position()); at.push_back(nowSec()); }
+            eng.stop();
+
+            bool monotonic = true;
+            double worstRate = 0.0, bestRate = 1e9;
+            for (size_t i = 1; i < pos.size(); ++i) {
+                if (pos[i] < pos[i - 1]) monotonic = false;
+                // Skip the first few: the stream is still filling its buffer.
+                if (i < 4) continue;
+                const double dt = at[i] - at[i - 1];
+                if (dt <= 0) continue;
+                // Frames advanced per second of wall clock, as a multiple of the
+                // sample rate. 1.0 means the playhead is keeping perfect time.
+                const double rate = (double)(pos[i] - pos[i - 1]) / dt / eng.sampleRate();
+                worstRate = std::max(worstRate, rate);
+                bestRate = std::min(bestRate, rate);
+            }
+            check(monotonic, L"playback position never goes backwards");
+            const double overall = (double)pos.back() / eng.sampleRate() / (at.back() - t0);
+            check(overall > 0.9 && overall < 1.1, L"playback position keeps real time",
+                  std::to_wstring(overall) + L"x");
+            // The actual regression, and the reason the average above is not
+            // enough on its own: every tick must advance by about its own
+            // duration. Reporting the render position instead gets the average
+            // right (0.99x) while swinging between 0.63x and 1.31x tick to tick,
+            // which is what a stuttering playhead looks like. Measured here:
+            // 0.9991x to 1.0008x. The thresholds sit between the two.
+            check(bestRate > 0.8, L"playback position never stalls between ticks",
+                  std::to_wstring(bestRate) + L"x");
+            check(worstRate < 1.25, L"playback position never lurches between ticks",
+                  std::to_wstring(worstRate) + L"x");
+            eng.shutdown();
+        }
+    }
+
+    // ---- editor toolbar wrapping
+    {
+        // The real editor toolbar: the widths computeEditorLayout passes, scaled
+        // the way S() would. The negative entry is the transport/edit group gap.
+        auto toolbar = [](float sc, int winW) {
+            auto S = [&](int v) { return (int)(v * sc + 0.5f); };
+            const std::vector<int> w = { S(96), S(140), S(150), -S(16), S(120),
+                                         S(130), S(130), S(150), S(150), S(120) };
+            const int pad = S(16), doneW = S(96);
+            const int avail = std::max(S(200), winW - pad - doneW - S(16));
+            return layout::flowButtons(w, pad, S(10), S(34), S(8), avail, S(10));
+        };
+        // 100% DPI, wide window: everything still fits on one row. The height
+        // comes out just under the toolbar's historical 56 px, which is why
+        // computeEditorLayout floors it there -- so nothing below it moves.
+        auto wide = toolbar(1.0f, 1900);
+        check(wide.rows == 1, L"editor toolbar: one row when it fits",
+              std::to_wstring(wide.rows));
+        check(wide.height <= 56, L"editor toolbar: single row still fits the old height",
+              std::to_wstring(wide.height));
+        // 150% DPI at the default 1500 px window -- the case that motivated this.
+        auto dpi150 = toolbar(1.5f, 1500);
+        check(dpi150.rows == 2, L"editor toolbar wraps at 150% DPI",
+              std::to_wstring(dpi150.rows));
+        // Every button must land somewhere reachable, i.e. inside the window.
+        bool allVisible = true;
+        for (const RECT& r : dpi150.rects)
+            if (r.right > 1500) allVisible = false;
+        check(allVisible, L"editor toolbar: no button runs off the window edge");
+        // A wrapped row restarts at the left margin rather than continuing.
+        int secondRowLeft = -1;
+        for (const RECT& r : dpi150.rects)
+            if (r.right > r.left && r.top != dpi150.rects[0].top) { secondRowLeft = r.left; break; }
+        check(secondRowLeft == (int)(16 * 1.5f + 0.5f),
+              L"editor toolbar: wrapped row starts at the left margin",
+              std::to_wstring(secondRowLeft));
+        // Absurdly narrow: still lays out, one button per row, nothing lost.
+        auto tiny = toolbar(1.0f, 300);
+        bool everyPlaced = true;
+        for (size_t i = 0; i < tiny.rects.size(); ++i)
+            if (i != 3 && tiny.rects[i].right == tiny.rects[i].left) everyPlaced = false;
+        check(everyPlaced, L"editor toolbar: every button is placed even when very narrow");
+        check(tiny.rows > 2, L"editor toolbar: keeps wrapping when very narrow",
+              std::to_wstring(tiny.rows));
+
+        // The labels and the widths above are declared in different places, so
+        // they can drift -- and the buttons draw with DT_CENTER and no ellipsis,
+        // so a label that outgrows its width is silently clipped at both ends.
+        // Measure every label, including the alternates a button swaps to while
+        // playing or toggled, with the real UI font at both 100% and 150%.
+        //
+        // The transport buttons are sized for their *widest* alternate on purpose:
+        // resizing a button the moment playback starts would re-flow the whole
+        // toolbar under the user's cursor.
+        struct Lbl { size_t idx; const wchar_t* text; };
+        static const Lbl labels[] = {
+            { 0, L"\u25B6 Play" }, { 0, L"\u275A\u275A Pause" },
+            { 1, L"\u25B6 Play selection" }, { 1, L"\u275A\u275A Pause selection" },
+            { 2, L"Fine-tune edges" }, { 2, L"\u2713 Fine-tune edges" },
+            { 4, L"Crop to selection\u2026" },
+            { 5, L"Silence selection" }, { 6, L"Delete selection" },
+            { 7, L"Save selection as clip" },
+            { 8, L"Capture noise (sel)" }, { 8, L"Capture noise (clip)" },
+            { 9, L"Clear selection" },
+        };
+        for (float sc : { 1.0f, 1.5f }) {
+            auto S = [&](int v) { return (int)(v * sc + 0.5f); };
+            const std::vector<int> w = { S(96), S(140), S(150), -S(16), S(120),
+                                         S(130), S(130), S(150), S(150), S(120) };
+            HDC sdc = GetDC(nullptr);
+            HFONT f = CreateFontW(-S(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                                  OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                  VARIABLE_PITCH, L"Segoe UI");
+            HGDIOBJ of = SelectObject(sdc, f);
+            std::wstring worst; int worstOver = -100000;
+            for (const Lbl& l : labels) {
+                SIZE sz{};
+                GetTextExtentPoint32W(sdc, l.text, (int)wcslen(l.text), &sz);
+                int over = sz.cx - w[l.idx];
+                if (over > worstOver) { worstOver = over; worst = l.text; }
+            }
+            SelectObject(sdc, of); DeleteObject(f); ReleaseDC(nullptr, sdc);
+            // A few px of breathing room, since the button also draws a rounded edge.
+            check(worstOver <= -6,
+                  std::wstring(L"editor toolbar: every label fits its button at ") +
+                      (sc == 1.0f ? L"100%" : L"150%") + L" DPI",
+                  L"tightest \"" + worst + L"\" with " + std::to_wstring(-worstOver) + L" px spare");
+        }
+    }
+
+    // ---- preview transport (which control does what to the engine)
+    //
+    // transport::decide is what stands behind the play/pause buttons. The reported
+    // bug was that pressing the editor's "Play selection" turned the neighbouring
+    // "Play" into Pause -- both buttons shared one rule, so a selection audition
+    // was indistinguishable from a whole-clip play. The two-button case is now
+    // ownRangeOnly, and these checks pin both callers' behaviour down.
+    {
+        using namespace transport;
+        const int C = 7;                 // the clip under the buttons
+        const int64_t SB = 1000, SE = 5000;   // its selection
+
+        auto armed = [&](bool isSel, bool playing) {
+            State s; s.clipId = C; s.isSel = isSel;
+            s.begin = isSel ? SB : 0; s.end = isSel ? SE : 20000;
+            s.playing = playing; s.paused = !playing;
+            return s;
+        };
+        auto press = [&](bool wantSel, bool ownRangeOnly) {
+            Press p; p.clipId = C; p.wantSel = wantSel;
+            p.ownRangeOnly = ownRangeOnly; p.selBegin = SB; p.selEnd = SE;
+            return p;
+        };
+
+        // The editor pair: each button pauses only what it started...
+        check(decide(armed(true, true), press(true, true)).act == Act::Pause,
+              L"transport: Play selection pauses its own audition");
+        check(decide(armed(false, true), press(false, true)).act == Act::Pause,
+              L"transport: Play pauses its own whole-clip playback");
+        // ...and switches playback to itself rather than pausing the other one.
+        // This is the reported bug: pressing one used to stop the other.
+        {
+            Plan p = decide(armed(false, true), press(true, true));
+            check(p.act == Act::Restart && p.from == From::SelStart,
+                  L"transport: Play selection during whole-clip play switches to the selection");
+        }
+        {
+            Plan p = decide(armed(true, true), press(false, true));
+            check(p.act == Act::Restart && p.from == From::Cursor,
+                  L"transport: Play during a selection audition switches to the whole clip");
+        }
+
+        // The single combined control (library card / Space) still pauses whatever
+        // is running, whichever range that is -- otherwise its pause button would
+        // restart a selection audition instead of pausing it.
+        check(decide(armed(true, true), press(false, false)).act == Act::Pause,
+              L"transport: the combined control pauses a selection audition");
+        check(decide(armed(false, true), press(true, false)).act == Act::Pause,
+              L"transport: the combined control pauses whole-clip playback");
+
+        // Paused and asked for the same range again => resume in place, not restart,
+        // so pause/play doesn't jump back to the start of the range.
+        check(decide(armed(true, false), press(true, true)).act == Act::Resume,
+              L"transport: pressing Play selection again resumes in place");
+        check(decide(armed(false, false), press(false, true)).act == Act::Resume,
+              L"transport: pressing Play again resumes in place");
+
+        // A seek while paused must re-arm rather than resume, or playback would
+        // carry on from where it stopped and ignore the click.
+        { State s = armed(true, false); s.seekPending = true;
+          check(decide(s, press(true, true)).act == Act::Restart,
+                L"transport: a pending seek forces a restart instead of a resume"); }
+
+        // A selection edited since the audition was armed is a different range,
+        // so it must re-arm at the new head.
+        { State s = armed(true, false); s.begin = SB + 500;
+          Plan p = decide(s, press(true, true));
+          check(p.act == Act::Restart && p.from == From::SelStart,
+                L"transport: a moved selection edge re-arms at the new selection start"); }
+
+        // A different clip, and the timeline owning the engine, both start fresh.
+        { Press p = press(false, true); p.clipId = C + 1;
+          Plan pl = decide(armed(false, true), p);
+          check(pl.act == Act::Restart && pl.from == From::ClipStart,
+                L"transport: playing a different clip starts at its head"); }
+        { State s = armed(false, true); s.timeline = true;
+          check(decide(s, press(false, true)).act == Act::Restart,
+                L"transport: a preview press during timeline playback takes the engine over"); }
+    }
+
+    // ---- waveform rendering, off-screen
+    //
+    // wf::draw is GDI, but it draws into whatever DC it is given, so a DIB
+    // section makes it fully testable: render, then read the pixels back. Worth
+    // testing because the envelope path was rewritten from a single ~3000-vertex
+    // Polygon to one PolyPolyline of per-column vertical segments -- a 10x speed
+    // -up (11 ms -> 1 ms on a 20 s clip at 1478 px, which is what let the
+    // playhead reach the screen refresh rate) whose correctness is entirely
+    // about the column geometry.
+    {
+        const int W = 400, H = 100;
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H;   // top-down
+        bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HDC dc = CreateCompatibleDC(nullptr);
+        HBITMAP dib = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HGDIOBJ oldb = SelectObject(dc, dib);
+        RECT rc = { 0, 0, W, H };
+
+        // Left half loud, right half silent: the envelope must be tall on one
+        // side and reduced to the centre line on the other.
+        auto wbuf = std::make_shared<AudioBuffer>();
+        wbuf->sampleRate = 48000; wbuf->channels = 1;
+        const int64_t wn = 200000;
+        wbuf->samples.assign((size_t)wn, 0.0f);
+        for (int64_t i = 0; i < wn / 2; ++i)
+            wbuf->samples[(size_t)i] = (float)std::sin(2 * 3.14159265358979 * 300.0 * i / 48000.0);
+        PeakCache wpc; wpc.build(*wbuf);
+
+        const COLORREF wcol = RGB(255, 0, 0);
+        auto colHeight = [&](int x) {
+            int n = 0;
+            for (int y = 0; y < H; ++y) {
+                DWORD px = ((DWORD*)bits)[(size_t)y * W + x];
+                if ((px & 0x00FFFFFF) == 0x00FF0000) ++n;   // BGRA: red
+            }
+            return n;
+        };
+
+        // Zoomed out: 200000 frames across 400 px is 500 frames/px, well past the
+        // 256-frame bucket size, so this exercises the peak-cache envelope path.
+        memset(bits, 0, (size_t)W * H * 4);
+        wf::draw(dc, rc, *wbuf, wpc, 0, wn, wcol);
+        GdiFlush();
+        check(colHeight(50) > H / 2, L"waveform: loud column fills most of the height",
+              std::to_wstring(colHeight(50)));
+        // The silent half must still leave a mark: a zero-height column would
+        // make a quiet passage disappear entirely rather than read as a flat line.
+        check(colHeight(350) >= 1 && colHeight(350) <= 3,
+              L"waveform: silent column collapses to the centre line",
+              std::to_wstring(colHeight(350)));
+        int painted = 0;
+        for (int x = 0; x < W; ++x) if (colHeight(x) > 0) ++painted;
+        check(painted == W, L"waveform: every pixel column is drawn",
+              std::to_wstring(painted));
+
+        // Zoomed in past the bucket size takes the raw-sample branch; and fewer
+        // frames than pixels takes the sub-sample scope branch. Both must still
+        // put ink in the rectangle and nothing outside it.
+        memset(bits, 0, (size_t)W * H * 4);
+        wf::draw(dc, rc, *wbuf, wpc, 0, 4000, wcol);        // 10 frames/px, raw
+        GdiFlush();
+        check(colHeight(200) > 1, L"waveform: raw-sample zoom draws an envelope",
+              std::to_wstring(colHeight(200)));
+
+        memset(bits, 0, (size_t)W * H * 4);
+        wf::draw(dc, rc, *wbuf, wpc, 0, 100, wcol);         // 4 px/frame, scope
+        GdiFlush();
+        int inked = 0;
+        for (int x = 0; x < W; ++x) inked += colHeight(x);
+        check(inked > W, L"waveform: sub-sample zoom draws a scope trace",
+              std::to_wstring(inked));
+
+        // An empty or inverted range must draw nothing rather than assert.
+        memset(bits, 0, (size_t)W * H * 4);
+        wf::draw(dc, rc, *wbuf, wpc, 5000, 5000, wcol);
+        GdiFlush();
+        int blank = 0;
+        for (int x = 0; x < W; ++x) blank += colHeight(x);
+        check(blank == 0, L"waveform: empty range draws nothing", std::to_wstring(blank));
+
+        SelectObject(dc, oldb); DeleteObject(dib); DeleteDC(dc);
+    }
+
+    // ---- manual region edits (the fallback for non-voice the detector can't see)
+    {
+        // 1 s of a steady tone at 48 kHz stereo, so any level change is obvious
+        // and the crossfade has something continuous to be judged against.
+        auto src = std::make_shared<AudioBuffer>();
+        src->sampleRate = 48000; src->channels = 2;
+        const int64_t n = 48000;
+        src->samples.resize((size_t)n * 2);
+        for (int64_t i = 0; i < n; ++i) {
+            const float v = (float)(0.5 * std::sin(2.0 * 3.14159265358979 * 220.0 * i / 48000.0));
+            src->samples[(size_t)i * 2] = v; src->samples[(size_t)i * 2 + 1] = v;
+        }
+        auto rms = [](const AudioBuffer& b, double t0, double t1) {
+            int64_t a = (int64_t)(t0 * b.sampleRate) * b.channels;
+            int64_t z = std::min<int64_t>((int64_t)(t1 * b.sampleRate) * b.channels, (int64_t)b.samples.size());
+            double s = 0; int64_t c = 0;
+            for (int64_t i = std::max<int64_t>(0, a); i < z; ++i) { s += (double)b.samples[i] * b.samples[i]; ++c; }
+            return c ? std::sqrt(s / c) : 0.0;
+        };
+
+        // --- silenceRange: [0.4, 0.6) goes quiet, everything else is untouched,
+        //     and the clip keeps its length.
+        auto sil = dsp::silenceRange(*src, (int64_t)(0.4 * 48000), (int64_t)(0.6 * 48000));
+        check(sil != nullptr, L"silenceRange: returned a buffer");
+        if (sil) {
+            check(sil->frames() == n, L"silenceRange keeps the clip length",
+                  std::to_wstring(sil->frames()));
+            // Skip the 5 ms ramps at each edge when measuring the silent part.
+            check(rms(*sil, 0.41, 0.59) < 1e-6, L"silenceRange silences the range",
+                  std::to_wstring(rms(*sil, 0.41, 0.59)));
+            bool outsideIntact = true;
+            for (int64_t i = 0; i < (int64_t)(0.4 * 48000) * 2 && outsideIntact; ++i)
+                outsideIntact = (sil->samples[(size_t)i] == src->samples[(size_t)i]);
+            for (int64_t i = (int64_t)(0.6 * 48000) * 2;
+                 i < (int64_t)src->samples.size() && outsideIntact; ++i)
+                outsideIntact = (sil->samples[(size_t)i] == src->samples[(size_t)i]);
+            check(outsideIntact, L"silenceRange leaves audio outside the range bit-identical");
+            // The ramp has to actually be a ramp, not a hard edge: audio just
+            // inside the boundary still carries most of the original signal.
+            check(rms(*sil, 0.400, 0.401) > 0.2, L"silenceRange ramps in rather than cutting",
+                  std::to_wstring(rms(*sil, 0.400, 0.401)));
+        }
+
+        // --- deleteRange: [0.4, 0.6) is cut and the gap closed. The result is
+        //     the 0.2 s range shorter, less the 5 ms crossfade overlap.
+        auto del = dsp::deleteRange(*src, (int64_t)(0.4 * 48000), (int64_t)(0.6 * 48000));
+        check(del != nullptr, L"deleteRange: returned a buffer");
+        if (del) {
+            const int64_t want = n - (int64_t)(0.2 * 48000) - (int64_t)(0.005 * 48000);
+            check(del->frames() == want, L"deleteRange shortens by the range plus the crossfade",
+                  std::to_wstring(del->frames()) + L" vs " + std::to_wstring(want));
+            // The level across the splice must not collapse, which is how a bad
+            // overlap or an off-by-one would show up. The window is deliberately
+            // wide: the two sides here are the *same* 220 Hz tone a whole number
+            // of cycles apart, so they add coherently and equal-power weights
+            // give up to +3 dB (0.354 -> 0.5). Real splices join unrelated room
+            // tone, which is the case equal-power is chosen for.
+            const double atJoin = rms(*del, 0.396, 0.400);
+            check(atJoin > 0.2 && atJoin < 0.55, L"deleteRange splice holds its level",
+                  std::to_wstring(atJoin));
+            check(del->channels == 2 && del->sampleRate == 48000,
+                  L"deleteRange preserves format");
+        }
+
+        // --- degenerate ranges are refused rather than producing an empty clip
+        check(dsp::silenceRange(*src, 100, 100) == nullptr, L"silenceRange rejects an empty range");
+        check(dsp::deleteRange(*src, 100, 100) == nullptr, L"deleteRange rejects an empty range");
+        check(dsp::deleteRange(*src, 0, n) == nullptr, L"deleteRange refuses to delete everything");
+        // Deleting from the very start leaves no audio before the cut to fade
+        // against, so it must splice cleanly instead of reading out of bounds.
+        auto head = dsp::deleteRange(*src, 0, (int64_t)(0.1 * 48000));
+        check(head && head->frames() == n - (int64_t)(0.1 * 48000),
+              L"deleteRange at the clip start needs no crossfade",
+              head ? std::to_wstring(head->frames()) : L"(null)");
+        auto tailCut = dsp::deleteRange(*src, n - (int64_t)(0.1 * 48000), n);
+        check(tailCut && tailCut->frames() == n - (int64_t)(0.1 * 48000),
+              L"deleteRange at the clip end needs no crossfade",
+              tailCut ? std::to_wstring(tailCut->frames()) : L"(null)");
     }
 
     out(L"");

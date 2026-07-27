@@ -47,4 +47,39 @@ inline CaretAnchor caretAnchor(const std::vector<RECT>& cards, POINT p, int idx)
     return { idx, false };
 }
 
+// Flow a row of fixed-width toolbar buttons left to right, wrapping to a new row
+// when the next one would not fit. Used by the full-window clip editor's toolbar,
+// which stopped fitting on one row: at the default 1500 px window above 125% DPI
+// the rightmost buttons ran off the edge and were simply unreachable.
+//
+// A non-positive entry in `widths` places nothing and advances by `-w` instead,
+// which is how a gap between button groups is expressed. `avail` is the x past
+// which a button may not extend -- the caller reserves whatever strip its
+// right-pinned button (Done) needs.
+struct FlowedRow {
+    std::vector<RECT> rects;   // one per entry in `widths`; empty for gap entries
+    int endX = 0;              // x just past the last button placed
+    int endY = 0;              // top of the final row
+    int height = 0;            // top of row 0 to the bottom of the toolbar
+    int rows = 1;
+};
+
+inline FlowedRow flowButtons(const std::vector<int>& widths, int left, int top,
+                             int btnH, int gap, int avail, int padBottom) {
+    FlowedRow f;
+    f.rects.resize(widths.size());
+    int bx = left, by = top;
+    for (size_t i = 0; i < widths.size(); ++i) {
+        const int w = widths[i];
+        if (w <= 0) { bx += -w; continue; }
+        // Never wrap a row that has placed nothing yet: a button wider than the
+        // whole strip has to go somewhere, and an empty new row wouldn't help.
+        if (bx > left && bx + w > avail) { bx = left; by += btnH + gap; ++f.rows; }
+        f.rects[i] = { bx, by, bx + w, by + btnH };
+        bx += w + gap;
+    }
+    f.endX = bx; f.endY = by; f.height = by + btnH + padBottom;
+    return f;
+}
+
 }  // namespace layout

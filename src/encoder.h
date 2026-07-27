@@ -17,6 +17,13 @@ struct ExportOptions {
 const wchar_t* extensionFor(ExportFormat f);   // ".wav" etc.
 const wchar_t* labelFor(ExportFormat f);       // "WAV (PCM)" etc.
 
+// Turn free text (a clip or project name) into something a save dialog can be
+// pre-filled with: characters a path can't hold become '_', and trailing dots /
+// spaces are dropped because Windows discards them silently, which would create
+// a file under a different name than the dialog displayed. Never returns empty
+// — a name made entirely of illegal characters falls back to `fallback`.
+std::wstring safeFileName(const std::wstring& s, const std::wstring& fallback = L"clip");
+
 // Encode a canonical stereo-float buffer to disk with the given options
 // (downmixing to mono / re-encoding as needed). Returns false + message on error.
 bool encodeFile(const std::wstring& path, const AudioBuffer& buf,

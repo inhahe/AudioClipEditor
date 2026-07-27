@@ -7,6 +7,7 @@
 #include "dialogs.h"
 #include "dsp.h"
 #include "layout.h"
+#include "transport.h"
 #include <commctrl.h>
 #include <shlwapi.h>
 #include <windowsx.h>
@@ -52,6 +53,8 @@ enum {
     IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE, IDM_DENOISE_SEL, IDM_DENOISE_ALL,
     IDM_GETPROFILE, IDM_GETPROFILE_CLIP,
     IDM_VOICEISO, IDM_VOICEISO_SEL, IDM_VOICEISO_ALL,
+    IDM_EXPORTCLIP, IDM_EXPORTSEL,
+    IDM_SILENCESEL, IDM_DELETESEL,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE, IDM_TRK_VOICEISO,
@@ -160,8 +163,11 @@ struct App {
     int edHot = 0;                 // hovered editor button (see EB_* below)
     // editor layout rects (rebuilt in computeEditorLayout)
     RECT edMain{}, edRuler{}, edLeft{}, edRight{};
-    enum { EB_NONE, EB_PLAY, EB_PLAYSEL, EB_FINE, EB_CROP, EB_SAVE, EB_CAPTURE, EB_CLEAR, EB_DONE, EB_COUNT };
+    enum { EB_NONE, EB_PLAY, EB_PLAYSEL, EB_FINE, EB_CROP, EB_SILENCE, EB_DELSEL, EB_SAVE,
+           EB_CAPTURE, EB_CLEAR, EB_DONE, EB_COUNT };
     RECT edBtn[EB_COUNT]{};
+    int edToolbarH = 0;            // computed in computeEditorLayout; the row wraps when narrow
+    bool timerFast = false;        // timer is at playhead-animation rate (see setTimerRate)
 
     // ------------------------------------------------------------- helpers
     int S(int v) const { return (int)(v * sc + 0.5f); }
@@ -321,10 +327,14 @@ struct App {
     // ----- editor interaction ------------------------------------------------
     void edButton(int id) {
         switch (id) {
-        case EB_PLAY: togglePreview(editClipId, false); break;   // whole clip
-        case EB_PLAYSEL: if (hasSel() && selClipId == editClipId) togglePreview(editClipId, true); break;
+        // Each transport button owns its own range: it pauses only what it
+        // started, and switches playback to itself when the other one is running.
+        case EB_PLAY: togglePreview(editClipId, false, true); break;   // whole clip
+        case EB_PLAYSEL: if (hasSel() && selClipId == editClipId) togglePreview(editClipId, true, true); break;
         case EB_FINE: editFineToggle = !editFineToggle; break;
         case EB_CROP: if (hasSel() && selClipId == editClipId) cropSelection(); break;
+        case EB_SILENCE: removeSelectedRange(editClipId, true); break;
+        case EB_DELSEL: removeSelectedRange(editClipId, false); break;
         case EB_SAVE: if (hasSel() && selClipId == editClipId) saveSelectionAsClip(); break;
         case EB_CAPTURE: captureNoiseProfileFromEditor(); break;
         case EB_CLEAR: selClipId = editClipId; selStart = selEnd = 0; break;
@@ -446,24 +456,34 @@ struct App {
 
     void computeEditorLayout(const RECT& rc) {
         int pad = S(16);
-        int topH = S(56);                       // toolbar row
-        // toolbar buttons, left to right
-        int by = S(10), bh = S(34), bx = pad;
-        auto put = [&](int id, int w) { edBtn[id] = { bx, by, bx + w, by + bh }; bx += w + S(8); };
-        put(EB_PLAY, S(96));
-        put(EB_PLAYSEL, S(120));
-        put(EB_FINE, S(150));
-        bx += S(16);
-        put(EB_CROP, S(120));
-        put(EB_SAVE, S(150));
-        put(EB_CAPTURE, S(150));
-        put(EB_CLEAR, S(120));
-        // Done on the far right, but never overlapping the left button group: if the
-        // window is too narrow, park it right after the last left button instead.
-        int doneW = S(96);
-        int doneLeft = std::max(bx, (int)rc.right - pad - doneW);
-        edBtn[EB_DONE] = { doneLeft, by, doneLeft + doneW, by + bh };
+        // Toolbar buttons, left to right, wrapping to a second row when they don't
+        // fit. They no longer fit on one row at the default window size above
+        // 125% DPI, and a button that runs off the edge is simply unreachable, so
+        // the toolbar grows downwards instead and the waveform below starts lower.
+        const int by = S(10), bh = S(34), gap = S(8), doneW = S(96);
+        // Reserve room for Done, which is pinned to the right of the final row.
+        const int avail = std::max(S(200), (int)rc.right - pad - doneW - S(16));
+        // Order matches the enum below; the negative entry is the group gap that
+        // separates transport from the edit actions.
+        static const int order[] = { EB_PLAY, EB_PLAYSEL, EB_FINE, EB_NONE, EB_CROP,
+                                     EB_SILENCE, EB_DELSEL, EB_SAVE, EB_CAPTURE, EB_CLEAR };
+        // EB_PLAYSEL is sized for its *widest* label, "Pause selection", so the
+        // button doesn't have to resize (and re-flow the whole toolbar under the
+        // cursor) the moment playback starts.
+        const std::vector<int> widths = { S(96), S(140), S(150), -S(16), S(120),
+                                          S(130), S(130), S(150), S(150), S(120) };
+        auto f = layout::flowButtons(widths, pad, by, bh, gap, avail, S(10));
+        for (size_t i = 0; i < widths.size(); ++i)
+            if (order[i] != EB_NONE) edBtn[order[i]] = f.rects[i];
+        // Done on the far right of the final row, but never overlapping the group:
+        // if even that row is too narrow, park it right after the last button.
+        int doneLeft = std::max(f.endX, (int)rc.right - pad - doneW);
+        edBtn[EB_DONE] = { doneLeft, f.endY, doneLeft + doneW, f.endY + bh };
+        // Floor at the original single-row height so an unwrapped toolbar lays
+        // out exactly as it did before wrapping existed.
+        edToolbarH = std::max(f.height, S(56));
 
+        int topH = edToolbarH;
         int contentTop = topH + pad;
         int contentBot = rc.bottom - pad;
         int rulerH2 = S(18);
@@ -606,18 +626,33 @@ struct App {
         bool sel = hasSel() && selClipId == editClipId;
 
         // toolbar
-        RECT top = { 0, 0, client.right, S(56) };
+        RECT top = { 0, 0, client.right, edToolbarH };
         fill(h, top, col::transport);
-        bool playing = (previewClipId == editClipId) && engine.isPlaying();
-        button(h, edBtn[EB_PLAY],    playing ? L"\u275A\u275A Pause" : L"\u25B6 Play",
+        // Two independent transports, so each button reports its own state. The
+        // one that is running shows Pause; the accent marks a transport that can
+        // be started, which for "Play selection" means only when a selection
+        // exists. (It used to be Play alone that was accented and Play selection
+        // that was always grey, even when both were equally clickable -- and a
+        // selection audition flipped *Play* to Pause, i.e. a button the user had
+        // not pressed.)
+        bool playing = previewClipId == editClipId && !timelinePlaying && engine.isPlaying();
+        bool playingSel = playing && previewIsSel;
+        bool playingAll = playing && !previewIsSel;
+        button(h, edBtn[EB_PLAY],    playingAll ? L"\u275A\u275A Pause" : L"\u25B6 Play",
                col::accentDk, col::text, edHot == EB_PLAY, fNorm);
-        button(h, edBtn[EB_PLAYSEL], L"\u25B6 Play selection", col::btn,
+        button(h, edBtn[EB_PLAYSEL], playingSel ? L"\u275A\u275A Pause selection"
+                                                : L"\u25B6 Play selection",
+               sel ? col::accentDk : col::btn,
                sel ? col::text : col::dim, edHot == EB_PLAYSEL, fNorm);
         bool fineOn = editFineNeeded();
         button(h, edBtn[EB_FINE], fineOn ? L"\u2713 Fine-tune edges" : L"Fine-tune edges",
                fineOn ? col::accentDk : col::btn, col::text, edHot == EB_FINE, fNorm);
         button(h, edBtn[EB_CROP],  L"Crop to selection\u2026", col::btn,
                sel ? col::text : col::dim, edHot == EB_CROP, fNorm);
+        button(h, edBtn[EB_SILENCE], L"Silence selection", col::btn,
+               sel ? col::text : col::dim, edHot == EB_SILENCE, fNorm);
+        button(h, edBtn[EB_DELSEL], L"Delete selection", col::btn,
+               sel ? col::text : col::dim, edHot == EB_DELSEL, fNorm);
         button(h, edBtn[EB_SAVE],  L"Save selection as clip", col::btn,
                sel ? col::text : col::dim, edHot == EB_SAVE, fNorm);
         button(h, edBtn[EB_CAPTURE], sel ? L"Capture noise (sel)" : L"Capture noise (clip)",
@@ -696,6 +731,14 @@ struct App {
         if (c->buffer && c->peaks) wf::draw(h, wv, *c->buffer, *c->peaks, ws, we, col::wave);
         // shade the selected side (left strip: right of edge is inside selection;
         // right strip: left of edge is inside selection)
+        // The playhead, when it is inside this strip's window. These strips are
+        // the most zoomed-in view in the app -- a few hundred ms across half the
+        // window -- so they are exactly where you want to watch the cursor cross
+        // an edge you are placing, and they were the one waveform that never
+        // drew it. Drawn under the edge marker so the edge stays readable when
+        // the two coincide, which is the moment that matters.
+        if (previewClipId == editClipId && previewCursor >= ws && previewCursor < we)
+            drawVLine(h, fx(previewCursor), wv.top, wv.bottom, col::playhead);
         int ex = fx(edge);
         drawVLine(h, ex, wv.top, wv.bottom, col::waveSel);
         // draggable handle
@@ -1153,30 +1196,37 @@ struct App {
     }
 
     // Play / pause a clip preview. `useSel` asks for the selection-only audition;
-    // it is ignored when the clip has no selection.
+    // it is ignored when the clip has no selection. `ownRangeOnly` marks a control
+    // that speaks for one range only (the editor's button pair) as opposed to one
+    // that stands for whatever is playing (the card, the Space key).
     //
-    // Two rules make this predictable:
-    //   * any *playing* preview of this clip pauses, whichever button was pressed
-    //     (so the pause button really pauses a selection audition), and
-    //   * play/resume always starts at previewCursor, so a click on the waveform
-    //     while paused or stopped moves where playback picks up.
-    void togglePreview(int clipId, bool useSel) {
-        if (previewClipId == clipId && !timelinePlaying && engine.isPlaying()) {
-            engine.pause(); refresh(); return;
+    // The decision itself lives in transport::decide so it can be tested headlessly;
+    // this is just the translation to and from the engine. Play/resume always
+    // starts at previewCursor, so clicking the waveform while paused or stopped
+    // moves where playback picks up.
+    void togglePreview(int clipId, bool useSel, bool ownRangeOnly = false) {
+        transport::State st;
+        st.clipId = previewClipId; st.isSel = previewIsSel;
+        st.begin = previewBegin;   st.end = previewEnd;
+        st.playing = engine.isPlaying(); st.paused = engine.isPaused();
+        st.seekPending = previewSeekPending; st.timeline = timelinePlaying;
+
+        transport::Press pr;
+        pr.clipId = clipId;
+        pr.wantSel = useSel && hasSel() && selClipId == clipId;
+        pr.ownRangeOnly = ownRangeOnly;
+        pr.selBegin = selStart; pr.selEnd = selEnd;
+
+        transport::Plan plan = transport::decide(st, pr);
+        switch (plan.act) {
+        case transport::Act::Pause:  engine.pause();  refresh(); return;
+        case transport::Act::Resume: engine.resume(); refresh(); return;
+        case transport::Act::Restart: break;
         }
-        const bool wantSel = useSel && hasSel() && selClipId == clipId;
-        // Same clip, same audition range as the armed source => this is a resume.
-        const bool sameSource = previewClipId == clipId && !timelinePlaying &&
-                                previewIsSel == wantSel &&
-                                (!wantSel || (previewBegin == selStart && previewEnd == selEnd));
-        if (sameSource && engine.isPaused() && !previewSeekPending) {
-            engine.resume(); refresh(); return;    // continue exactly where it stopped
-        }
-        // Otherwise start where the cursor sits; a fresh selection audition begins
-        // at the selection start, and an unrelated clip begins at its head.
-        const int64_t from = wantSel ? (sameSource ? previewCursor : selStart)
-                                     : (previewClipId == clipId ? previewCursor : 0);
-        startPreview(clipId, from, wantSel);
+        const int64_t from = plan.from == transport::From::Cursor   ? previewCursor
+                           : plan.from == transport::From::SelStart ? selStart
+                                                                    : 0;
+        startPreview(clipId, from, pr.wantSel);
     }
     // The library card's play button auditions the selection when there is one.
     void togglePlayClip(int clipId) { togglePreview(clipId, true); }
@@ -1269,6 +1319,38 @@ struct App {
         // "Save selection as clip" or export.
         doc.replaceClipBuffer(id, slice, L"Crop '" + nm + L"'");
         selStart = 0; selEnd = 0; selClipId = -1;
+        refresh();
+    }
+
+    // "Crop to selection" keeps the selection and throws away the rest; these
+    // two are its opposite, and the manual counterpart to "Remove non-voice".
+    // The automatic detector can only remove what it can recognise, and some
+    // non-speech events (a creak, a swallow, a shuffle that rings) are harmonic
+    // and syllable-length -- indistinguishable from voice at any sensitivity.
+    // When the user can hear it but the detector can't, they select it and say
+    // so directly.
+    //
+    // `keepLength` silences the range in place, which is what you want between
+    // sentences: the pause stays the length it was, so nothing downstream in the
+    // timeline shifts. Otherwise the range is cut out and the gap closed.
+    void removeSelectedRange(int clipId, bool keepLength) {
+        if (!selectionCovers(clipId)) return;
+        Clip* c = doc.project().findClip(clipId);
+        if (!c || !c->buffer) return;
+        const std::wstring nm = c->name;
+        auto edited = keepLength ? dsp::silenceRange(*c->buffer, selStart, selEnd)
+                                 : dsp::deleteRange(*c->buffer, selStart, selEnd);
+        if (!edited) {
+            MessageBoxW(hwnd, L"The selection is empty.", L"Edit selection", MB_ICONINFORMATION);
+            return;
+        }
+        doc.replaceClipBuffer(clipId, edited,
+                              (keepLength ? L"Silence selection in '" : L"Delete selection from '") + nm + L"'");
+        // Silencing leaves the timeline intact, so the selection still points at
+        // the same audio and is worth keeping (the user can audition the result
+        // with "Play selection"). Deleting moves everything after the cut, so
+        // the old range no longer means anything.
+        if (!keepLength) { selStart = selEnd = 0; selClipId = -1; }
         refresh();
     }
 
@@ -1694,6 +1776,40 @@ struct App {
         if (!dlg::exportOptions(hwnd, o, outPath, L"Mixdown")) return;
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
         std::wstring err; bool ok = mfio::encodeFile(outPath, *mix, o, &err);
+        SetCursor(old);
+        if (!ok) MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING);
+    }
+
+    // Write one library clip -- or just the waveform selection inside it -- out as
+    // a new audio file. This is an *export*, not a save-over: the clip, the
+    // project and the original source file are all left untouched, since edits
+    // live in the .acep and the source on disk is never written to.
+    void exportClipAudio(int clipId, bool selectionOnly) {
+        const Clip* c = doc.project().findClip(clipId);
+        if (!c || !c->buffer || c->buffer->frames() == 0) {
+            MessageBoxW(hwnd, L"This clip has no audio to export.", L"Export clip", MB_ICONINFORMATION);
+            return;
+        }
+        if (selectionOnly && !selectionCovers(clipId)) return;
+        AudioBufferPtr buf = selectionOnly ? sliceBuffer(*c->buffer, selStart, selEnd) : c->buffer;
+        if (!buf || buf->frames() == 0) {
+            MessageBoxW(hwnd, L"The selection is empty.", L"Export selection", MB_ICONINFORMATION);
+            return;
+        }
+        // Default to the clip's own rate and channel count so a plain "export"
+        // doesn't quietly resample or upmix a mono take; the dialog can override.
+        mfio::ExportOptions o;
+        o.sampleRate = buf->sampleRate > 0 ? buf->sampleRate : rate;
+        o.channels = buf->channels >= 2 ? 2 : 1;
+        o.format = mfio::ExportFormat::WAV;
+        o.bitsPerSample = 24;
+        o.bitrateKbps = 192;
+        std::wstring outPath;
+        const std::wstring suggested =
+            mfio::safeFileName(c->name) + (selectionOnly ? L" (selection)" : L"");
+        if (!dlg::exportOptions(hwnd, o, outPath, suggested)) return;
+        HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+        std::wstring err; bool ok = mfio::encodeFile(outPath, *buf, o, &err);
         SetCursor(old);
         if (!ok) MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING);
     }
@@ -2134,7 +2250,22 @@ struct App {
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_PLAYSEL, L"Play selection");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_SAVESEL, L"Save selection as new clip");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_CROP, L"Crop to selection\u2026");
+        // The manual way to get rid of something "Remove non-voice" won't touch.
+        // Silencing keeps the clip's length (so a pause between sentences stays
+        // the length it was); deleting closes the gap.
+        AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_SILENCESEL,
+                    L"Silence selection (keep timing)");
+        AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_DELETESEL,
+                    L"Delete selection (close gap)");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_CLEARSEL, L"Clear selection");
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        // Writing audio back out. Edits only ever live in the .acep, so this is
+        // the one way to get an edited clip out as a file; "Save selection as new
+        // clip" above is its in-project counterpart. Greyed like the other
+        // selection entries so the option reads as available before there is one.
+        AppendMenuW(m, MF_STRING, IDM_EXPORTCLIP, L"Export clip to file\u2026");
+        AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_EXPORTSEL,
+                    L"Export selection to file\u2026");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         // add-to-timeline submenu
         HMENU sub = CreatePopupMenu();
@@ -2191,7 +2322,11 @@ struct App {
         else if (cmd == IDM_PLAYSEL) { selClipId = clipId; playSelection(); }
         else if (cmd == IDM_SAVESEL) { selClipId = clipId; saveSelectionAsClip(); }
         else if (cmd == IDM_CROP) { selClipId = clipId; cropSelection(); }
+        else if (cmd == IDM_SILENCESEL) removeSelectedRange(clipId, true);
+        else if (cmd == IDM_DELETESEL) removeSelectedRange(clipId, false);
         else if (cmd == IDM_CLEARSEL) { selClipId = -1; selStart = selEnd = 0; refresh(); }
+        else if (cmd == IDM_EXPORTCLIP) exportClipAudio(clipId, false);
+        else if (cmd == IDM_EXPORTSEL) exportClipAudio(clipId, true);
         else if (cmd == IDM_NORM_MATCH) normalizeClip(clipId, false);
         else if (cmd == IDM_NORM_ALL) normalizeClip(clipId, true);
         else if (cmd == IDM_DENOISE) voiceCleanClip(clipId);
@@ -2291,7 +2426,14 @@ struct App {
         bool shift = GetKeyState(VK_SHIFT) & 0x8000;
         if (editorActive()) {
             if (k == VK_ESCAPE) { closeClipEditor(); return; }
-            if (k == VK_SPACE) { edButton(EB_PLAY); return; }
+            // Space is the universal play/pause, not a third transport: it acts
+            // on whatever is armed (so it resumes a paused selection audition as
+            // a selection audition) and pauses anything playing, rather than
+            // taking over as a whole-clip play the way the Play button would.
+            if (k == VK_SPACE) {
+                togglePreview(editClipId, previewClipId == editClipId && previewIsSel, false);
+                return;
+            }
             if (ctrl && (k == 'Z')) { if (shift) doRedo(); else doUndo(); return; }
             return;
         }
@@ -2331,10 +2473,32 @@ struct App {
     }
 
     // --------------------------------------------------------- timer / playend
+    // The playhead is the only thing in the window that animates, so the timer
+    // runs fast enough for it to look continuous while something is playing and
+    // drops back to the idle housekeeping rate when nothing is. The rate matters
+    // most in the fine-tune strips: at their zoom (a few hundred ms across half
+    // the window) a 33 ms step is over a hundred pixels, which reads as a
+    // stutter however accurate the position underneath it is.
+    //
+    // The fast period is 15 ms, not 16, on purpose. WM_TIMER fires on the system
+    // clock tick, which is ~15.6 ms by default, and a requested period is rounded
+    // *up* to a whole number of ticks -- so asking for 16 ms waits two ticks and
+    // yields ~31 ms, no better than idle. (Measured: with 16 ms the playhead
+    // stepped every 33-35 ms.) Anything at or below one tick fires once per tick,
+    // and 15 ms stays sane if some other component has raised the timer
+    // resolution: it caps the repaint rate at ~66 Hz instead of running away.
+    void setTimerRate(bool playing) {
+        if (playing == timerFast) return;
+        timerFast = playing;
+        SetTimer(hwnd, 1, playing ? 15 : 33, nullptr);
+    }
+
     void onTimer() {
         // Keep the title's unsaved-changes marker (" *") in sync as edits happen.
         if (projectModified() != lastTitleDirty) { lastTitleDirty = projectModified(); setTitle(); }
-        if (engine.isPlaying()) {
+        const bool playing = engine.isPlaying();
+        setTimerRate(playing);
+        if (playing) {
             if (timelinePlaying) playheadFrame = engine.position();
             else if (previewClipId >= 0) previewCursor = previewBegin + engine.position();
             refresh();
@@ -2366,7 +2530,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         a->buildMenu();
         a->setTitle();
         a->computeLayout();
-        SetTimer(hwnd, 1, 33, nullptr);
+        SetTimer(hwnd, 1, 33, nullptr);    // idle rate; onTimer speeds it up while playing
         return 0;
     }
     case WM_SIZE: a->computeLayout(); a->clampScroll(); a->refresh(); return 0;

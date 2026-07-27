@@ -534,6 +534,33 @@ std::vector<uint8_t> detectVoiceFrames(const AudioBuffer& buf, const VoiceIsolat
         i = j;
     }
 
+    // Frames that are unmistakably a non-voice *event*, so the growth below must
+    // not swallow them. Pre-roll / hold / gap-merge exist to protect the quiet,
+    // ambiguous material around speech — trailing consonants, breath, the tail of
+    // a word — but they were also shielding loud thumps that land within a couple
+    // of hundred milliseconds of a sentence, which is exactly where a bumped desk
+    // or a door slam usually falls. Such a bump was left untouched while an
+    // identical one in the middle of a silence was removed, so on a take where the
+    // bumps cluster around the speech the effect looked like it did nothing.
+    //
+    // The test is deliberately narrow — audible, energy overwhelmingly below
+    // 150 Hz, and next to no speech-band content — because it *overrides* the
+    // protections: it must fire on thumps and never on a plosive or a breath,
+    // both of which carry mid-band energy. It identifies a bump rather than
+    // grading one, so it isn't tied to the sensitivity knob.
+    std::vector<uint8_t> veto(nFrames, 0);
+    for (size_t fr = 0; fr < nFrames; ++fr)
+        veto[fr] = (!core[fr] && rms[fr] >= levelThr &&
+                    lowFrac[fr] >= 0.90 && spFrac[fr] <= 0.5 * spThr) ? 1 : 0;
+    // Sustained events only, so one odd frame can't punch a hole through a word.
+    const int minVeto = std::max(1, frames(40.0));
+    for (size_t i = 0; i < nFrames; ) {
+        if (!veto[i]) { ++i; continue; }
+        size_t j = i; while (j < nFrames && veto[j]) ++j;
+        if ((int)(j - i) < minVeto) for (size_t k = i; k < j; ++k) veto[k] = 0;
+        i = j;
+    }
+
     // Grow: pre-roll (onsets) + hold (trailing consonants / breath).
     const int pre  = frames(120.0);
     const int post = std::max(0, frames(std::max(0.0f, opts.holdMs)));
@@ -554,6 +581,13 @@ std::vector<uint8_t> detectVoiceFrames(const AudioBuffer& buf, const VoiceIsolat
             for (size_t k = i; k < j; ++k) mask[k] = 1;
         i = j;
     }
+
+    // Growth and gap-merging never keep an identified bump (see `veto` above).
+    // Applied last so it beats every protection, and only ever to frames the
+    // detector did not call voice in the first place. `isolateVoice`'s gate ramp
+    // still fades in and out around the result, so re-opening a hole here can't
+    // click.
+    for (size_t i = 0; i < nFrames; ++i) if (veto[i]) mask[i] = 0;
     return mask;
 }
 
@@ -640,6 +674,85 @@ AudioBufferPtr isolateVoice(const AudioBuffer& buf, const VoiceIsolateOptions& o
         if (opts.residue) g = 1.0f - g;
         for (int c = 0; c < ch; ++c) op[i * ch + c] = in[i * ch + c] * g;
     }
+    return out;
+}
+
+// ---------------- manual region edits ----------------
+
+AudioBufferPtr silenceRange(const AudioBuffer& src, int64_t begin, int64_t end, float fadeMs) {
+    const int ch = src.channels;
+    const int64_t nf = src.frames();
+    if (ch <= 0) return nullptr;
+    begin = std::max<int64_t>(0, begin);
+    end   = std::min<int64_t>(nf, end);
+    if (end <= begin) return nullptr;
+
+    auto out = std::make_shared<AudioBuffer>(src);
+    const int rate = src.sampleRate > 0 ? src.sampleRate : 48000;
+    // Both ramps have to fit inside the range without meeting, so a selection
+    // shorter than two fades gets proportionally shorter ones rather than a
+    // ramp that never reaches zero.
+    int64_t fade = (int64_t)(std::max(0.0f, fadeMs) * 0.001 * rate);
+    fade = std::min(fade, (end - begin) / 2);
+
+    for (int64_t i = begin; i < end; ++i) {
+        double g = 0.0;   // gain applied to the original signal
+        if (fade > 0) {
+            const int64_t d = std::min(i - begin, end - 1 - i);
+            if (d < fade) g = 0.5 + 0.5 * std::cos(PI * (d + 0.5) / fade);
+        }
+        for (int c = 0; c < ch; ++c) {
+            const size_t k = (size_t)i * ch + c;
+            out->samples[k] = (float)(src.samples[k] * g);
+        }
+    }
+    return out;
+}
+
+AudioBufferPtr deleteRange(const AudioBuffer& src, int64_t begin, int64_t end, float fadeMs) {
+    const int ch = src.channels;
+    const int64_t nf = src.frames();
+    if (ch <= 0) return nullptr;
+    begin = std::max<int64_t>(0, begin);
+    end   = std::min<int64_t>(nf, end);
+    if (end <= begin) return nullptr;
+
+    const int64_t head = begin, tail = nf - end;
+    if (head + tail <= 0) return nullptr;
+
+    const int rate = src.sampleRate > 0 ? src.sampleRate : 48000;
+    // The overlap is taken from the audio being *kept*, so it can never be
+    // longer than the shorter side; deleting from the very start or end of a
+    // clip leaves nothing to fade against and simply splices.
+    int64_t fade = (int64_t)(std::max(0.0f, fadeMs) * 0.001 * rate);
+    fade = std::min({ fade, head, tail });
+
+    auto out = std::make_shared<AudioBuffer>();
+    out->sampleRate = src.sampleRate; out->channels = ch;
+    const int64_t nOut = head + tail - fade;
+    out->samples.assign((size_t)nOut * ch, 0.0f);
+
+    for (int64_t i = 0; i < head - fade; ++i)
+        for (int c = 0; c < ch; ++c)
+            out->samples[(size_t)i * ch + c] = src.samples[(size_t)i * ch + c];
+
+    // Equal-power crossfade: the two sides are unrelated room tone, so summing
+    // them with sin/cos weights holds the level steady where a linear fade
+    // would dip.
+    for (int64_t i = 0; i < fade; ++i) {
+        const double t = (i + 0.5) / fade;
+        const double a = std::cos(t * PI * 0.5), b = std::sin(t * PI * 0.5);
+        for (int c = 0; c < ch; ++c)
+            out->samples[(size_t)(head - fade + i) * ch + c] =
+                (float)(src.samples[(size_t)(head - fade + i) * ch + c] * a +
+                        src.samples[(size_t)(end + i) * ch + c] * b);
+    }
+
+    for (int64_t i = fade; i < tail; ++i)
+        for (int c = 0; c < ch; ++c)
+            out->samples[(size_t)(head - fade + i) * ch + c] =
+                src.samples[(size_t)(end + i) * ch + c];
+
     return out;
 }
 
