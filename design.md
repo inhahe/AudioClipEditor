@@ -237,13 +237,20 @@ puts you back where you left off. `Document` holds a `ViewState` struct
 alongside — deliberately **not inside** — `Project`:
 
 - Being outside `Project` keeps it out of the undo snapshots, so dragging a
-  selection neither creates an undo step nor gets rewritten by undo/redo, and it
-  never trips `isModified()` (a selection drag must not produce a "save changes?"
-  prompt on exit).
-- `App::storeViewState()` copies the live selection/playhead into `doc.view()`
-  right before every save; `App::restoreViewState()` reads it back after a load.
-  Those are the only two sync points, so there is no shadow-state to keep
-  coherent during editing.
+  selection neither creates an undo step nor gets rewritten by undo/redo.
+- It **does** feed `isModified()`. `markSaved()` snapshots the selection along
+  with the undo node, and `isModified()` compares `selClipId/selStart/selEnd`
+  against it — a selection is deliberate work, so losing one to an unprompted
+  exit would be worse than an extra save prompt. The **playhead is excluded from
+  the comparison** (though still saved): `onTimer` reassigns it from
+  `engine.position()` during timeline playback, so counting it would mark the
+  project dirty just for pressing Play.
+- `App::storeViewState()` copies the live selection/playhead into `doc.view()`;
+  `App::restoreViewState()` reads it back after a load. Because the dirty flag
+  now depends on the selection, the UI must never call `doc.isModified()`
+  directly — `App::projectModified()` is the single choke point that stores the
+  view state first, and the title bar, the timer's `*` refresh and
+  `confirmDiscardChanges()` all go through it.
 - `.acep` **format v3** appends the block (`selClipId`, `selStart`, `selEnd`,
   `playheadFrame`) **after the tracks**, so the older sections parse identically;
   v1/v2 files simply load with a default (empty) view state.
@@ -296,8 +303,10 @@ region by ≈20 dB (measured −20.00 dB) while preserving ≥70% of an embedded
 (measured 99.5%), reduce−residue==original identity, rate-mismatch rejection,
 dispatch through `denoise()` incl. missing-profile rejection. Also covers a
 `Document` `.acep` **v3 round-trip** (library order, per-clip timestamps, and the
-saved selection + playhead preserved; a stale selection is dropped on load) and
-library **sort-by-name / sort-by-time / reorder**.
+saved selection + playhead preserved; a stale selection is dropped on load),
+library **sort-by-name / sort-by-time / reorder**, and the unsaved-changes flag
+(an edit or a selection change dirties the project, saving clears it, moving the
+playhead does not dirty it).
 
 Voice-isolation coverage builds a synthetic 5.2 s signal — harmonic speech-like
 stretch (F0 140 Hz + 12 harmonics), a 60 Hz decaying thump, a broadband shuffle
@@ -315,10 +324,13 @@ isolation is a single undo step.
 ## Unsaved-changes guard
 
 `Document` remembers the undo node that was current at the last save/load/new
-(`savedNode_`, set by `markSaved()` in `init`/`saveProject`/`loadProject`).
-`isModified()` is simply `undo_.current() != savedNode_`, so undoing back to the
-saved state clears the dirty flag and redoing away re-sets it — no separate dirty
-bit to keep in sync with the history. The UI shows a `*` in the title bar while
+(`savedNode_`) *and* the selection at that moment (`savedView_`), both set by
+`markSaved()` in `init`/`saveProject`/`loadProject`. `isModified()` is
+`undo_.current() != savedNode_` **or** the selection differing from
+`savedView_`, so undoing back to the saved state clears the dirty flag and
+redoing away re-sets it — no separate dirty bit to keep in sync with the history
+(see *Project view state* for why the playhead is excluded). The UI shows a `*`
+in the title bar while
 modified (refreshed from `onTimer` when the flag flips) and calls
 `App::confirmDiscardChanges()` — a Yes/No/Cancel *"Save changes…?"* box — before
 any project-discarding action (`WM_CLOSE`/exit, opening another project). Cancel

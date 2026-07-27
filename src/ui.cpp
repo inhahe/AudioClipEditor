@@ -1527,7 +1527,7 @@ struct App {
     void setTitle() {
         std::wstring t = L"Audio Clip Editor";
         if (!projectPath.empty()) t += std::wstring(L" \u2014 ") + PathFindFileNameW(projectPath.c_str());
-        if (doc.isModified()) t += L" *";
+        if (projectModified()) t += L" *";
         SetWindowTextW(hwnd, t.c_str());
     }
     void openProjectFile() {
@@ -1546,8 +1546,11 @@ struct App {
         setTitle(); clampScroll(); refresh();
     }
     // The waveform selection and playhead ride along in the .acep file; they are
-    // UI state, so they live in App and are synced to/from Document at I/O time
-    // (never through the undo tree, and they never mark the project modified).
+    // UI state, so they live in App and are pushed into Document whenever the
+    // saved state matters (never through the undo tree). Always ask through
+    // projectModified() rather than doc.isModified() directly, so the live
+    // selection is in Document before the comparison happens.
+    bool projectModified() { storeViewState(); return doc.isModified(); }
     void storeViewState() {
         ViewState& v = doc.view();
         v.selClipId = hasSel() ? selClipId : -1;
@@ -1584,7 +1587,7 @@ struct App {
     // project (exit, open another project). Returns true if the caller may proceed
     // (saved, or the user chose to discard); false to cancel the action.
     bool confirmDiscardChanges() {
-        if (!doc.isModified()) return true;
+        if (!projectModified()) return true;
         std::wstring name = projectPath.empty() ? L"this project"
                           : std::wstring(L"\u201C") + PathFindFileNameW(projectPath.c_str()) + L"\u201D";
         int r = MessageBoxW(hwnd,
@@ -2226,7 +2229,7 @@ struct App {
     // --------------------------------------------------------- timer / playend
     void onTimer() {
         // Keep the title's unsaved-changes marker (" *") in sync as edits happen.
-        if (doc.isModified() != lastTitleDirty) { lastTitleDirty = doc.isModified(); setTitle(); }
+        if (projectModified() != lastTitleDirty) { lastTitleDirty = projectModified(); setTitle(); }
         if (engine.isPlaying()) {
             if (timelinePlaying) playheadFrame = engine.position();
             else if (previewClipId >= 0) {

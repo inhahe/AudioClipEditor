@@ -312,6 +312,21 @@ int runSelfTest() {
         DeleteFileW(proj.c_str());
     }
 
+    // Unsaved-changes flag: edits and selection changes count, playhead doesn't.
+    {
+        Document d; d.init(rate);
+        std::wstring proj = dir + L"\\_selftest_dirty.acep";
+        int id = d.addClip(L"clip", makeSine(rate, 0.2, 300.0), L"", L"add");
+        check(d.isModified(), L"dirty after an edit");
+        check(d.saveProject(proj) && !d.isModified(), L"clean after save");
+        d.view().selClipId = id; d.view().selStart = 100; d.view().selEnd = 900;
+        check(d.isModified(), L"selection change marks the project modified");
+        check(d.saveProject(proj) && !d.isModified(), L"clean after saving the selection");
+        d.view().playheadFrame = 4321;
+        check(!d.isModified(), L"playhead move does not mark the project modified");
+        DeleteFileW(proj.c_str());
+    }
+
     // Voice isolation ("remove non-voice"): a harmonic speech-like stretch plus a
     // low-frequency bump and a broadband shuffle burst, separated by room tone.
     {
