@@ -21,7 +21,10 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   (oldest first)** — the time being the source file's date, or when a derived clip
   was created. Reorders and sorts are each a single undo step.
 - **Play any clip** with a per-card play/pause button. Click the waveform to
-  seek / skip around. Playback is real, mixed, low-latency WASAPI.
+  seek / skip around — the yellow cursor is always where playback will pick up,
+  so clicking while paused (or stopped) moves the restart point. Pause always
+  pauses, including in the middle of a selection audition, and play continues
+  from where it stopped. Playback is real, mixed, low-latency WASAPI.
 - **Select a section** of any clip by dragging across its waveform. While a
   selection is active the card shows **Crop** and **Save sel** buttons, and the
   card's play button auditions **only the selected part** (so you can preview
@@ -82,6 +85,19 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   *Voice cleaner — this track*), or **every clip in the whole project** (clip menu
   → *Voice cleaner → All clips*). A track/project clean uses one set of options
   and lands as a single undo step.
+- **Remove non-voice.** Where the voice cleaner attacks *steady* noise, this
+  attacks *non-speech events*: right-click a clip → *Remove non-voice* to silence
+  bumps, thumps, chair and paper shuffling, door slams, keyboard clicks — and the
+  room tone between sentences — leaving only the speech. Each analysis frame is
+  scored for harmonic (voiced) structure, speech-band energy and level; the
+  detections are then grown to catch the consonants around them and merged across
+  short gaps, so words aren't chopped. Everything outside a voice segment is faded
+  down, but the clip's **length and timing never change** — non-voice is
+  attenuated in place, not cut out. Pick **Sensitivity** (Gentle / Balanced /
+  Strict), **Attenuation** (0–96 dB), **Hold after speech** and **Fade**, or
+  switch the output to **Preview removed** to audition exactly what would be taken
+  away. Same three scopes as the voice cleaner — this clip, every clip on one
+  track (track-header right-click), or the whole project — each a single undo step.
 - **Reusable noise captures.** Each captured noise profile is remembered as a
   **recent capture** (its computed spectral profile — the per-capture work that's
   shared across every clip it cleans — is cached, so re-using it is instant). Any
@@ -90,7 +106,13 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   used floats to the top). Captures live for the session.
 - **Save / load projects.** Projects are saved as a single `.acep` file with the
   whole library and timeline (audio embedded), so a project is fully
-  self-contained. `Ctrl+S` saves; the File menu has Open / Save / Save As. The
+  self-contained. Your **current selection and playhead position are saved too**,
+  so reopening a project puts you back exactly where you left off (a selection
+  whose clip has since gone is quietly dropped). A selection is real work, so
+  changing one counts as an unsaved change — you get the `*` and the usual save
+  prompt on exit, and never lose a carefully-placed selection by accident. (The
+  playhead is saved but doesn't flag the project, since it moves on its own
+  during playback.) `Ctrl+S` saves; the File menu has Open / Save / Save As. The
   title bar shows a `*` while there are unsaved changes, and the app **prompts you
   to save** (Save / Don't Save / Cancel) before closing or opening another project
   if the current one has unsaved edits — so you never lose work by accident.
@@ -135,13 +157,14 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Fine-tune selection edges | in the editor, drag the **Start edge** / **End edge** strip knobs (wheel over a strip to zoom); toggle with **Fine-tune edges** |
 | Close the full-window editor | `Esc` or the **Done** button |
 | Crop / save a selection | **Crop** and **Save sel** buttons on the card while a selection is active |
-| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, normalize, voice cleaner, rename, delete, add to a track |
+| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, normalize, voice cleaner, remove non-voice, rename, delete, add to a track |
 | Rename a clip | right-click → Rename |
 | Reorder clips | drag a card by its title bar to a new spot in the library (caret shows the drop point) |
 | Sort clips | right-click the empty library area → *Sort clips by name* / *by time* |
 | Set clip / track volume | drag the volume slider on the card or track header |
 | Normalize volume | right-click a card → *Normalize to match other clips* / *Normalize all clips* |
 | Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |
+| Remove bumps / shuffling (keep only voice) | right-click a card → *Remove non-voice → This clip / All clips*, or right-click a track header → *Remove non-voice — this track* |
 | Capture a noise profile | select a noise-only stretch, then right-click → *Voice cleaner → Capture noise from selection* (or the **Get noise profile** button in the dialog); or *Capture noise from whole clip*; or the **Capture noise** button in the full-window editor |
 | Apply a saved noise capture | right-click a card → *Voice cleaner → Apply noise capture ▸* and pick a recent capture |
 | Track actions | **right-click a track header/lane**: voice-clean the track, rename, remove |
@@ -171,8 +194,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `undo.h` | Snapshot-based undo **tree** with branching redo |
 | `document.{h,cpp}` | Owns the project + undo tree; every edit commits a snapshot |
 | `waveform.{h,cpp}` | GDI oscilloscope rendering: min/max envelope zoomed out, sample line zoomed in |
-| `dsp.{h,cpp}` | FFT, speech-aware loudness, STFT noise reduction (spectral subtraction / Wiener / Audacity-style profile gate) |
-| `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, open/save file & project dialogs |
+| `dsp.{h,cpp}` | FFT, speech-aware loudness, STFT noise reduction (spectral subtraction / Wiener / Audacity-style profile gate), voice isolation (non-speech removal) |
+| `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, remove-non-voice options, open/save file & project dialogs |
 | `ui.cpp` | Main window: menu bar, layout, painting, hit-testing, all interaction |
 | `selftest.cpp` | `--selftest` backend round-trip checks (decode/encode/peaks/DSP) |
 

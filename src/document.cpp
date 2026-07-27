@@ -23,6 +23,7 @@ static uint64_t clipTimestampFor(const std::wstring& sourcePath) {
 
 void Document::init(int sampleRate) {
     project_ = Project{};
+    view_ = ViewState{};
     project_.sampleRate = sampleRate;
     // start with a single track
     Track t;
@@ -317,7 +318,7 @@ bool Document::saveProject(const std::wstring& path) {
     FILE* f = _wfopen(path.c_str(), L"wb");
     if (!f) return false;
     fwrite("ACEP", 1, 4, f);
-    wU32(f, 2);   // v2 adds per-clip timestamp (for "sort by time")
+    wU32(f, 3);   // v2: per-clip timestamp (sort by time); v3: trailing view state
     wI32(f, project_.sampleRate);
     wI32(f, project_.nextClipId);
     wI32(f, project_.nextTrackId);
@@ -344,6 +345,12 @@ bool Document::saveProject(const std::wstring& path) {
         wI32(f, (int32_t)t.clips.size());
         for (auto& pc : t.clips) { wI32(f, pc.clipId); wI64(f, pc.startFrame); wI64(f, pc.lengthFrames); }
     }
+    // v3: view state (selection + playhead) last, so older readers that stop
+    // after the tracks still load everything they understand.
+    wI32(f, view_.selClipId);
+    wI64(f, view_.selStart);
+    wI64(f, view_.selEnd);
+    wI64(f, view_.playheadFrame);
     fclose(f);
     markSaved();
     return true;
@@ -392,9 +399,28 @@ bool Document::loadProject(const std::wstring& path) {
         }
         p.tracks.push_back(std::move(t));
     }
+    ViewState v;
+    if (ver >= 3) {
+        v.selClipId = rI32(f);
+        v.selStart = rI64(f);
+        v.selEnd = rI64(f);
+        v.playheadFrame = rI64(f);
+    }
     fclose(f);
     if (p.tracks.empty()) { Track t; t.id = p.nextTrackId++; t.name = L"Track 1"; p.tracks.push_back(t); }
 
+    // Drop a selection that no longer fits (clip gone, or bounds past its end).
+    const Clip* sc = v.selClipId >= 0 ? p.findClip(v.selClipId) : nullptr;
+    if (!sc) { v.selClipId = -1; v.selStart = v.selEnd = 0; }
+    else {
+        const int64_t nf = sc->frames();
+        v.selStart = std::max<int64_t>(0, std::min(v.selStart, nf));
+        v.selEnd = std::max<int64_t>(0, std::min(v.selEnd, nf));
+        if (v.selEnd <= v.selStart) { v.selClipId = -1; v.selStart = v.selEnd = 0; }
+    }
+    v.playheadFrame = std::max<int64_t>(0, v.playheadFrame);
+
+    view_ = v;
     project_ = p;
     undo_.init(project_);   // fresh history for loaded project
     markSaved();

@@ -49,10 +49,10 @@ enum {
     IDM_PLAY = 100, IDM_PLAYSEL, IDM_CLEARSEL, IDM_SAVESEL, IDM_CROP,
     IDM_EDIT, IDM_RENAME, IDM_DELETE,
     IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE, IDM_DENOISE_ALL, IDM_GETPROFILE,
-    IDM_GETPROFILE_CLIP,
+    IDM_GETPROFILE_CLIP, IDM_VOICEISO, IDM_VOICEISO_ALL,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
-    IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE,
+    IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE, IDM_TRK_VOICEISO,
     IDM_SORT_NAME = 340, IDM_SORT_TIME,
     IDM_REDO_BASE = 400,
     IDM_APPLYCAP_BASE = 500   // + recent-capture index (apply to the clicked clip)
@@ -104,10 +104,16 @@ struct App {
     std::vector<PlacedLayout> placed;
     std::vector<TrackLayout> trackLays;
 
-    // playback / preview state
+    // playback / preview state.
+    // previewCursor is the authoritative play position for the previewed clip: the
+    // yellow cursor is drawn there, and play/resume always (re)starts there, so a
+    // seek made while stopped or paused is honoured.
     int previewClipId = -1;
-    bool previewIsSel = false;
+    bool previewIsSel = false;     // the armed source spans the selection, not the whole clip
     int64_t previewCursor = 0;     // frame within clip (display + start point)
+    int64_t previewBegin = 0;      // frame range the armed source covers, [begin,end)
+    int64_t previewEnd = 0;
+    bool previewSeekPending = false;  // cursor moved while not playing; re-arm on resume
     bool timelinePlaying = false;
     int64_t playheadFrame = 0;
 
@@ -123,6 +129,9 @@ struct App {
     dsp::NoiseProfile noiseProfile;        // the "active" capture (used by the dialog)
     std::wstring noiseProfileDesc;
     std::vector<NoiseCapture> noiseCaptures;  // recent captures, most-recent first
+
+    // "Remove non-voice" (voice isolation) options, persisted for the session
+    dsp::VoiceIsolateOptions viOpts;
 
     // interaction
     Mode mode = Mode::None;
@@ -310,12 +319,8 @@ struct App {
     // ----- editor interaction ------------------------------------------------
     void edButton(int id) {
         switch (id) {
-        case EB_PLAY:
-            if (previewClipId == editClipId && !previewIsSel && engine.isPlaying()) engine.pause();
-            else if (previewClipId == editClipId && !previewIsSel && engine.isPaused()) engine.resume();
-            else startClipPreview(editClipId, 0);
-            break;
-        case EB_PLAYSEL: if (hasSel() && selClipId == editClipId) playSelection(); break;
+        case EB_PLAY: togglePreview(editClipId, false); break;   // whole clip
+        case EB_PLAYSEL: if (hasSel() && selClipId == editClipId) togglePreview(editClipId, true); break;
         case EB_FINE: editFineToggle = !editFineToggle; break;
         case EB_CROP: if (hasSel() && selClipId == editClipId) cropSelection(); break;
         case EB_SAVE: if (hasSel() && selClipId == editClipId) saveSelectionAsClip(); break;
@@ -1143,49 +1148,67 @@ struct App {
         clampScroll(); refresh();
     }
 
-    void togglePlayClip(int clipId) {
-        // When this clip has an active selection, the play button auditions only
-        // the selected part.
-        if (hasSel() && selClipId == clipId) {
-            if (previewClipId == clipId && previewIsSel) {
-                if (engine.isPlaying())     { engine.pause();  refresh(); return; }
-                if (engine.isPaused())      { engine.resume(); refresh(); return; }
-            }
-            playSelection();   // (re)start from selection start
-            return;
+    // Play / pause a clip preview. `useSel` asks for the selection-only audition;
+    // it is ignored when the clip has no selection.
+    //
+    // Two rules make this predictable:
+    //   * any *playing* preview of this clip pauses, whichever button was pressed
+    //     (so the pause button really pauses a selection audition), and
+    //   * play/resume always starts at previewCursor, so a click on the waveform
+    //     while paused or stopped moves where playback picks up.
+    void togglePreview(int clipId, bool useSel) {
+        if (previewClipId == clipId && !timelinePlaying && engine.isPlaying()) {
+            engine.pause(); refresh(); return;
         }
-        if (previewClipId == clipId && !previewIsSel) {
-            if (engine.isPlaying()) engine.pause();
-            else if (engine.isPaused()) engine.resume();
-            else startClipPreview(clipId, previewCursor);
-        } else {
-            startClipPreview(clipId, 0);
+        const bool wantSel = useSel && hasSel() && selClipId == clipId;
+        // Same clip, same audition range as the armed source => this is a resume.
+        const bool sameSource = previewClipId == clipId && !timelinePlaying &&
+                                previewIsSel == wantSel &&
+                                (!wantSel || (previewBegin == selStart && previewEnd == selEnd));
+        if (sameSource && engine.isPaused() && !previewSeekPending) {
+            engine.resume(); refresh(); return;    // continue exactly where it stopped
         }
-        refresh();
+        // Otherwise start where the cursor sits; a fresh selection audition begins
+        // at the selection start, and an unrelated clip begins at its head.
+        const int64_t from = wantSel ? (sameSource ? previewCursor : selStart)
+                                     : (previewClipId == clipId ? previewCursor : 0);
+        startPreview(clipId, from, wantSel);
     }
-    void startClipPreview(int clipId, int64_t startFrame) {
+    // The library card's play button auditions the selection when there is one.
+    void togglePlayClip(int clipId) { togglePreview(clipId, true); }
+
+    // (Re)arm a preview source for `clipId` and start it at `startFrame`.
+    void startPreview(int clipId, int64_t startFrame, bool useSel) {
         const Clip* c = doc.project().findClip(clipId);
         if (!c || !c->buffer) return;
-        if (startFrame < 0 || startFrame >= c->frames()) startFrame = 0;  // restart if at end
+        const bool sel = useSel && hasSel() && selClipId == clipId;
+        const int64_t begin = sel ? selStart : 0;
+        const int64_t end   = sel ? selEnd   : c->frames();
+        if (end <= begin) return;
+        if (startFrame < begin || startFrame >= end) startFrame = begin;   // restart if at the end
         timelinePlaying = false;
-        previewClipId = clipId; previewIsSel = false; previewCursor = startFrame;
-        engine.play(std::make_shared<BufferSource>(c->buffer, 0, c->frames(), c->gain), startFrame);
-    }
-    void playSelection() {
-        if (!hasSel()) return;
-        const Clip* c = doc.project().findClip(selClipId);
-        if (!c || !c->buffer) return;
-        timelinePlaying = false;
-        previewClipId = selClipId; previewIsSel = true; previewCursor = selStart;
-        engine.play(std::make_shared<BufferSource>(c->buffer, selStart, selEnd, c->gain), 0);
+        previewClipId = clipId; previewIsSel = sel;
+        previewBegin = begin; previewEnd = end;
+        previewCursor = startFrame; previewSeekPending = false;
+        engine.play(std::make_shared<BufferSource>(c->buffer, begin, end, c->gain), startFrame - begin);
         refresh();
     }
+    void playSelection() { if (hasSel()) startPreview(selClipId, selStart, true); }
+
+    // Move the play cursor. Takes effect immediately while playing; otherwise it is
+    // remembered and honoured by the next play/resume.
     void seekClip(int clipId, int64_t frame) {
-        previewClipId = clipId; previewIsSel = false; previewCursor = frame; timelinePlaying = false;
-        if (engine.hasSource() && engine.isPlaying()) {
-            const Clip* c = doc.project().findClip(clipId);
-            if (c) engine.play(std::make_shared<BufferSource>(c->buffer, 0, c->frames(), c->gain), frame);
-        }
+        const Clip* c = doc.project().findClip(clipId);
+        if (!c) return;
+        frame = std::max<int64_t>(0, std::min(frame, c->frames()));
+        // Stay inside a selection audition only while the target is still in range.
+        const bool keepSel = previewIsSel && previewClipId == clipId && hasSel() &&
+                             selClipId == clipId && frame >= selStart && frame < selEnd;
+        const bool playing = !timelinePlaying && previewClipId == clipId && engine.isPlaying();
+        timelinePlaying = false;
+        if (playing) { startPreview(clipId, frame, keepSel); return; }
+        previewClipId = clipId; previewIsSel = keepSel;
+        previewCursor = frame; previewSeekPending = true;
         refresh();
     }
 
@@ -1318,6 +1341,77 @@ struct App {
         refresh();
         if (failed)
             MessageBoxW(hwnd, L"Some clips could not be cleaned.", L"Voice cleaner", MB_ICONWARNING);
+    }
+
+    // ---- Remove non-voice (voice isolation) ----
+    void removeNonVoiceClip(int clipId) {
+        const Clip* c = doc.project().findClip(clipId);
+        if (!c) return;
+        removeNonVoiceClips({ clipId }, L"'" + c->name + L"'");
+    }
+    void removeNonVoiceAllClips() {
+        std::vector<int> ids;
+        for (auto& c : doc.project().library) ids.push_back(c.id);
+        removeNonVoiceClips(ids, L"all clips");
+    }
+    void removeNonVoiceTrack(int trackId) {
+        const Track* t = doc.project().findTrack(trackId);
+        if (!t) return;
+        std::vector<int> ids;
+        for (auto& pc : t->clips) ids.push_back(pc.clipId);
+        removeNonVoiceClips(ids, L"track '" + t->name + L"'");
+    }
+    // Show the isolation options once, then process the given clips as a single
+    // undo step. Duplicate / empty clips are skipped.
+    void removeNonVoiceClips(const std::vector<int>& ids, const std::wstring& scopeLabel) {
+        std::vector<int> targets;
+        for (int id : ids) {
+            bool dup = false;
+            for (int t : targets) if (t == id) { dup = true; break; }
+            if (dup) continue;
+            const Clip* c = doc.project().findClip(id);
+            if (c && c->buffer && c->buffer->frames() > 0) targets.push_back(id);
+        }
+        if (targets.empty()) {
+            MessageBoxW(hwnd, L"No audio to process here.", L"Remove non-voice", MB_ICONINFORMATION);
+            return;
+        }
+        std::wstring scope = scopeLabel;
+        if (targets.size() > 1) scope += L" (" + std::to_wstring(targets.size()) + L" clips)";
+        if (!dlg::voiceIsolate(hwnd, viOpts, scope)) return;
+
+        HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+        std::vector<std::pair<int, AudioBufferPtr>> updates;
+        double removedSec = 0.0; int segments = 0;
+        for (int id : targets) {
+            const Clip* c = doc.project().findClip(id);
+            if (!c || !c->buffer) continue;
+            dsp::VoiceIsolateStats st;
+            auto processed = dsp::isolateVoice(*c->buffer, viOpts, &st);
+            if (!processed) continue;
+            removedSec += st.removedSeconds;
+            segments += st.segments;
+            updates.push_back({ id, processed });
+        }
+        SetCursor(old);
+        if (updates.empty()) {
+            MessageBoxW(hwnd, L"Nothing could be processed.", L"Remove non-voice", MB_ICONWARNING);
+            return;
+        }
+        stopAll();   // buffers are changing under any active playback
+        std::wstring desc = (viOpts.residue ? L"Preview removed non-voice in "
+                                            : L"Remove non-voice from ") + scopeLabel;
+        doc.replaceClipBuffers(updates, desc);
+        refresh();
+        wchar_t msg[256];
+        swprintf(msg, 256,
+                 viOpts.residue
+                     ? L"Kept only the non-voice material: %.1f s across %d voice segment(s).\n\n"
+                       L"Undo (Ctrl+Z) to go back."
+                     : L"Silenced %.1f s of non-voice, keeping %d voice segment(s).\n\n"
+                       L"Undo (Ctrl+Z) to go back.",
+                 removedSec, segments);
+        MessageBoxW(hwnd, msg, L"Remove non-voice", MB_ICONINFORMATION);
     }
 
     // Capture the Audacity-style noise profile from the current selection
@@ -1453,7 +1547,7 @@ struct App {
     void setTitle() {
         std::wstring t = L"Audio Clip Editor";
         if (!projectPath.empty()) t += std::wstring(L" \u2014 ") + PathFindFileNameW(projectPath.c_str());
-        if (doc.isModified()) t += L" *";
+        if (projectModified()) t += L" *";
         SetWindowTextW(hwnd, t.c_str());
     }
     void openProjectFile() {
@@ -1466,19 +1560,42 @@ struct App {
         rate = doc.project().sampleRate > 0 ? doc.project().sampleRate : rate;
         engine.setSourceRate(rate);
         projectPath = path;
-        selClipId = -1; selStart = selEnd = 0; previewClipId = -1; timelinePlaying = false; playheadFrame = 0;
+        previewClipId = -1; timelinePlaying = false;
         libScroll = tlScrollX = tlScrollY = 0;
+        restoreViewState();   // selection + playhead saved with the project
         setTitle(); clampScroll(); refresh();
+    }
+    // The waveform selection and playhead ride along in the .acep file; they are
+    // UI state, so they live in App and are pushed into Document whenever the
+    // saved state matters (never through the undo tree). Always ask through
+    // projectModified() rather than doc.isModified() directly, so the live
+    // selection is in Document before the comparison happens.
+    bool projectModified() { storeViewState(); return doc.isModified(); }
+    void storeViewState() {
+        ViewState& v = doc.view();
+        v.selClipId = hasSel() ? selClipId : -1;
+        v.selStart = hasSel() ? selStart : 0;
+        v.selEnd = hasSel() ? selEnd : 0;
+        v.playheadFrame = playheadFrame;
+    }
+    void restoreViewState() {
+        const ViewState& v = doc.view();   // loadProject already validated it
+        selClipId = v.selClipId;
+        selStart = v.selStart;
+        selEnd = v.selEnd;
+        playheadFrame = v.playheadFrame;
     }
     bool saveProjectAs() {
         std::wstring suggested = projectPath.empty() ? L"Untitled" : PathFindFileNameW(projectPath.c_str());
         std::wstring path = dlg::saveProject(hwnd, suggested);
         if (path.empty()) return false;
+        storeViewState();
         if (!doc.saveProject(path)) { MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING); return false; }
         projectPath = path; setTitle(); return true;
     }
     bool saveProjectFile() {
         if (projectPath.empty()) return saveProjectAs();
+        storeViewState();
         if (!doc.saveProject(projectPath)) {
             MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING);
             return false;
@@ -1490,7 +1607,7 @@ struct App {
     // project (exit, open another project). Returns true if the caller may proceed
     // (saved, or the user chose to discard); false to cancel the action.
     bool confirmDiscardChanges() {
-        if (!doc.isModified()) return true;
+        if (!projectModified()) return true;
         std::wstring name = projectPath.empty() ? L"this project"
                           : std::wstring(L"\u201C") + PathFindFileNameW(projectPath.c_str()) + L"\u201D";
         int r = MessageBoxW(hwnd,
@@ -1526,6 +1643,7 @@ struct App {
             L"  \u2022 Drag a clip up onto a track to place it (drops at any offset)\n"
             L"  \u2022 Right-click for save-selection, crop, normalize, voice cleaner\u2026\n"
             L"  \u2022 Voice cleaner cleans one clip, or all clips in the project\n"
+            L"  \u2022 Remove non-voice silences bumps, shuffling and room tone\n"
             L"  \u2022 Drag the volume slider to change a clip's level\n\n"
             L"Full-window editor:\n"
             L"  \u2022 Drag across the big waveform to select; buttons to play/crop/save\n"
@@ -1535,7 +1653,7 @@ struct App {
             L"Timeline:\n"
             L"  \u2022 Drag placed clips to move them (snaps to neighbours)\n"
             L"  \u2022 Drag a track's volume slider to change the track level\n"
-            L"  \u2022 Right-click a track header to voice-clean/rename/remove the track\n"
+            L"  \u2022 Right-click a track header to clean/isolate voice, rename or remove the track\n"
             L"  \u2022 Click a lane or the ruler to move the playhead\n"
             L"  \u2022 Ctrl+wheel zooms, Shift+wheel scrolls vertically\n\n"
             L"Keys:  Space = play/pause   Ctrl+Z = undo   Ctrl+Shift+Z = redo",
@@ -1564,7 +1682,10 @@ struct App {
         refresh();
     }
     void stopAll() {
-        engine.stop(); timelinePlaying = false; previewClipId = -1; refresh();
+        engine.stop(); timelinePlaying = false;
+        previewClipId = -1; previewIsSel = false; previewSeekPending = false;
+        previewBegin = previewEnd = 0; previewCursor = 0;
+        refresh();
     }
 
     // --------------------------------------------------------- undo / redo
@@ -1899,6 +2020,8 @@ struct App {
         HMENU m = CreatePopupMenu();
         AppendMenuW(m, MF_STRING | (hasClips ? 0 : MF_GRAYED), IDM_TRK_DENOISE,
                     L"Voice cleaner \u2014 this track\u2026");
+        AppendMenuW(m, MF_STRING | (hasClips ? 0 : MF_GRAYED), IDM_TRK_VOICEISO,
+                    L"Remove non-voice \u2014 this track\u2026");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_TRK_RENAME, L"Rename track\u2026");
         AppendMenuW(m, MF_STRING | (doc.project().tracks.size() > 1 ? 0 : MF_GRAYED),
@@ -1907,6 +2030,7 @@ struct App {
         int cmd = TrackPopupMenu(m, TPM_RETURNCMD, sp.x, sp.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         if (cmd == IDM_TRK_DENOISE) voiceCleanTrack(trackId);
+        else if (cmd == IDM_TRK_VOICEISO) removeNonVoiceTrack(trackId);
         else if (cmd == IDM_TRK_RENAME) {
             std::wstring nm = t->name;
             if (dlg::promptText(hwnd, L"Rename track", L"Track name:", nm)) { doc.renameTrack(trackId, nm); refresh(); }
@@ -1970,6 +2094,10 @@ struct App {
         }
         AppendMenuW(vc, MF_POPUP, (UINT_PTR)rec, L"Apply noise capture \u25B8");
         AppendMenuW(m, MF_POPUP, (UINT_PTR)vc, L"Voice cleaner (reduce noise)");
+        HMENU vi = CreatePopupMenu();
+        AppendMenuW(vi, MF_STRING, IDM_VOICEISO, L"This clip\u2026");
+        AppendMenuW(vi, MF_STRING, IDM_VOICEISO_ALL, L"All clips (whole project)\u2026");
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)vi, L"Remove non-voice (bumps, shuffling)");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_RENAME, L"Rename\u2026");
         AppendMenuW(m, MF_STRING, IDM_DELETE, L"Delete clip");
@@ -1990,6 +2118,8 @@ struct App {
         else if (cmd == IDM_DENOISE_ALL) voiceCleanAllClips();
         else if (cmd == IDM_GETPROFILE) captureNoiseProfileFromSelection();
         else if (cmd == IDM_GETPROFILE_CLIP) captureNoiseProfileFromClip(clipId);
+        else if (cmd == IDM_VOICEISO) removeNonVoiceClip(clipId);
+        else if (cmd == IDM_VOICEISO_ALL) removeNonVoiceAllClips();
         else if (cmd >= IDM_APPLYCAP_BASE && cmd < IDM_APPLYCAP_BASE + 100)
             applyCaptureToClip(clipId, cmd - IDM_APPLYCAP_BASE);
         else if (cmd == IDM_RENAME) renameClip(clipId);
@@ -2122,23 +2252,17 @@ struct App {
     // --------------------------------------------------------- timer / playend
     void onTimer() {
         // Keep the title's unsaved-changes marker (" *") in sync as edits happen.
-        if (doc.isModified() != lastTitleDirty) { lastTitleDirty = doc.isModified(); setTitle(); }
+        if (projectModified() != lastTitleDirty) { lastTitleDirty = projectModified(); setTitle(); }
         if (engine.isPlaying()) {
             if (timelinePlaying) playheadFrame = engine.position();
-            else if (previewClipId >= 0) {
-                int64_t pos = engine.position();
-                previewCursor = previewIsSel ? (selStart + pos) : pos;
-            }
+            else if (previewClipId >= 0) previewCursor = previewBegin + engine.position();
             refresh();
         }
     }
     void onPlayEnd() {
         // source drained
         if (timelinePlaying) { timelinePlaying = false; }
-        else if (previewClipId >= 0) {
-            const Clip* c = doc.project().findClip(previewClipId);
-            previewCursor = previewIsSel ? selEnd : (c ? c->frames() : 0);
-        }
+        else if (previewClipId >= 0) previewCursor = previewEnd;
         refresh();
     }
 };

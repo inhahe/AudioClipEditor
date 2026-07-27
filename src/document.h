@@ -5,6 +5,22 @@
 #include <vector>
 #include <utility>
 
+// Where the user was working: the active waveform selection and the playhead.
+// This is UI state, not project data — it rides along in the .acep file (so
+// reopening a project puts you back where you left off) and is deliberately
+// *outside* the undo tree (dragging a selection must not create an undo step,
+// and undo/redo must not yank the selection around). It does count towards the
+// unsaved-changes flag, though: a selection you took the trouble to make is work
+// you'd hate to lose, so changing it earns a `*` and a save prompt on exit. The
+// playhead is the exception — it's saved but excluded from the dirty check,
+// since it advances by itself during playback.
+struct ViewState {
+    int     selClipId = -1;      // clip that owns the selection, -1 = none
+    int64_t selStart = 0;        // selection bounds, in frames of that clip
+    int64_t selEnd = 0;
+    int64_t playheadFrame = 0;   // timeline playhead
+};
+
 // Owns the project state and the undo/redo tree. Every mutation goes through a
 // method here that records a snapshot, so Ctrl+Z can undo anything.
 class Document {
@@ -13,6 +29,11 @@ public:
 
     Project& project() { return project_; }
     const Project& project() const { return project_; }
+
+    // Saved/loaded with the project; see ViewState. The UI syncs its live
+    // selection in before saving and reads it back after loading.
+    ViewState& view() { return view_; }
+    const ViewState& view() const { return view_; }
 
     static PeakCachePtr buildPeaks(const AudioBufferPtr& buf);
 
@@ -71,16 +92,26 @@ public:
 
     // --- Unsaved-changes tracking ---
     // The "saved" marker is the undo node that was current when the project was
-    // last saved (or freshly loaded/created). The project is modified iff the
-    // current undo node differs from it — so undoing back to the saved state
-    // clears the dirty flag, and redoing away sets it again.
-    void markSaved() { savedNode_ = undo_.current(); }
-    bool isModified() const { return undo_.current() != savedNode_; }
+    // last saved (or freshly loaded/created), plus the selection as it stood at
+    // that moment. The project is modified iff the current undo node differs — so
+    // undoing back to the saved state clears the dirty flag and redoing away sets
+    // it again — or the selection has moved since. The playhead is intentionally
+    // not compared: it advances on its own during playback, so counting it would
+    // dirty the project just for pressing Play.
+    void markSaved() { savedNode_ = undo_.current(); savedView_ = view_; }
+    bool isModified() const {
+        return undo_.current() != savedNode_ ||
+               view_.selClipId != savedView_.selClipId ||
+               view_.selStart  != savedView_.selStart ||
+               view_.selEnd    != savedView_.selEnd;
+    }
 
 private:
     void commit(const std::wstring& desc) { undo_.commit(project_, desc); }
 
     Project project_;
+    ViewState view_;
     UndoTree undo_;
     const UndoNode* savedNode_ = nullptr;
+    ViewState savedView_;            // selection as of the last save/load/new
 };
