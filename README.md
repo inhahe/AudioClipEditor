@@ -30,7 +30,7 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   instead of hopping in lumps — so it lines up with the waveform under it even at
   the fine-tune strips' zoom.
 - **Select a section** of any clip by dragging across its waveform. While a
-  selection is active the card shows **Crop** and **Save sel** buttons, and the
+  selection is active the card shows **Crop** and **New clip** buttons, and the
   card's play button auditions **only the selected part** (so you can preview
   before committing). Once you have a selection you can **adjust either edge on its
   own** — grab the left or right boundary and drag it (the cursor turns into a
@@ -39,9 +39,13 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   and via the editor's fine-tune edge strips. A selection is an **editing cursor**
   — it says what the next operation applies to — not a trim: a clip already placed
   on a track always plays in full, whatever is selected. To put only part of a clip
-  into an arrangement, use **Save sel** and drag the new clip onto the track.
-- **Save selection as a new clip** — the **Save sel** button (or right-click →
-  Save selection) slices the selection into a new clip you name (rename any time).
+  into an arrangement, use **New clip** and drag the resulting clip onto the track.
+- **Make a new clip out of a selection** — the **New clip** button on the card
+  (or right-click → *New clip from selection*, or the same button in the
+  full-window editor) slices the selection into a separate library clip you name,
+  leaving the original untouched. This is the intended way to get "just this bit"
+  of a recording as something you can arrange, rename, clean up, or export on its
+  own. Note it makes a *clip*, not a file — for a file, use *Export selection…*.
 - **Full-window clip editor.** Double-click a clip card (or right-click
   → *Open in editor*) to blow the clip up to a full-window view for precise work.
   It has its own toolbar (play, play selection, crop, save selection, capture noise, clear, done).
@@ -61,7 +65,7 @@ of clips, audition them, trim/crop, and arrange them on tracks.
 - **Crop a clip** to the selection — the **Crop** button (or right-click → Crop).
   Cropping only trims the clip inside the editor (a single undo step); it **never
   overwrites or deletes the original file on disk**. To keep a cropped copy, use
-  **Save sel** (save the selection as a new clip) or export.
+  **New clip** (makes a new clip from the selection) or export.
 - **Undo/redo tree.** `Ctrl+Z` undoes anything. `Ctrl+Shift+Z` redoes — and when
   the history has branched, it pops up a menu of the redo branches with
   descriptions so you can pick which future to walk into. Selections are undoable
@@ -166,9 +170,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   audio dialog as the mixdown. Edits live in the project file and the original
   source file on disk is **never written to**, so this is how you get an edited
   (cleaned, normalized, cropped) clip back out as audio. The defaults follow the
-  clip — its own sample rate, and a mono clip stays mono. (*Save selection as new
-  clip* is the in-project counterpart: it adds a clip to the library rather than
-  writing a file.)
+  clip — its own sample rate, and a mono clip stays mono. (*New clip from
+  selection* is the in-project counterpart: it adds a clip to the library rather
+  than writing a file.)
 - **Export the mixdown.** *File → Export Mixdown* renders all tracks together and
   saves through the same audio dialog — pick **format, sample rate, bit depth**
   (16/24-bit PCM or 32-bit float for WAV), **bitrate** (compressed formats), and
@@ -212,7 +216,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Open the full-window editor | **double-click** a clip card, or right-click → *Open in editor* |
 | Fine-tune selection edges | in the editor, drag the **Start edge** / **End edge** strip knobs (wheel over a strip to zoom); toggle with **Fine-tune edges** |
 | Close the full-window editor | `Esc` (when no drag is in progress) or the **Done** button |
-| Crop / save a selection | **Crop** and **Save sel** buttons on the card while a selection is active |
+| Crop to a selection | **Crop** button on the card while a selection is active |
+| Make a new clip from a selection | **New clip** button on the card, or right-click the card → *New clip from selection* |
 | Clip actions | **right-click a card**: play selection, save selection as new clip, crop, export clip / selection to a file, normalize, voice cleaner, remove non-voice, rename, delete, add to a track |
 | Rename a clip | right-click → Rename |
 | Reorder clips | drag a card by its title bar to a new spot in the library (caret shows the drop point) |

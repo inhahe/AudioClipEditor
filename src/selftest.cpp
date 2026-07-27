@@ -922,7 +922,7 @@ int runSelfTest() {
             { 2, L"Fine-tune edges" }, { 2, L"\u2713 Fine-tune edges" },
             { 4, L"Crop to selection\u2026" },
             { 5, L"Silence selection" }, { 6, L"Delete selection" },
-            { 7, L"Save selection as clip" },
+            { 7, L"New clip from selection" },
             { 8, L"Capture noise (sel)" }, { 8, L"Capture noise (clip)" },
             { 9, L"Clear selection" },
         };
@@ -946,6 +946,32 @@ int runSelfTest() {
             // A few px of breathing room, since the button also draws a rounded edge.
             check(worstOver <= -6,
                   std::wstring(L"editor toolbar: every label fits its button at ") +
+                      (sc == 1.0f ? L"100%" : L"150%") + L" DPI",
+                  L"tightest \"" + worst + L"\" with " + std::to_wstring(-worstOver) + L" px spare");
+        }
+
+        // The clip card's selection buttons are sized by hand (layoutCards: savW /
+        // crpW) rather than measured, and they sit *over* the waveform, so a label
+        // that outgrows its button spills onto the audio instead of being clipped.
+        // They use fSmall, which is smaller than the toolbar font.
+        for (float sc : { 1.0f, 1.5f }) {
+            auto S = [&](int v) { return (int)(v * sc + 0.5f); };
+            HDC sdc = GetDC(nullptr);
+            HFONT f = CreateFontW(-S(12), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                                  OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                  VARIABLE_PITCH, L"Segoe UI");
+            HGDIOBJ of = SelectObject(sdc, f);
+            struct CB { const wchar_t* text; int w; };
+            const CB cbs[] = { { L"New clip", S(58) }, { L"Crop", S(42) } };
+            std::wstring worst; int worstOver = -100000;
+            for (const CB& b : cbs) {
+                SIZE sz{}; GetTextExtentPoint32W(sdc, b.text, (int)wcslen(b.text), &sz);
+                const int over = sz.cx - b.w;
+                if (over > worstOver) { worstOver = over; worst = b.text; }
+            }
+            SelectObject(sdc, of); DeleteObject(f); ReleaseDC(nullptr, sdc);
+            check(worstOver <= -6,
+                  std::wstring(L"clip card: selection button labels fit at ") +
                       (sc == 1.0f ? L"100%" : L"150%") + L" DPI",
                   L"tightest \"" + worst + L"\" with " + std::to_wstring(-worstOver) + L" px spare");
         }
