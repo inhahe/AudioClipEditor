@@ -10,7 +10,8 @@ int runSelfTest();  // selftest.cpp
 // loading a project and navigating to it. These dialogs are built in code, so
 // their layout is only as good as the measurements in DlgUI — being able to
 // bring one up in isolation is how that gets checked. Append "sel" to exercise
-// the "Range: only the selection" rows (see dlg::RangeOption).
+// the long "Applies to: the selection in ..." scope label, which is the widest
+// thing either effect dialog has to fit.
 static int runDialogTest(HINSTANCE hInst, int which, bool withSelection) {
     WNDCLASSW wc{}; wc.lpfnWndProc = DefWindowProcW; wc.hInstance = hInst;
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); wc.lpszClassName = L"ACE_DlgTestParent";
@@ -19,20 +20,19 @@ static int runDialogTest(HINSTANCE hInst, int which, bool withSelection) {
                              80, 80, 1400, 900, nullptr, nullptr, hInst, nullptr);
     ShowWindow(p, SW_SHOW);
 
-    dlg::RangeOption range;
-    range.offer = true;
-    range.hasSelection = withSelection;
-    range.selectionDesc = L"0:12.30 \u2013 0:18.00, 5.70 s";
+    const std::wstring scope =
+        withSelection ? L"the selection in 'consciousness p1s1' (0:12.30 \u2013 0:18.00, 5.70 s)"
+                      : L"'consciousness p1s1'";
 
     if (which == 1) {
         dsp::VoiceIsolateOptions o; o.sensitivity = 0.75f;
         dlg::VoiceIsolateContext ctx;
-        ctx.opts = &o; ctx.scopeLabel = L"'consciousness p1s1'"; ctx.range = range;
+        ctx.opts = &o; ctx.scopeLabel = scope;
         dlg::voiceIsolate(p, ctx);
     } else if (which == 2) {
         dsp::NROptions o; dsp::NoiseProfile prof; std::wstring desc;
         dlg::VoiceCleanerContext ctx;
-        ctx.opts = &o; ctx.profile = &prof; ctx.profileDesc = &desc; ctx.range = range;
+        ctx.opts = &o; ctx.profile = &prof; ctx.profileDesc = &desc; ctx.scopeLabel = scope;
         dlg::voiceCleaner(p, ctx);
     } else if (which == 3) {
         mfio::ExportOptions o; std::wstring path;
