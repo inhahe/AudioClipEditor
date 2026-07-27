@@ -36,7 +36,10 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   own** — grab the left or right boundary and drag it (the cursor turns into a
   ↔ resize arrow when you're near an edge) instead of redrawing the whole
   selection. This works on the clip cards, in the full-window editor's main view,
-  and via the editor's fine-tune edge strips.
+  and via the editor's fine-tune edge strips. The selection belongs to the **clip**,
+  so it shows up everywhere that clip appears — including on the clip's block in
+  any track it has been placed on, so you can see exactly which part of the
+  arrangement a selection covers.
 - **Save selection as a new clip** — the **Save sel** button (or right-click →
   Save selection) slices the selection into a new clip you name (rename any time).
 - **Full-window clip editor.** Double-click a clip card (or right-click

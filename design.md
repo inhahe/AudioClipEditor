@@ -608,6 +608,36 @@ after all three fixes: the cursor advances 36–37 px per 16.7 ms sample, i.e.
 15.3–15.7 ms of audio per screen refresh, uniformly (it was 66–70 px lumps at
 irregular ~33 ms intervals).
 
+## Where the selection is drawn
+
+**A selection belongs to the clip, not to the view that made it.** There is one
+selection in the whole app (`selClipId` + `selStart`/`selEnd`), so *every* surface
+that shows that clip's audio has to show it — otherwise the same audio appears in
+two places looking like two unrelated pieces, which is exactly the bug that was
+reported: a selection dragged on a library card was invisible on that clip's
+block in the track lane.
+
+`drawSelOverlay(hdc, wv, clip)` is the single implementation, shared by the
+library card and the timeline placement (the editor's main view and fine-tune
+strips have their own zoomed mapping). It takes a rect across which the clip's
+**whole** buffer is spread and paints the tinted band, the waveform redrawn in
+`col::waveSel` inside it, and an edge line each side. Two details:
+
+- The frame→x mapping deliberately uses the full, untrimmed `wv`, because a
+  placed clip can extend past the visible lane; callers clip with
+  `IntersectClipRect` so the geometry still agrees with the `wf::draw` beneath.
+- A sub-pixel selection is widened to one pixel, so a very short selection on a
+  narrow placement is still visible rather than collapsing to nothing.
+
+Callers guard with the existing `selectionCovers(clipId)` rather than re-deriving
+"does this clip own the selection".
+
+Verified by measurement rather than by eye: with the timeline zoomed so the
+placement is ~158 px wide, the band matches the card's to **0.63 px** at the start
+edge and **0.46 px** at the end — pure rounding. (At the default scale a 0.4 s
+placement is only ~26 px, where one pixel is 4% of the block and nothing finer
+than that can be concluded.)
+
 ## Selection editing (independent edges)
 
 A selection can be adjusted one edge at a time instead of redrawn. All three

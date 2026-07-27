@@ -794,6 +794,38 @@ struct App {
         wchar_t b[32]; swprintf(b, 32, L"%d:%05.2f", m, s); return b;
     }
 
+    // Draw the waveform selection over a rect that shows the clip's *whole*
+    // buffer spread across [wv.left, wv.right): a tinted band, the waveform
+    // redrawn in the accent colour inside it, and an edge line each side.
+    //
+    // Shared by the library card and by the clip's block on a track lane. A
+    // selection belongs to the clip, not to the view that made it, so every place
+    // the clip is shown has to show it -- a selection made on a card used to be
+    // invisible on that same clip's placement in the timeline, which made the two
+    // look like unrelated pieces of audio.
+    //
+    // `wv` may extend past the visible area (a placed clip scrolled half off the
+    // lane), so callers clip; the frame->x mapping deliberately uses the full
+    // untrimmed rect so it agrees with the wf::draw underneath.
+    void drawSelOverlay(HDC h, const RECT& wv, const Clip& c) {
+        if (!c.buffer || !c.peaks) return;
+        const int64_t nf = std::max<int64_t>(1, c.frames());
+        const int ww = wv.right - wv.left;
+        if (ww <= 0) return;
+        int sx0 = wv.left + (int)((double)selStart / nf * ww);
+        int sx1 = wv.left + (int)((double)selEnd / nf * ww);
+        if (sx1 <= sx0) sx1 = sx0 + 1;   // a sub-pixel selection must still show
+        RECT sr = { sx0, wv.top, sx1, wv.bottom };
+        fill(h, sr, col::selRect);
+        SaveDC(h); IntersectClipRect(h, sr.left, sr.top, sr.right, sr.bottom);
+        wf::draw(h, wv, *c.buffer, *c.peaks, 0, c.frames(), col::waveSel);
+        RestoreDC(h, -1);
+        HPEN pen = CreatePen(PS_SOLID, 1, col::waveSel); HGDIOBJ op = SelectObject(h, pen);
+        MoveToEx(h, sx0, wv.top, nullptr); LineTo(h, sx0, wv.bottom);
+        MoveToEx(h, sx1, wv.top, nullptr); LineTo(h, sx1, wv.bottom);
+        SelectObject(h, op); DeleteObject(pen);
+    }
+
     // Hover highlight: lighten the button's own colour so coloured buttons
     // (green Play All, red Stop, accent Crop/Save) stay their colour on hover
     // instead of turning grey.
@@ -909,21 +941,7 @@ struct App {
                 int64_t nf = c->frames();
                 wf::draw(h, cl.wave, *c->buffer, *c->peaks, 0, nf, col::wave);
                 // selection overlay
-                if (hasSel() && selClipId == cl.clipId) {
-                    int wl = cl.wave.left, ww = cl.wave.right - cl.wave.left;
-                    int sx0 = wl + (int)((double)selStart / nf * ww);
-                    int sx1 = wl + (int)((double)selEnd / nf * ww);
-                    RECT sr = { sx0, cl.wave.top, sx1, cl.wave.bottom };
-                    // highlight rect + waveform redrawn in accent within it
-                    fill(h, sr, col::selRect);
-                    SaveDC(h); IntersectClipRect(h, sr.left, sr.top, sr.right, sr.bottom);
-                    wf::draw(h, cl.wave, *c->buffer, *c->peaks, 0, nf, col::waveSel);
-                    RestoreDC(h, -1);
-                    HPEN pen = CreatePen(PS_SOLID, 1, col::waveSel); HGDIOBJ op = SelectObject(h, pen);
-                    MoveToEx(h, sx0, cl.wave.top, nullptr); LineTo(h, sx0, cl.wave.bottom);
-                    MoveToEx(h, sx1, cl.wave.top, nullptr); LineTo(h, sx1, cl.wave.bottom);
-                    SelectObject(h, op); DeleteObject(pen);
-                }
+                if (selectionCovers(cl.clipId)) drawSelOverlay(h, cl.wave, *c);
                 // preview cursor line
                 if (previewClipId == cl.clipId) {
                     int wl = cl.wave.left, ww = cl.wave.right - cl.wave.left;
@@ -1035,6 +1053,9 @@ struct App {
             if (c && c->buffer && c->peaks && wv.right > wv.left) {
                 SaveDC(h); IntersectClipRect(h, wv.left, wv.top, wv.right, wv.bottom);
                 wf::draw(h, wv, *c->buffer, *c->peaks, 0, c->frames(), RGB(180, 210, 245));
+                // The selection belongs to the clip, so it shows here too -- this
+                // block is the same audio as the library card above.
+                if (selectionCovers(pl.clipId)) drawSelOverlay(h, wv, *c);
                 RestoreDC(h, -1);
             }
             RECT nm = { pl.rc.left + S(6), pl.rc.top + S(2), pl.rc.right - S(4), pl.rc.top + S(18) };
