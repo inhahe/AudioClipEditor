@@ -8,6 +8,8 @@
 #include "dsp.h"
 #include "layout.h"
 #include "transport.h"
+#include "selhistory.h"
+#include "snap.h"
 #include <commctrl.h>
 #include <shlwapi.h>
 #include <windowsx.h>
@@ -128,6 +130,19 @@ struct App {
     int64_t waveAnchor = 0;        // fixed edge while sweeping/edge-dragging a card selection
     bool waveEdgeDrag = false;     // true when a card WaveSelect drag grabbed an existing edge
 
+    // The selection as it stood when the current mouse gesture began, so Esc can
+    // put it back (see cancelDrag). Captured on every button-press rather than
+    // only on the presses that start a selection drag: a press cannot always tell
+    // yet what it will turn into -- a sweep on a card becomes a drag-to-timeline
+    // if the pointer leaves the library, and that conversion clears the selection.
+    int selSaveClipId = -1;
+    int64_t selSaveStart = 0, selSaveEnd = 0;
+
+    // Selection history, so Ctrl+Z steps back through selections as well as edits.
+    // The state machine lives in selhistory.h; the document's current undo node is
+    // the token that tells it when the document has moved out from under it.
+    selhist::History selHist;
+
     // voice cleaner session state: last-used options + captured noise profile
     // (Audacity-style; profile lives for the session, like Audacity's)
     dsp::NROptions nrOpts;
@@ -146,6 +161,14 @@ struct App {
     int volTrackId = -1;           // TrackVolume drag target
     int moveTrackId = -1, moveIndex = -1;
     int64_t moveGrabOffset = 0;    // frames from clip start to grab point
+    // Where a clip being dragged along a lane would land, and the state machine
+    // that decides it. Snapping is directional, so it depends on the path the
+    // pointer took and not just on where it is now -- which is why the result is
+    // computed once per pointer update and stored, rather than recomputed by
+    // whoever needs it (paint, drop). See snap.h.
+    snapping::Sticky dragSnap;
+    int64_t dragSnapStart = 0;
+    int dragSnapTrackId = -1;
     int hotTB = -1;
     int hotSelClip = -1;           // card whose selection-action button is hovered
     int hotSelBtn = 0;             // 0 none, 1 crop, 2 save-selection
@@ -337,7 +360,13 @@ struct App {
         case EB_DELSEL: removeSelectedRange(editClipId, false); break;
         case EB_SAVE: if (hasSel() && selClipId == editClipId) saveSelectionAsClip(); break;
         case EB_CAPTURE: captureNoiseProfileFromEditor(); break;
-        case EB_CLEAR: selClipId = editClipId; selStart = selEnd = 0; break;
+        case EB_CLEAR: {
+            // Undoable like a drag: this is the one-click way to lose a selection.
+            selhist::Sel prev = curSel();
+            selClipId = editClipId; selStart = selEnd = 0;
+            recordSelChange(prev);
+            break;
+        }
         case EB_DONE: closeClipEditor(); return;
         }
         refresh();
@@ -412,6 +441,9 @@ struct App {
             //  no-move edge grab simply leaves the selection unchanged.)
         }
         mainEdgeDrag = false;
+        // d == 0 means the drag was already cancelled with Esc, which put the
+        // selection back itself and so must not leave a history entry.
+        if (d != 0) recordSelChangeFromDrag();
         refresh();
     }
     void edWheel(POINT p, int delta) {
@@ -798,15 +830,13 @@ struct App {
     // buffer spread across [wv.left, wv.right): a tinted band, the waveform
     // redrawn in the accent colour inside it, and an edge line each side.
     //
-    // Shared by the library card and by the clip's block on a track lane. A
-    // selection belongs to the clip, not to the view that made it, so every place
-    // the clip is shown has to show it -- a selection made on a card used to be
-    // invisible on that same clip's placement in the timeline, which made the two
-    // look like unrelated pieces of audio.
+    // Used by the library card. Not by the clip's block on a track lane, even
+    // though the geometry would work: see the note in paintTimeline for why a
+    // selection must not appear on an arrangement.
     //
-    // `wv` may extend past the visible area (a placed clip scrolled half off the
-    // lane), so callers clip; the frame->x mapping deliberately uses the full
-    // untrimmed rect so it agrees with the wf::draw underneath.
+    // `wv` may extend past the visible area, so callers clip; the frame->x mapping
+    // deliberately uses the full untrimmed rect so it agrees with the wf::draw
+    // underneath.
     void drawSelOverlay(HDC h, const RECT& wv, const Clip& c) {
         if (!c.buffer || !c.peaks) return;
         const int64_t nf = std::max<int64_t>(1, c.frames());
@@ -899,8 +929,10 @@ struct App {
         RECT tr = { tbRects[TB_STOP].right + S(16), rcTransport.top, zlab.left - S(8), rcTransport.bottom };
         textOut(h, tr, fmtTime(posSec) + L"  /  " + fmtTime(totSec), col::text, fBig, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        COLORREF uf = doc.canUndo() ? col::text : col::dim;
-        COLORREF rf = doc.canRedo() ? col::text : col::dim;
+        // A pending selection undo counts: the buttons are the same action as
+        // Ctrl+Z, so greying them while that would still do something would lie.
+        COLORREF uf = (doc.canUndo() || canSelUndo()) ? col::text : col::dim;
+        COLORREF rf = (doc.canRedo() || canSelRedo()) ? col::text : col::dim;
         button(h, tbRects[TB_UNDO], L"\u21B6 Undo", col::btn, uf, hotTB == TB_UNDO, fNorm);
         button(h, tbRects[TB_REDO], L"\u21B7 Redo", col::btn, rf, hotTB == TB_REDO, fNorm);
     }
@@ -1053,9 +1085,15 @@ struct App {
             if (c && c->buffer && c->peaks && wv.right > wv.left) {
                 SaveDC(h); IntersectClipRect(h, wv.left, wv.top, wv.right, wv.bottom);
                 wf::draw(h, wv, *c->buffer, *c->peaks, 0, c->frames(), RGB(180, 210, 245));
-                // The selection belongs to the clip, so it shows here too -- this
-                // block is the same audio as the library card above.
-                if (selectionCovers(pl.clipId)) drawSelOverlay(h, wv, *c);
+                // Deliberately *no* selection overlay here. It was drawn for a
+                // while, on the reasoning that a selection belongs to the clip and
+                // so belongs on every surface showing that clip -- but on a track
+                // lane a highlighted band reads as "this is the part that plays",
+                // and it isn't: timeline playback renders the whole placement
+                // (TimelineSegment has no trim, see engine.cpp). The selection is
+                // an editing cursor scoped to the library, not an in/out point. To
+                // put part of a clip on a track, Save selection as clip and drag
+                // that; that clip's own length is then the honest arrangement.
                 RestoreDC(h, -1);
             }
             RECT nm = { pl.rc.left + S(6), pl.rc.top + S(2), pl.rc.right - S(4), pl.rc.top + S(18) };
@@ -1067,7 +1105,7 @@ struct App {
             int tid; if (trackAtPoint(p, tid)) {
                 const Clip* c = doc.project().findClip(dragClipId);
                 if (c) {
-                    int64_t start = snapFrame(tid, xToFrame(p.x - (int)(moveGrabOffset * pxPerFrame())), c->frames(), -1);
+                    const int64_t start = dragSnapStart;
                     for (auto& tl : trackLays) if (tl.trackId == tid) {
                         int x0 = frameToX(start), x1 = frameToX(start + c->frames());
                         RECT g = { x0, tl.lane.top + S(4), x1, tl.lane.bottom - S(4) };
@@ -1085,7 +1123,7 @@ struct App {
             const Clip* c = doc.project().findClip(dragClipId);
             if (c) {
                 int ignore = (tid == moveTrackId) ? moveIndex : -1;
-                int64_t start = snapFrame(tid, xToFrame(p.x) - moveGrabOffset, c->frames(), ignore);
+                const int64_t start = dragSnapStart;
                 for (auto& tl : trackLays) if (tl.trackId == tid) {
                     int x0 = frameToX(start), x1 = frameToX(start + c->frames());
                     RECT g = { x0, tl.lane.top + S(4), x1, tl.lane.bottom - S(4) };
@@ -1182,23 +1220,39 @@ struct App {
         return -1;
     }
 
-    int64_t snapFrame(int trackId, int64_t start, int64_t len, int ignoreIndex) {
+    // The frames a dragged clip of length `len` is worth landing exactly on in
+    // this track: flush after each neighbour, flush before each neighbour, and
+    // the start of the timeline. `ignoreIndex` is the clip being dragged, which
+    // must not snap to itself.
+    std::vector<int64_t> snapTargets(int trackId, int64_t len, int ignoreIndex) const {
+        std::vector<int64_t> out{ 0 };
         const Track* t = nullptr;
         for (auto& tt : doc.project().tracks) if (tt.id == trackId) t = &tt;
-        if (!t) return std::max<int64_t>(0, start);
-        int64_t best = start; int64_t bestD = (int64_t)(S(10) / pxPerFrame()) + 1;
-        auto trySnap = [&](int64_t candidate) {
-            int64_t d = std::llabs(candidate - start);
-            if (d < bestD) { bestD = d; best = candidate; }
-        };
-        trySnap(0);
+        if (!t) return out;
         for (int i = 0; i < (int)t->clips.size(); ++i) {
             if (i == ignoreIndex) continue;
-            trySnap(t->clips[i].endFrame());           // butt up after a clip
-            trySnap(t->clips[i].startFrame - len);     // butt up before a clip
-        }
-        if (best < 0) best = 0;
-        return best;
+            out.push_back(t->clips[i].endFrame());          // butt up after a clip
+            const int64_t before = t->clips[i].startFrame - len;
+            if (before > 0) out.push_back(before);          // butt up before a clip
+        }                                                   // (a negative "before" is
+        return out;                                         //  not a reachable position)
+    }
+    // How far the mouse may stray from an engaged snap before it lets go.
+    int64_t snapTol() const { return (int64_t)(S(10) / pxPerFrame()); }
+
+    // Advance the drag's snapping state to the pointer's current position and
+    // remember where the clip would land. Called once per pointer update; the
+    // ghost and the drop both read `dragSnapStart`, because re-deriving it would
+    // step the state machine again (see snap.h).
+    void updateDragSnap(POINT p) {
+        const Clip* c = doc.project().findClip(dragClipId);
+        const int64_t len = c ? c->frames() : 0;
+        int tid = (mode == Mode::ClipMove) ? moveTrackId : -1;
+        trackAtPoint(p, tid);
+        dragSnapTrackId = tid;
+        const int ignore = (mode == Mode::ClipMove && tid == moveTrackId) ? moveIndex : -1;
+        const int64_t raw = xToFrame(p.x) - moveGrabOffset;
+        dragSnapStart = std::max<int64_t>(0, dragSnap.update(raw, snapTargets(tid, len, ignore), snapTol()));
     }
 
     // --------------------------------------------------------- actions
@@ -1852,7 +1906,9 @@ struct App {
             L"  \u2022 Drag the strip knobs (or wheel-zoom a strip) to nudge exact points\n"
             L"  \u2022 Esc closes the editor\n\n"
             L"Timeline:\n"
-            L"  \u2022 Drag placed clips to move them (snaps to neighbours)\n"
+            L"  \u2022 Drag placed clips to move them\n"
+            L"  \u2022 Nudge one just past a neighbour to snap it flush; approach\n"
+            L"    without crossing to leave a gap of any size\n"
             L"  \u2022 Drag a track's volume slider to change the track level\n"
             L"  \u2022 Right-click a track header to clean/isolate voice, rename or remove the track\n"
             L"  \u2022 Click a lane or the ruler to move the playhead\n"
@@ -1890,8 +1946,27 @@ struct App {
     }
 
     // --------------------------------------------------------- undo / redo
-    void doUndo() { if (doc.canUndo()) { doc.undo(); afterHistory(); } }
+    // The document history node doubles as the "are these entries still reachable"
+    // token for the selection stack.
+    const void* selHistBase() const { return doc.historyNode(); }
+    selhist::Sel curSel() const { return { selClipId, selStart, selEnd }; }
+    void applySel(const selhist::Sel& s) { selClipId = s.clipId; selStart = s.start; selEnd = s.end; }
+
+    bool canSelUndo() const { return selHist.canUndo(selHistBase()); }
+    bool canSelRedo() const { return selHist.canRedo(selHistBase()); }
+    void resetSelHistory() { selHist.reset(selHistBase()); }
+
+    // `prev` is normally the snapshot taken on mouse-down (the same one Esc uses),
+    // so a gesture that ends where it began records nothing.
+    void recordSelChange(const selhist::Sel& prev) { selHist.record(selHistBase(), prev, curSel()); }
+    void recordSelChangeFromDrag() { recordSelChange({ selSaveClipId, selSaveStart, selSaveEnd }); }
+
+    void doUndo() {
+        if (canSelUndo()) { applySel(selHist.undo(curSel())); validateSelection(); refresh(); return; }
+        if (doc.canUndo()) { doc.undo(); afterHistory(); }
+    }
     void doRedo() {
+        if (canSelRedo()) { applySel(selHist.redo(curSel())); validateSelection(); refresh(); return; }
         if (!doc.canRedo()) return;
         int branch = doc.defaultRedoBranch();
         if (doc.redoBranchCount() > 1) {
@@ -1910,6 +1985,10 @@ struct App {
     void afterHistory() {
         stopAll();            // playback may reference buffers this edit replaced
         validateSelection();
+        // The document has moved, so the selection stack no longer describes
+        // reachable states. Dropping it here (rather than only letting the base
+        // check ignore it) stops an undo-then-redo from reviving a stale stack.
+        resetSelHistory();
         clampScroll(); refresh();
     }
 
@@ -1969,6 +2048,7 @@ struct App {
 
     // --------------------------------------------------------- mouse
     void onLDown(POINT p, bool dbl) {
+        selSaveClipId = selClipId; selSaveStart = selStart; selSaveEnd = selEnd;
         if (editorActive()) { edDown(p, dbl); return; }
         SetFocus(hwnd);
         downPt = p; dragged = false;
@@ -2026,6 +2106,7 @@ struct App {
                 if (dbl) { openClipEditor(cl->clipId); return; }
                 // start drag-to-timeline
                 mode = Mode::CardDrag; dragClipId = cl->clipId; moveGrabOffset = 0;
+                dragSnap.begin(xToFrame(p.x));
                 SetCapture(hwnd); return;
             }
             return;
@@ -2065,6 +2146,10 @@ struct App {
                 const Track* t=nullptr; for(auto&tt:doc.project().tracks) if(tt.id==pl->trackId)t=&tt;
                 int64_t clipStart = t->clips[pl->index].startFrame;
                 moveGrabOffset = xToFrame(p.x) - clipStart;
+                // Seed with where the clip already is, so one that is already
+                // flush against a neighbour resists the first nudge.
+                dragSnap.begin(clipStart);
+                dragSnapStart = clipStart; dragSnapTrackId = pl->trackId;
                 SetCapture(hwnd); return;
             }
             // seek playhead by clicking a lane / ruler
@@ -2109,6 +2194,8 @@ struct App {
             if (dragged && !PtInRect(&rcLibrary, p) && PtInRect(&rcTimeline, p)) {
                 mode = Mode::CardDrag; moveGrabOffset = 0;
                 selClipId = -1; selStart = selEnd = 0;
+                dragSnap.begin(xToFrame(p.x));   // the drag only becomes a placement here
+                updateDragSnap(p);
                 refresh();
                 return;
             }
@@ -2135,6 +2222,7 @@ struct App {
             setVScrollFromThumbTop(p.y - vscrollGrab); refresh();
         } else if (mode == Mode::CardDrag || mode == Mode::ClipMove || mode == Mode::TimelineSeek) {
             if (mode == Mode::TimelineSeek) { playheadFrame = xToFrame(p.x); if (timelinePlaying) engine.seek(playheadFrame); }
+            else updateDragSnap(p);      // the one place the snap state advances
             refresh();
         }
     }
@@ -2157,6 +2245,7 @@ struct App {
             // (anchor-based sweep keeps selStart/selEnd sorted; a no-move edge grab
             //  simply leaves the selection unchanged.)
             waveEdgeDrag = false;
+            recordSelChangeFromDrag();   // covers the sweep and the click-that-clears
             refresh();
         } else if (m == Mode::CardDrag) {
             if (dragged) {
@@ -2164,7 +2253,10 @@ struct App {
                 if (trackAtPoint(p, tid)) {
                     const Clip* c = doc.project().findClip(dragClipId);
                     if (c) {
-                        int64_t start = snapFrame(tid, xToFrame(p.x - (int)(moveGrabOffset * pxPerFrame())), c->frames(), -1);
+                        // Drop where the ghost was, not where a fresh calculation
+                        // would put it: with directional snapping those can differ.
+                        updateDragSnap(p);
+                        int64_t start = dragSnapStart;
                         if (!doc.placeClip(tid, dragClipId, start, L"Add '" + c->name + L"' to timeline"))
                             MessageBoxW(hwnd, L"Clips can't overlap on a track.", L"Can't place", MB_ICONINFORMATION);
                         else afterPlaceRefresh();
@@ -2178,9 +2270,8 @@ struct App {
         } else if (m == Mode::ClipMove) {
             if (dragged) {
                 int tid = moveTrackId; trackAtPoint(p, tid);
-                const Clip* c = doc.project().findClip(dragClipId);
-                int64_t newStart = snapFrame(tid, xToFrame(p.x) - moveGrabOffset, c ? c->frames() : 0,
-                                             tid == moveTrackId ? moveIndex : -1);
+                updateDragSnap(p);      // land where the ghost was (see CardDrag above)
+                int64_t newStart = dragSnapStart;
                 doc.moveClip(moveTrackId, moveIndex, tid, newStart, L"Move clip");
                 afterPlaceRefresh();
             }
@@ -2345,7 +2436,11 @@ struct App {
         else if (cmd == IDM_CROP) { selClipId = clipId; cropSelection(); }
         else if (cmd == IDM_SILENCESEL) removeSelectedRange(clipId, true);
         else if (cmd == IDM_DELETESEL) removeSelectedRange(clipId, false);
-        else if (cmd == IDM_CLEARSEL) { selClipId = -1; selStart = selEnd = 0; refresh(); }
+        else if (cmd == IDM_CLEARSEL) {
+            selhist::Sel prev = curSel();
+            selClipId = -1; selStart = selEnd = 0;
+            recordSelChange(prev); refresh();      // undoable, like the editor's Clear selection
+        }
         else if (cmd == IDM_EXPORTCLIP) exportClipAudio(clipId, false);
         else if (cmd == IDM_EXPORTSEL) exportClipAudio(clipId, true);
         else if (cmd == IDM_NORM_MATCH) normalizeClip(clipId, false);
@@ -2442,11 +2537,40 @@ struct App {
     }
 
     // --------------------------------------------------------- keyboard
+    // Esc abandons the gesture in progress and puts things back as they were when
+    // it started: a selection sweep or edge-nudge restores the previous selection,
+    // a clip drag drops nothing. Returns false when no such drag was running, so
+    // the caller can fall through to Esc's other meaning (closing the editor).
+    //
+    // Only gestures with a discrete outcome are cancellable here. The continuous
+    // ones -- volume, zoom, the scrollbar -- show their value moving under the
+    // cursor as you drag, so there is no half-finished result to abandon.
+    bool cancelDrag() {
+        if (editorActive()) {
+            if (editDrag == 0) return false;    // main sweep, or either fine-tune strip
+            editDrag = 0; mainEdgeDrag = false;
+        } else {
+            // CardDrag is included because a sweep on a card *becomes* one when the
+            // pointer leaves the library, and that conversion clears the selection;
+            // cancelling has to undo that too, not just skip the drop.
+            if (mode != Mode::WaveSelect && mode != Mode::CardDrag && mode != Mode::ClipMove)
+                return false;
+            mode = Mode::None; waveEdgeDrag = false;
+        }
+        selClipId = selSaveClipId; selStart = selSaveStart; selEnd = selSaveEnd;
+        if (GetCapture() == hwnd) ReleaseCapture();
+        dragged = false;
+        refresh();
+        return true;
+    }
+
     void onKey(WPARAM k) {
         bool ctrl = GetKeyState(VK_CONTROL) & 0x8000;
         bool shift = GetKeyState(VK_SHIFT) & 0x8000;
         if (editorActive()) {
-            if (k == VK_ESCAPE) { closeClipEditor(); return; }
+            // Cancelling a drag takes precedence over closing: mid-gesture, Esc
+            // means "undo what I'm doing", not "throw away the whole editor".
+            if (k == VK_ESCAPE) { if (!cancelDrag()) closeClipEditor(); return; }
             // Space is the universal play/pause, not a third transport: it acts
             // on whatever is armed (so it resumes a paused selection audition as
             // a selection audition) and pauses anything playing, rather than
@@ -2458,6 +2582,7 @@ struct App {
             if (ctrl && (k == 'Z')) { if (shift) doRedo(); else doUndo(); return; }
             return;
         }
+        if (k == VK_ESCAPE) { cancelDrag(); return; }
         if (ctrl && (k == 'Z')) { if (shift) doRedo(); else doUndo(); return; }
         if (ctrl && (k == 'Y')) { doRedo(); return; }
         if (ctrl && (k == 'S')) { saveProjectFile(); return; }

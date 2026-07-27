@@ -36,10 +36,10 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   own** — grab the left or right boundary and drag it (the cursor turns into a
   ↔ resize arrow when you're near an edge) instead of redrawing the whole
   selection. This works on the clip cards, in the full-window editor's main view,
-  and via the editor's fine-tune edge strips. The selection belongs to the **clip**,
-  so it shows up everywhere that clip appears — including on the clip's block in
-  any track it has been placed on, so you can see exactly which part of the
-  arrangement a selection covers.
+  and via the editor's fine-tune edge strips. A selection is an **editing cursor**
+  — it says what the next operation applies to — not a trim: a clip already placed
+  on a track always plays in full, whatever is selected. To put only part of a clip
+  into an arrangement, use **Save sel** and drag the new clip onto the track.
 - **Save selection as a new clip** — the **Save sel** button (or right-click →
   Save selection) slices the selection into a new clip you name (rename any time).
 - **Full-window clip editor.** Double-click a clip card (or right-click
@@ -64,14 +64,21 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   **Save sel** (save the selection as a new clip) or export.
 - **Undo/redo tree.** `Ctrl+Z` undoes anything. `Ctrl+Shift+Z` redoes — and when
   the history has branched, it pops up a menu of the redo branches with
-  descriptions so you can pick which future to walk into.
+  descriptions so you can pick which future to walk into. Selections are undoable
+  too: `Ctrl+Z` first walks back through the selections you've made since the last
+  edit, so a stray click that wipes a carefully-placed selection costs one
+  keystroke, and only once those run out does it undo the edit itself.
 - **Tracks & timeline.** The timeline sits on top (sized to just fit the current
   number of tracks) with the clip library below it. Start with one track, add as
   many as you like — once there are more tracks than fit, the tracks pane grows a
   **vertical scrollbar** (and the wheel over the track headers scrolls them), and
   adding a track scrolls it into view. Drag a clip card up onto a track to drop it
-  at any time offset; drag placed clips to move them. Clips **snap** to butt up
-  against neighbours and **can't overlap** on a track.
+  at any time offset; drag placed clips to move them. Clips **can't overlap** on a
+  track, and they **snap** to butt up flush against a neighbour — but only in the
+  direction that doesn't get in your way. Sliding *toward* a neighbour never pulls,
+  so you can leave a gap as small as you like; nudge *past* it and the clip lands
+  exactly flush and stays there until you drag properly clear. So flush placement
+  needs no aim, and every other position is still reachable.
 - **Prominent Play All** button plays every track together from the playhead.
 - **Per-clip and per-track volume.** Every card and every track header has a
   volume slider (0–200%). Gain is applied live to preview, timeline mixing, and
@@ -200,9 +207,11 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Seek within a clip | click the waveform |
 | Make a selection | drag across the waveform |
 | Adjust one selection edge | grab the left or right edge of an existing selection and drag it (cursor shows ↔); works on cards, the editor main view, and the fine-tune strips |
+| Cancel a drag in progress | `Esc` — abandons the drag and puts things back as they were when it started: a selection sweep or edge-nudge restores the previous selection, a clip drag drops nothing |
+| Undo a selection | `Ctrl+Z` steps back through the selections you have made since the last edit (and `Ctrl+Shift+Z` / `Ctrl+Y` forward again); once they run out it undoes the edit itself |
 | Open the full-window editor | **double-click** a clip card, or right-click → *Open in editor* |
 | Fine-tune selection edges | in the editor, drag the **Start edge** / **End edge** strip knobs (wheel over a strip to zoom); toggle with **Fine-tune edges** |
-| Close the full-window editor | `Esc` or the **Done** button |
+| Close the full-window editor | `Esc` (when no drag is in progress) or the **Done** button |
 | Crop / save a selection | **Crop** and **Save sel** buttons on the card while a selection is active |
 | Clip actions | **right-click a card**: play selection, save selection as new clip, crop, export clip / selection to a file, normalize, voice cleaner, remove non-voice, rename, delete, add to a track |
 | Rename a clip | right-click → Rename |
@@ -218,8 +227,10 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Apply a saved noise capture | right-click a card → *Voice cleaner → Apply noise capture ▸* and pick a recent capture |
 | Track actions | **right-click a track header/lane**: voice-clean the track, rename, remove |
 | Add a track | **+ Add Track** |
-| Place a clip on a track | drag a clip card up into a track lane (drops at any time offset, snaps to a neighbouring clip), or right-click → Add to timeline |
-| Move a placed clip | drag it along the track — a live ghost shows where it will land (snaps to neighbours; drag vertically to change tracks) |
+| Place a clip on a track | drag a clip card up into a track lane (drops at any time offset), or right-click → Add to timeline |
+| Move a placed clip | drag it along the track — a live ghost shows where it will land (drag vertically to change tracks) |
+| Butt a clip flush against a neighbour | drag it slightly *past* the neighbour's edge — it snaps flush and holds |
+| Leave a tiny gap instead | approach the neighbour without crossing it (no pull that way), or pull clear of a snap and come back |
 | Remove a placed clip | right-click it → Remove |
 | Set the playhead | click a track lane or the ruler |
 | Play all tracks | **▶ Play All** (`Space` when nothing is being previewed) |
