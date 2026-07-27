@@ -98,6 +98,16 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   switch the output to **Preview removed** to audition exactly what would be taken
   away. Same three scopes as the voice cleaner — this clip, every clip on one
   track (track-header right-click), or the whole project — each a single undo step.
+- **Clean / de-noise just part of a clip.** Drag a selection, then set **Range**
+  in the *Voice cleaner* or *Remove non-voice* dialog to **Only the selection**.
+  Everything outside it is left bit-for-bit untouched, with a short crossfade at
+  the edges so the join is inaudible. The effect still *analyses* the whole clip —
+  a few seconds of solid speech on its own gives an automatic noise estimator
+  nothing quiet to work from — so what lands inside the selection is exactly what
+  a whole-clip run would have put there. Handy for killing one door slam, or one
+  noisy passage, without touching the rest of the take. The option appears
+  whenever you're processing a single clip that has a selection on it; track- and
+  project-wide runs are always whole-clip.
 - **Reusable noise captures.** Each captured noise profile is remembered as a
   **recent capture** (its computed spectral profile — the per-capture work that's
   shared across every clip it cleans — is cached, so re-using it is instant). Any
@@ -165,6 +175,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Normalize volume | right-click a card → *Normalize to match other clips* / *Normalize all clips* |
 | Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |
 | Remove bumps / shuffling (keep only voice) | right-click a card → *Remove non-voice → This clip / All clips*, or right-click a track header → *Remove non-voice — this track* |
+| Clean / de-noise only part of a clip | drag a selection, open *Voice cleaner* or *Remove non-voice*, set **Range** to *Only the selection* |
 | Capture a noise profile | select a noise-only stretch, then right-click → *Voice cleaner → Capture noise from selection* (or the **Get noise profile** button in the dialog); or *Capture noise from whole clip*; or the **Capture noise** button in the full-window editor |
 | Apply a saved noise capture | right-click a card → *Voice cleaner → Apply noise capture ▸* and pick a recent capture |
 | Track actions | **right-click a track header/lane**: voice-clean the track, rename, remove |

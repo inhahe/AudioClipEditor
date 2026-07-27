@@ -192,6 +192,48 @@ step**. Menu ids `IDM_VOICEISO` / `IDM_VOICEISO_ALL` (clip menu submenu *Remove
 non-voice*) and `IDM_TRK_VOICEISO` (track header menu). A summary message box
 reports how much was silenced across how many voice segments.
 
+## Applying an effect to the selection only ("Range:")
+
+Both the voice cleaner and remove-non-voice can be limited to the current
+waveform selection instead of the whole clip. The shared pieces:
+
+- **`dlg::RangeOption`** (`dialogs.h`) — the in/out contract between the app and
+  either dialog: `offer` (show the rows at all), `hasSelection` (…and there is
+  one), `selectionDesc` (the range shown to the user), and `selectionOnly` (the
+  choice, in *and* out so the last answer can be pre-selected).
+- **`RangeRows`** (`dialogs.cpp`) — the two stacked radios ("The whole clip" /
+  "Only the selection (…)") plus the sizing hooks the dialogs need before any
+  control exists (`width`, `height`) and `commit()` to read the answer back.
+  Radios rather than a checkbox so the default is explicit; the second radio is
+  created disabled (with "— nothing is selected") when there's no selection, so
+  the feature stays discoverable instead of vanishing.
+- **`App::fillRangeOption(range, targets, lastChoice)`** (`ui.cpp`) — decides
+  what to offer. The rows appear **only for a single-clip scope**, and only that
+  clip's own selection counts, so a selection left on some *other* clip can never
+  silently narrow a track-wide or project-wide run. `App::rangeOnlySelection`
+  remembers the answer for the session, and is only updated when the choice was
+  genuinely available (`hasSelection`).
+- **`dsp::blendProcessedRange(original, processed, begin, end, blendMs)`** — does
+  the actual restriction. Returns a copy of `original` with `[begin, end)` taken
+  from `processed`, raised-cosine crossfaded over ~5 ms at each edge (capped at a
+  third of the range) so the join can't click.
+
+**The effect always runs over the whole clip and only the result is narrowed** —
+never "slice the selection out, process the slice, paste it back". This is the
+important design point: the auto NR algorithms estimate their noise floor from
+the quietest frames of whatever they're given, and voice detection needs the
+surrounding context, so a short slice analysed in isolation would produce a
+different and usually much worse result. Processing whole and keeping part means
+the audio inside the selection is exactly what a whole-clip run would have put
+there. The cost is that a two-second selection still pays for a whole-clip pass,
+which at ≈50× realtime is not worth optimising.
+
+`dsp::isolateVoice` takes optional `statsBegin`/`statsEnd` so its
+`VoiceIsolateStats` cover only the kept range — otherwise the confirmation
+message would quote whole-clip numbers for a selection-sized edit. The undo
+label and the summary message both say "the selection" / "(within the
+selection)" when the run was narrowed.
+
 ## Timeline: moving a placed clip (drag feedback)
 
 `Mode::ClipMove` (started in `onLDown` when `placedAt(p)` hits) drags a placed
@@ -353,6 +395,14 @@ rows, then compute the client height from that `y` and right-align the buttons
 at `contentW`. Intro paragraphs are stored as one flowing string and wrapped by
 `measure(text, contentW)`, so they can never clip mid-line.
 
+**Checking the layout**: `AudioClipEditor.exe --dialogtest N` (`main.cpp`) brings
+up one dialog over a dummy parent so it can be eyeballed / screenshotted at any
+DPI without loading a project — 1 = Remove Non-Voice, 2 = Voice Cleaner,
+3 = Save As, anything else = the text prompt. Append `sel` (e.g.
+`--dialogtest1sel`) to populate a fake selection and exercise the "Range:" rows.
+Because these dialogs size themselves from measured text, this is the only way to
+catch a layout regression short of running the real workflow.
+
 Voice Cleaner additionally **resizes per mode**: `VCState` caches `clientW`,
 `autoH`/`profH` and `autoBtnY`/`profBtnY`, and `vcUpdateVisibility(st, dlg)`
 moves Apply/Cancel and resizes the frame (again via `AdjustWindowRectExForDpi`)
@@ -390,6 +440,14 @@ library **sort-by-name / sort-by-time / reorder**, the unsaved-changes flag
 playhead does not dirty it), and the `BufferSource` sub-range behaviour the clip
 preview depends on (span, begin-relative seek/position, rendering from the seek
 point, stopping and draining at the range end).
+
+Selection-scoped processing (`dsp::blendProcessedRange`) is covered on the same
+synthetic signal: length / channel count preserved, audio outside the range
+**bit-identical** to the original, the processed result kept exactly inside the
+range past the crossfade edges, a non-voice event inside the range removed
+(−60 dB) while one outside is untouched (0.00 dB), empty and mismatched-buffer
+inputs rejected, and `isolateVoice`'s statistics following the requested range
+(a voice-free 0.6 s window reports 0 segments and 0.6 s removed).
 
 Voice-isolation coverage builds a synthetic 5.2 s signal — harmonic speech-like
 stretch (F0 140 Hz + 12 harmonics), a 60 Hz decaying thump, a broadband shuffle

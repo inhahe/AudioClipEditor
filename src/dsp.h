@@ -88,12 +88,36 @@ struct VoiceIsolateStats {
 // Returns a new buffer with non-voice attenuated (or, with `residue`, only the
 // removed material). Never returns nullptr for a non-empty buffer: audio too
 // short to analyse (< one 2048-frame window) is treated as all-voice.
+//
+// `statsBegin`/`statsEnd` restrict the *reported statistics* to a frame range
+// (default: the whole buffer); `statsEnd < 0` means "to the end". The processing
+// itself always covers the whole buffer — see blendProcessedRange for applying
+// the result to only part of a clip, which is what this range accompanies.
 AudioBufferPtr isolateVoice(const AudioBuffer& buf, const VoiceIsolateOptions& opts,
-                            VoiceIsolateStats* stats = nullptr);
+                            VoiceIsolateStats* stats = nullptr,
+                            int64_t statsBegin = 0, int64_t statsEnd = -1);
 
 // Frame-level voice mask, one flag per hop (frame f covers samples
 // [f*hop, f*hop + win)). Exposed for tests / future visualisation.
 std::vector<uint8_t> detectVoiceFrames(const AudioBuffer& buf, const VoiceIsolateOptions& opts,
                                        int* winOut = nullptr, int* hopOut = nullptr);
+
+// --- Applying an effect to only part of a clip ---
+// Returns a copy of `original` in which [begin, end) is taken from `processed`,
+// crossfaded over `blendMs` at each edge so the join between processed and
+// untouched audio can't click.
+//
+// `processed` must be the *whole-buffer* result of the effect. Running the
+// effect on the whole clip and then keeping only part of the result — rather
+// than slicing first and processing the slice — is deliberate: the auto noise
+// estimators pick their noise floor from the quietest frames and the voice
+// detector needs surrounding context, so a short slice analysed in isolation
+// would give a different (and usually much worse) result. This way the audio
+// inside the range is exactly what a whole-clip run would have produced there.
+//
+// Returns nullptr if the buffers disagree on length / channel count, or if the
+// range is empty after clamping.
+AudioBufferPtr blendProcessedRange(const AudioBuffer& original, const AudioBuffer& processed,
+                                   int64_t begin, int64_t end, float blendMs = 5.0f);
 
 } // namespace dsp

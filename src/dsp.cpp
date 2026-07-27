@@ -558,7 +558,7 @@ std::vector<uint8_t> detectVoiceFrames(const AudioBuffer& buf, const VoiceIsolat
 }
 
 AudioBufferPtr isolateVoice(const AudioBuffer& buf, const VoiceIsolateOptions& opts,
-                            VoiceIsolateStats* stats) {
+                            VoiceIsolateStats* stats, int64_t statsBegin, int64_t statsEnd) {
     const int ch = std::max(1, buf.channels);
     const int64_t nf = buf.frames();
     const int rate = buf.sampleRate > 0 ? buf.sampleRate : 48000;
@@ -597,12 +597,19 @@ AudioBufferPtr isolateVoice(const AudioBuffer& buf, const VoiceIsolateOptions& o
     const float g0 = (float)std::pow(10.0, -std::max(0.0f, opts.reductionDb) / 20.0);
     const int64_t fade = std::max<int64_t>(0, (int64_t)(std::max(0.0f, opts.fadeMs) * 0.001 * rate));
 
-    int64_t voiceFrames = 0;
-    for (auto& sg : segs) voiceFrames += sg.b - sg.a;
+    // Statistics are reported over [s0,s1) only — the whole buffer by default,
+    // or just the range the caller is going to keep (see blendProcessedRange).
     if (stats) {
-        stats->segments = (int)segs.size();
+        const int64_t s0 = std::max<int64_t>(0, statsBegin);
+        const int64_t s1 = std::max(s0, statsEnd < 0 ? nf : std::min(nf, statsEnd));
+        int64_t voiceFrames = 0, segCount = 0;
+        for (auto& sg : segs) {
+            const int64_t a = std::max(sg.a, s0), b = std::min(sg.b, s1);
+            if (b > a) { voiceFrames += b - a; ++segCount; }
+        }
+        stats->segments = (int)segCount;
         stats->voiceSeconds = (double)voiceFrames / rate;
-        stats->removedSeconds = (double)(nf - voiceFrames) / rate;
+        stats->removedSeconds = (double)((s1 - s0) - voiceFrames) / rate;
     }
 
     // Walk samples with a moving segment index; outside a segment the gain ramps
@@ -632,6 +639,38 @@ AudioBufferPtr isolateVoice(const AudioBuffer& buf, const VoiceIsolateOptions& o
         }
         if (opts.residue) g = 1.0f - g;
         for (int c = 0; c < ch; ++c) op[i * ch + c] = in[i * ch + c] * g;
+    }
+    return out;
+}
+
+// ---------------- applying a result to part of a clip ----------------
+
+AudioBufferPtr blendProcessedRange(const AudioBuffer& original, const AudioBuffer& processed,
+                                   int64_t begin, int64_t end, float blendMs) {
+    const int ch = original.channels;
+    const int64_t nf = original.frames();
+    if (ch <= 0 || processed.channels != ch || processed.frames() != nf) return nullptr;
+    begin = std::max<int64_t>(0, begin);
+    end   = std::min<int64_t>(nf, end);
+    if (end <= begin) return nullptr;
+
+    auto out = std::make_shared<AudioBuffer>(original);
+    const int rate = original.sampleRate > 0 ? original.sampleRate : 48000;
+    // Cap the ramp at a third of the range so even a very short selection keeps
+    // a symmetric fade at both edges instead of two overlapping ones.
+    int64_t fade = (int64_t)(std::max(0.0f, blendMs) * 0.001 * rate);
+    fade = std::min(fade, (end - begin) / 3);
+
+    for (int64_t i = begin; i < end; ++i) {
+        double w = 1.0;   // weight of the processed signal
+        if (fade > 0) {
+            const int64_t d = std::min(i - begin, end - 1 - i);
+            if (d < fade) w = 0.5 - 0.5 * std::cos(PI * (d + 0.5) / fade);
+        }
+        for (int c = 0; c < ch; ++c) {
+            const size_t k = (size_t)i * ch + c;
+            out->samples[k] = (float)(original.samples[k] * (1.0 - w) + processed.samples[k] * w);
+        }
     }
     return out;
 }
