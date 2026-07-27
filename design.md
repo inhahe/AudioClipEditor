@@ -20,6 +20,7 @@ sync with behavior changes.
 | `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms + voice isolation (see below) |
 | `waveform.{h,cpp}` | GDI oscilloscope: min/max envelope zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, file/project pickers |
+| `layout.h` | Pure drop geometry for the reflowing library grid (`insertIndex`, `caretAnchor`) — split out of `ui.cpp` so it is headlessly testable |
 | `ui.cpp` | The whole main window: `App` struct, layout, painting, hit-testing, menus, drag/drop, full-window clip editor |
 | `main.cpp` | `wWinMain` → `--selftest` or `runApp()` |
 | `selftest.cpp` | Headless `--selftest`: decode/encode round-trips, DSP checks, writes `bin/selftest.log` |
@@ -282,12 +283,30 @@ The clip library's display order **is** `Project::library`'s vector order
 - **Drag-reorder**: dragging a card by its title bar starts `Mode::CardDrag` (the
   same gesture as drag-to-track). Dropping inside `rcLibrary` (rather than on a
   track) calls `Document::moveClipInLibrary(clipId, libInsertIndex(p))`.
-  `libInsertIndex` returns a reading-order insertion index (earlier row, or same
-  row and left of a card's centre); `moveClipInLibrary` erases then re-inserts,
-  adjusting the target for the removal, and is a no-op (no undo step) when the drop
-  wouldn't change position. `paintLibrary` draws a live accent **insertion caret**
-  at the drop point and outlines the dragged card in accent; the cursor shows
-  `IDC_SIZEALL` over a drag handle / during a card drag.
+  `moveClipInLibrary` erases then re-inserts, adjusting the target for the removal,
+  and is a no-op (no undo step) when the drop wouldn't change position.
+  `paintLibrary` draws a live accent **insertion caret** at the drop point and
+  outlines the dragged card in accent; the cursor shows `IDC_SIZEALL` over a drag
+  handle / during a card drag.
+
+  The drop geometry itself lives in **`layout.h`** as pure functions of the
+  laid-out card rectangles, so it is regression-tested headlessly rather than only
+  by eye:
+
+  - `layout::insertIndex(cards, p)` — the reading-order index (a card precedes the
+    cursor if it's on an earlier row, or on the same row with its centre left of
+    the cursor; below every row appends).
+  - `layout::caretAnchor(cards, p, idx)` — which card the caret hangs off and on
+    which side. **A row boundary is one index but two places**: the empty tail of
+    one row and the head of the next both mean "insert at *i*". The caret used to
+    be drawn unconditionally at `cards[idx].left`, so aiming at the end of a row
+    made it jump down to the head of the next one and end-of-row drops looked
+    impossible. `caretAnchor` returns `{card, trailing}` and picks the *place* the
+    cursor is actually in, so the caret stays under the pointer.
+
+  Note the reflow consequence, which is inherent and not a bug: a clip dropped at
+  the tail of a full row lands at that index and therefore *renders* at the head of
+  the next row. The order is exactly what the caret promised.
 - **Sort**: right-clicking the empty library area (`onRDown` → `libraryContextMenu`)
   offers *Sort by name (A–Z)* and *Sort by time (oldest first)* →
   `Document::sortLibrary(byName)`. Name sort is case-insensitive (`_wcsicmp`) with
@@ -464,7 +483,11 @@ region by ≈20 dB (measured −20.00 dB) while preserving ≥70% of an embedded
 dispatch through `denoise()` incl. missing-profile rejection. Also covers a
 `Document` `.acep` **v3 round-trip** (library order, per-clip timestamps, and the
 saved selection + playhead preserved; a stale selection is dropped on load),
-library **sort-by-name / sort-by-time / reorder**, the unsaved-changes flag
+library **sort-by-name / sort-by-time / reorder**, the **library drop geometry**
+in `layout.h` (insertion index for each region of a reflowed 3-per-row grid, and
+the caret anchor for each — including the regression where a row's empty tail and
+the next row's head share an index but must draw different carets), the
+unsaved-changes flag
 (an edit or a selection change dirties the project, saving clears it, moving the
 playhead does not dirty it), and the `BufferSource` sub-range behaviour the clip
 preview depends on (span, begin-relative seek/position, rendering from the seek
