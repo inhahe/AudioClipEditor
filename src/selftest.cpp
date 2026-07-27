@@ -314,6 +314,62 @@ int runSelfTest() {
         DeleteFileW(proj.c_str());
     }
 
+    // clampSelection: the rule that decides whether a waveform selection survives an
+    // edit. It is only allowed to narrow a selection, never to discard one that still
+    // works -- removing a clip's placement from a track used to wipe the selection on
+    // the corresponding library clip even though its audio was untouched.
+    {
+        Document d; d.init(rate);
+        int keep = d.addClip(L"keep", makeSine(rate, 1.0, 300.0), L"", L"add");
+        int other = d.addClip(L"other", makeSine(rate, 1.0, 400.0), L"", L"add");
+        const int64_t nf = d.project().findClip(keep)->frames();
+        int trackId = d.project().tracks[0].id;
+        d.placeClip(trackId, other, 0, L"place");
+
+        // The reported bug: an edit elsewhere in the project leaves it alone.
+        int id = keep; int64_t s = 1000, e = 5000;
+        d.removePlaced(trackId, 0, L"remove placement");
+        clampSelection(d.project(), id, s, e);
+        check(id == keep && s == 1000 && e == 5000,
+              L"selection survives removing an unrelated placement",
+              L"clip=" + std::to_wstring(id) + L" " + std::to_wstring(s) +
+              L".." + std::to_wstring(e));
+
+        // Deleting a *different* clip likewise leaves it alone.
+        id = keep; s = 1000; e = 5000;
+        d.removeClip(other);
+        clampSelection(d.project(), id, s, e);
+        check(id == keep && s == 1000 && e == 5000,
+              L"selection survives deleting another clip");
+
+        // Deleting the clip it belongs to drops it.
+        id = keep; s = 1000; e = 5000;
+        Document d2; d2.init(rate);
+        int gone = d2.addClip(L"gone", makeSine(rate, 1.0, 300.0), L"", L"add");
+        id = gone;
+        d2.removeClip(gone);
+        clampSelection(d2.project(), id, s, e);
+        check(id == -1 && s == 0 && e == 0, L"selection dropped when its clip is deleted");
+
+        // A range running past the end of a shortened buffer is narrowed, not lost.
+        id = keep; s = nf - 100; e = nf + 5000;
+        clampSelection(d.project(), id, s, e);
+        check(id == keep && s == nf - 100 && e == nf,
+              L"selection past the buffer end is clamped, not dropped",
+              L"clip=" + std::to_wstring(id) + L" " + std::to_wstring(s) +
+              L".." + std::to_wstring(e) + L" (nf=" + std::to_wstring(nf) + L")");
+
+        // ...but one that survives as an empty range is dropped.
+        id = keep; s = nf + 10; e = nf + 20;
+        clampSelection(d.project(), id, s, e);
+        check(id == -1 && s == 0 && e == 0, L"selection entirely past the end is dropped");
+
+        // "No selection" stays that way.
+        id = -1; s = 0; e = 0;
+        clampSelection(d.project(), id, s, e);
+        check(id == -1 && s == 0 && e == 0, L"clampSelection leaves an empty selection alone");
+    }
+
     // Library drop geometry (layout.h): a 5-card grid reflowed 3-per-row.
     //   row 0: [0][1][2]   x = 0,100,200   y = 0..80
     //   row 1: [3][4]      x = 0,100       y = 100..180

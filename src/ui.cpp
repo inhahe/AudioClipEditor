@@ -1753,7 +1753,7 @@ struct App {
     }
 
     // --------------------------------------------------------- undo / redo
-    void doUndo() { if (doc.canUndo()) { syncSelectionAfterEdit(); doc.undo(); afterHistory(); } }
+    void doUndo() { if (doc.canUndo()) { doc.undo(); afterHistory(); } }
     void doRedo() {
         if (!doc.canRedo()) return;
         int branch = doc.defaultRedoBranch();
@@ -1768,13 +1768,21 @@ struct App {
         }
         doc.redo(branch); afterHistory();
     }
-    void syncSelectionAfterEdit() {}
+    // Called after an edit that may have replaced or removed clips: undo / redo, or
+    // deleting a clip, a track, or a clip's placement on a track.
     void afterHistory() {
-        // invalidate playback that may reference stale buffers
-        stopAll();
-        selClipId = -1; selStart = selEnd = 0;
+        stopAll();            // playback may reference buffers this edit replaced
+        validateSelection();
         clampScroll(); refresh();
     }
+
+    // Keep the waveform selection across such an edit unless it can no longer be
+    // honoured. Most of these edits don't touch the selected clip's audio at all --
+    // removing a clip's placement from a track leaves the library clip untouched --
+    // and a selection is something the user positioned by hand, so throwing it away
+    // as a blanket precaution loses their work for no reason. `clampSelection` is
+    // the same rule a loaded project's selection goes through.
+    void validateSelection() { clampSelection(doc.project(), selClipId, selStart, selEnd); }
 
     // --------------------------------------------------------- scroll
     // Vertical scrollbar for the tracks pane. Returns false when all tracks fit
@@ -2296,7 +2304,6 @@ struct App {
             else playAll();
             return;
         }
-        if (k == VK_DELETE && selClipId < 0 && previewClipId >= 0) { }
     }
 
     void onWheel(POINT p, int delta, bool ctrl, bool shift) {

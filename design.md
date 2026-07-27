@@ -343,9 +343,31 @@ alongside — deliberately **not inside** — `Project`:
 - `.acep` **format v3** appends the block (`selClipId`, `selStart`, `selEnd`,
   `playheadFrame`) **after the tracks**, so the older sections parse identically;
   v1/v2 files simply load with a default (empty) view state.
-- `Document::loadProject` validates on the way in: a selection whose clip is gone,
-  or whose bounds fall outside the clip (e.g. the clip was cropped in another
+
+### Surviving edits: `clampSelection`
+
+A selection is positioned by hand, so it is only ever **narrowed**, never thrown
+away as a blanket precaution. `clampSelection(project, clipId, start, end)`
+(`document.{h,cpp}`) is the single rule: clamp the bounds to the clip's current
+length, and drop the selection (`clipId = -1`, bounds zeroed) only when nothing
+of it survives — the clip is gone, or the range no longer overlaps any audio.
+
+Both places that can invalidate a selection go through it, so the two cannot
+drift apart:
+
+- `Document::loadProject` validates on the way in — a selection whose clip is
+  gone, or whose bounds fall outside the clip (e.g. it was cropped in another
   session), is dropped rather than restored as a bogus highlight.
+- `App::validateSelection()`, called from `App::afterHistory()` — the common tail
+  of undo, redo, removing a clip, removing a track and removing a clip's
+  *placement* from a track. This used to clear the selection outright, which is
+  the bug where removing a clip from the timeline silently wiped the selection on
+  the corresponding **library** clip: that edit doesn't touch the clip's audio at
+  all, so there was nothing to invalidate.
+
+Validating (rather than restoring from `ViewState`) is the right move after
+undo/redo precisely because `ViewState` sits outside the undo tree — there is no
+older selection to roll back to, only the live one to check.
 
 ## Clip preview playback (cursor, play/pause, seeking)
 
@@ -486,8 +508,11 @@ saved selection + playhead preserved; a stale selection is dropped on load),
 library **sort-by-name / sort-by-time / reorder**, the **library drop geometry**
 in `layout.h` (insertion index for each region of a reflowed 3-per-row grid, and
 the caret anchor for each — including the regression where a row's empty tail and
-the next row's head share an index but must draw different carets), the
-unsaved-changes flag
+the next row's head share an index but must draw different carets),
+**`clampSelection`** (a selection survives removing an unrelated placement or
+deleting a different clip — the reported bug — is clamped rather than dropped
+when it merely runs past a shortened buffer, and is dropped only when its clip is
+gone or it lies entirely past the end), the unsaved-changes flag
 (an edit or a selection change dirties the project, saving clears it, moving the
 playhead does not dirty it), and the `BufferSource` sub-range behaviour the clip
 preview depends on (span, begin-relative seek/position, rendering from the seek
