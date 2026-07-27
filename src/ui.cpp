@@ -52,6 +52,7 @@ enum {
     IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE, IDM_DENOISE_SEL, IDM_DENOISE_ALL,
     IDM_GETPROFILE, IDM_GETPROFILE_CLIP,
     IDM_VOICEISO, IDM_VOICEISO_SEL, IDM_VOICEISO_ALL,
+    IDM_EXPORTCLIP, IDM_EXPORTSEL,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE, IDM_TRK_VOICEISO,
@@ -1698,6 +1699,40 @@ struct App {
         if (!ok) MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING);
     }
 
+    // Write one library clip -- or just the waveform selection inside it -- out as
+    // a new audio file. This is an *export*, not a save-over: the clip, the
+    // project and the original source file are all left untouched, since edits
+    // live in the .acep and the source on disk is never written to.
+    void exportClipAudio(int clipId, bool selectionOnly) {
+        const Clip* c = doc.project().findClip(clipId);
+        if (!c || !c->buffer || c->buffer->frames() == 0) {
+            MessageBoxW(hwnd, L"This clip has no audio to export.", L"Export clip", MB_ICONINFORMATION);
+            return;
+        }
+        if (selectionOnly && !selectionCovers(clipId)) return;
+        AudioBufferPtr buf = selectionOnly ? sliceBuffer(*c->buffer, selStart, selEnd) : c->buffer;
+        if (!buf || buf->frames() == 0) {
+            MessageBoxW(hwnd, L"The selection is empty.", L"Export selection", MB_ICONINFORMATION);
+            return;
+        }
+        // Default to the clip's own rate and channel count so a plain "export"
+        // doesn't quietly resample or upmix a mono take; the dialog can override.
+        mfio::ExportOptions o;
+        o.sampleRate = buf->sampleRate > 0 ? buf->sampleRate : rate;
+        o.channels = buf->channels >= 2 ? 2 : 1;
+        o.format = mfio::ExportFormat::WAV;
+        o.bitsPerSample = 24;
+        o.bitrateKbps = 192;
+        std::wstring outPath;
+        const std::wstring suggested =
+            mfio::safeFileName(c->name) + (selectionOnly ? L" (selection)" : L"");
+        if (!dlg::exportOptions(hwnd, o, outPath, suggested)) return;
+        HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+        std::wstring err; bool ok = mfio::encodeFile(outPath, *buf, o, &err);
+        SetCursor(old);
+        if (!ok) MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING);
+    }
+
     void showControls() {
         MessageBoxW(hwnd,
             L"Library clips:\n"
@@ -2136,6 +2171,14 @@ struct App {
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_CROP, L"Crop to selection\u2026");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_CLEARSEL, L"Clear selection");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        // Writing audio back out. Edits only ever live in the .acep, so this is
+        // the one way to get an edited clip out as a file; "Save selection as new
+        // clip" above is its in-project counterpart. Greyed like the other
+        // selection entries so the option reads as available before there is one.
+        AppendMenuW(m, MF_STRING, IDM_EXPORTCLIP, L"Export clip to file\u2026");
+        AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_EXPORTSEL,
+                    L"Export selection to file\u2026");
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         // add-to-timeline submenu
         HMENU sub = CreatePopupMenu();
         auto& tracks = doc.project().tracks;
@@ -2192,6 +2235,8 @@ struct App {
         else if (cmd == IDM_SAVESEL) { selClipId = clipId; saveSelectionAsClip(); }
         else if (cmd == IDM_CROP) { selClipId = clipId; cropSelection(); }
         else if (cmd == IDM_CLEARSEL) { selClipId = -1; selStart = selEnd = 0; refresh(); }
+        else if (cmd == IDM_EXPORTCLIP) exportClipAudio(clipId, false);
+        else if (cmd == IDM_EXPORTSEL) exportClipAudio(clipId, true);
         else if (cmd == IDM_NORM_MATCH) normalizeClip(clipId, false);
         else if (cmd == IDM_NORM_ALL) normalizeClip(clipId, true);
         else if (cmd == IDM_DENOISE) voiceCleanClip(clipId);

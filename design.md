@@ -331,6 +331,32 @@ The clip library's display order **is** `Project::library`'s vector order
   v2**); loading a v1 project falls back to the source file's current mtime so
   time-sort still works.
 
+## Getting audio back out (export)
+
+Edits are **non-destructive to the source file**. `Document::replaceClipBuffer(s)`
+only swaps the in-memory buffer, rebuilds peaks and re-syncs placement lengths;
+`Clip::sourcePath` is never opened for writing (it is read only for the
+sort-by-time mtime). The edited audio therefore lives solely in the `.acep`,
+which embeds raw float samples — so the only ways out are:
+
+- **`App::exportMix()`** — *File → Export Mixdown*: `Document::renderMix()` of all
+  tracks, defaults to the project rate and stereo.
+- **`App::exportClipAudio(clipId, selectionOnly)`** — clip menu *Export clip to
+  file…* / *Export selection to file…* (`IDM_EXPORTCLIP` / `IDM_EXPORTSEL`, the
+  latter greyed via the same `sel` flag as the other selection entries). Uses
+  `sliceBuffer` for the selection case and defaults to the **clip's own** rate and
+  channel count, so a plain export neither resamples nor upmixes a mono take.
+
+Both go through `dlg::exportOptions` → `mfio::encodeFile`. The suggested file name
+passes through **`mfio::safeFileName`** because a clip name is free text but is
+dropped straight into `GetSaveFileNameW`'s buffer: path-illegal characters become
+`_`, and leading/trailing spaces and trailing dots are stripped (Windows discards
+those silently, so the file would land under a different name than the dialog
+showed). A name that sanitises away to nothing falls back to `clip`.
+
+Neither export touches the project: exporting is not a save, and does not clear
+the unsaved-changes flag.
+
 ## Project view state (selection + playhead persistence)
 
 The waveform selection (`selClipId`/`selStart`/`selEnd`) and the playhead are
@@ -530,6 +556,11 @@ gone or it lies entirely past the end), the unsaved-changes flag
 playhead does not dirty it), and the `BufferSource` sub-range behaviour the clip
 preview depends on (span, begin-relative seek/position, rendering from the seek
 point, stopping and draining at the range end).
+
+`mfio::safeFileName` is covered directly (clean names untouched, path-illegal
+characters substituted, leading/trailing blanks and trailing dots stripped, and
+the fallback for a name that sanitises away to nothing) — it lives in `encoder.h`
+rather than `ui.cpp` precisely so it can be.
 
 Voice isolation is checked against a synthetic take with a bump **150 ms after
 the speech** as well as an isolated one: both must be removed (measured −21.0 dB

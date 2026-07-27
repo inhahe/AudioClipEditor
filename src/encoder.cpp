@@ -35,6 +35,17 @@ const wchar_t* labelFor(ExportFormat f) {
     return L"WAV";
 }
 
+std::wstring safeFileName(const std::wstring& s, const std::wstring& fallback) {
+    std::wstring out;
+    for (wchar_t c : s)
+        out += (c < 32 || wcschr(L"\\/:*?\"<>|", c)) ? L'_' : c;
+    while (!out.empty() && (out.back() == L'.' || out.back() == L' ')) out.pop_back();
+    // Leading blanks are legal but produce a file that looks misnamed everywhere.
+    const size_t b = out.find_first_not_of(L' ');
+    if (b == std::wstring::npos) return fallback;
+    return out.substr(b);
+}
+
 // Linear-resample a canonical float buffer to dstRate (keeps channel count).
 // Returns the original data unchanged when the rate already matches.
 static AudioBufferPtr resampleTo(const AudioBuffer& buf, int dstRate) {

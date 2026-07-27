@@ -128,6 +128,14 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   title bar shows a `*` while there are unsaved changes, and the app **prompts you
   to save** (Save / Don't Save / Cancel) before closing or opening another project
   if the current one has unsaved edits — so you never lose work by accident.
+- **Export a single clip, or just the selection.** Right-click a clip card →
+  *Export clip to file…* or *Export selection to file…*, which opens the same
+  audio dialog as the mixdown. Edits live in the project file and the original
+  source file on disk is **never written to**, so this is how you get an edited
+  (cleaned, normalized, cropped) clip back out as audio. The defaults follow the
+  clip — its own sample rate, and a mono clip stays mono. (*Save selection as new
+  clip* is the in-project counterpart: it adds a clip to the library rather than
+  writing a file.)
 - **Export the mixdown.** *File → Export Mixdown* renders all tracks together and
   saves through the same audio dialog — pick **format, sample rate, bit depth**
   (16/24-bit PCM or 32-bit float for WAV), **bitrate** (compressed formats), and
@@ -169,7 +177,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Fine-tune selection edges | in the editor, drag the **Start edge** / **End edge** strip knobs (wheel over a strip to zoom); toggle with **Fine-tune edges** |
 | Close the full-window editor | `Esc` or the **Done** button |
 | Crop / save a selection | **Crop** and **Save sel** buttons on the card while a selection is active |
-| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, normalize, voice cleaner, remove non-voice, rename, delete, add to a track |
+| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, export clip / selection to a file, normalize, voice cleaner, remove non-voice, rename, delete, add to a track |
 | Rename a clip | right-click → Rename |
 | Reorder clips | drag a card by its title bar to a new spot in the library (caret shows the drop point) |
 | Sort clips | right-click the empty library area → *Sort clips by name* / *by time* |

@@ -595,6 +595,26 @@ int runSelfTest() {
         }
     }
 
+    // Clip names are free text but get offered as the default export file name.
+    {
+        auto sfn = [](const wchar_t* s) { return mfio::safeFileName(s); };
+        check(sfn(L"take 2") == L"take 2", L"safeFileName leaves a clean name alone",
+              sfn(L"take 2"));
+        check(sfn(L"re: take 2/3 <best?>") == L"re_ take 2_3 _best__",
+              L"safeFileName replaces path-illegal characters", sfn(L"re: take 2/3 <best?>"));
+        // Windows drops these silently, so the file would not match the dialog.
+        check(sfn(L"take 2. ") == L"take 2", L"safeFileName drops trailing dots and spaces",
+              L"[" + sfn(L"take 2. ") + L"]");
+        check(sfn(L"  take 2") == L"take 2", L"safeFileName drops leading spaces",
+              L"[" + sfn(L"  take 2") + L"]");
+        // Illegal characters still leave a usable name; only a name that sanitises
+        // away to nothing falls back.
+        check(sfn(L"???") == L"___", L"safeFileName keeps a fully-substituted name",
+              sfn(L"???"));
+        check(sfn(L"") == L"clip" && sfn(L"...") == L"clip" && sfn(L"   ") == L"clip",
+              L"safeFileName never returns an empty name", sfn(L"..."));
+    }
+
     // A bump next to speech must be removed just like one in the middle of a
     // silence. The gate's pre-roll / hold / gap-merge used to protect it, so a
     // take whose bumps cluster around the speech -- the normal case, and exactly
