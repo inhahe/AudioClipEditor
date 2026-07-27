@@ -21,6 +21,7 @@ sync with behavior changes.
 | `waveform.{h,cpp}` | GDI oscilloscope: per-column min/max envelope (one `PolyPolyline`) zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, file/project pickers |
 | `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`) and toolbar row wrapping (`flowButtons`) |
+| `transport.h` | Pure play/pause decision logic, likewise split out to be testable: `decide(State, Press)` → pause / resume / restart-from-where, for both the single combined control and the editor's labelled button pair |
 | `ui.cpp` | The whole main window: `App` struct, layout, painting, hit-testing, menus, drag/drop, full-window clip editor |
 | `main.cpp` | `wWinMain` → `--selftest` or `runApp()` |
 | `selftest.cpp` | Headless `--selftest`: decode/encode round-trips, DSP checks, writes `bin/selftest.log` |
@@ -488,15 +489,12 @@ Three functions own all of it:
   chosen range and starts it at `startFrame - previewBegin` (the source's
   `seek`/`position` are begin-relative). A start frame outside the range snaps to
   the range start, which is what makes "play again after it finished" restart.
-- **`togglePreview(clipId, useSel)`** is the play/pause button for both the
-  library card (`togglePlayClip` → `useSel = true`, so the button auditions the
-  selection when there is one) and the clip editor (`EB_PLAY` → whole clip,
-  `EB_PLAYSEL` → selection). Two rules keep it predictable: **any playing preview
-  of this clip pauses**, whichever button was pressed (so the pause button really
-  pauses a selection audition instead of restarting it), and **resume happens in
-  place only when the armed source still matches** what was asked for
-  (same clip, same range) and no seek is pending — otherwise it re-arms at
-  `previewCursor`.
+- **`togglePreview(clipId, useSel, ownRangeOnly)`** is the play/pause button for
+  both the library card (`togglePlayClip` → `useSel = true`, so the button
+  auditions the selection when there is one) and the clip editor (`EB_PLAY` →
+  whole clip, `EB_PLAYSEL` → selection). It is a thin translation layer: the
+  decision is `transport::decide` (see below), and this just applies the result
+  to the engine.
 - **`seekClip(clipId, frame)`** moves the cursor. While playing it re-arms
   immediately (staying inside the selection audition only while the target is
   still within it); while stopped or paused it just records `previewCursor` and
@@ -508,6 +506,45 @@ parks it at `previewEnd` — neither reads the live selection, so editing the
 selection mid-playback can't drag the cursor around. `stopAll()` clears the whole
 block. The selftest covers the `BufferSource` sub-range arithmetic these rely on
 (begin-relative seek/position and stopping at the range end).
+
+### Which control does what — `transport::decide` (`transport.h`)
+
+A clip can be auditioned over two ranges (whole clip / selection) and there are
+two *kinds* of control, which is what makes the rule subtle enough to be worth
+isolating. `transport.h` is pure logic — no Win32, no engine — so the whole truth
+table is regression-tested headlessly. `decide(State, Press)` returns a `Plan`:
+`Act::Pause | Resume | Restart`, plus `From::Cursor | SelStart | ClipStart` for
+where a restart begins.
+
+- **`ownRangeOnly = false` — a single combined control** (the library card's
+  play/pause button, the Space key). It stands for *whatever* is playing, so it
+  pauses any running preview of the clip. Without this its pause button would
+  restart a selection audition instead of pausing it.
+- **`ownRangeOnly = true` — one of a labelled pair** (the editor's **Play** and
+  **Play selection**). Each speaks for one range: it pauses only what *it*
+  started, and pressing it while the *other* range is playing switches playback
+  to itself. The editor's two buttons therefore each show `❚❚ Pause` / `❚❚ Pause
+  selection` only while their own range runs.
+
+  This is the fix for a reported bug: both buttons used to share the combined
+  rule, so pressing **Play selection** flipped the neighbouring **Play** button to
+  Pause — a button the user had not pressed appeared to react. The paint code
+  matches: `playingSel`/`playingAll` are derived from `previewIsSel`, and the
+  accent colour now marks *a transport that can be started*, so **Play selection**
+  is accented whenever a selection exists rather than being permanently grey while
+  **Play** was permanently green.
+
+- **Resume happens in place only when the armed source still matches** what was
+  asked for (same clip, same range) and no seek is pending — otherwise it re-arms.
+  A moved selection edge counts as a different range and re-arms at the new head.
+
+`EB_PLAYSEL`'s width in `computeEditorLayout` is sized for its **widest**
+alternate (`Pause selection`), because resizing a button the instant playback
+starts would re-flow the whole toolbar under the cursor. Since labels and widths
+are declared in different places and `button()` draws with `DT_CENTER` and no
+ellipsis (a too-long label is silently clipped at both ends), the selftest
+measures every toolbar label — including every alternate a button swaps to — with
+the real Segoe UI font at 100% and 150% and asserts each fits with ≥6 px spare.
 
 ## Playhead accuracy and smoothness
 
@@ -683,6 +720,14 @@ gone or it lies entirely past the end), the unsaved-changes flag
 playhead does not dirty it), and the `BufferSource` sub-range behaviour the clip
 preview depends on (span, begin-relative seek/position, rendering from the seek
 point, stopping and draining at the range end).
+
+**The preview transport** (`transport::decide`) is covered as a truth table: each
+editor button pauses only its own range and *switches* playback rather than
+pausing when the other range is running (the reported bug), the single combined
+control still pauses either range, pressing the same button again resumes in
+place instead of jumping to the range start, a pending seek forces a re-arm, a
+moved selection edge re-arms at the new head, and an unrelated clip / timeline
+playback start fresh.
 
 **Waveform rendering is tested off-screen.** `wf::draw` is GDI, but it draws into
 whatever DC it is given, so a `CreateDIBSection` (32bpp `BI_RGB`, negative

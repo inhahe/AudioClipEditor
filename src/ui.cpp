@@ -7,6 +7,7 @@
 #include "dialogs.h"
 #include "dsp.h"
 #include "layout.h"
+#include "transport.h"
 #include <commctrl.h>
 #include <shlwapi.h>
 #include <windowsx.h>
@@ -326,8 +327,10 @@ struct App {
     // ----- editor interaction ------------------------------------------------
     void edButton(int id) {
         switch (id) {
-        case EB_PLAY: togglePreview(editClipId, false); break;   // whole clip
-        case EB_PLAYSEL: if (hasSel() && selClipId == editClipId) togglePreview(editClipId, true); break;
+        // Each transport button owns its own range: it pauses only what it
+        // started, and switches playback to itself when the other one is running.
+        case EB_PLAY: togglePreview(editClipId, false, true); break;   // whole clip
+        case EB_PLAYSEL: if (hasSel() && selClipId == editClipId) togglePreview(editClipId, true, true); break;
         case EB_FINE: editFineToggle = !editFineToggle; break;
         case EB_CROP: if (hasSel() && selClipId == editClipId) cropSelection(); break;
         case EB_SILENCE: removeSelectedRange(editClipId, true); break;
@@ -464,7 +467,10 @@ struct App {
         // separates transport from the edit actions.
         static const int order[] = { EB_PLAY, EB_PLAYSEL, EB_FINE, EB_NONE, EB_CROP,
                                      EB_SILENCE, EB_DELSEL, EB_SAVE, EB_CAPTURE, EB_CLEAR };
-        const std::vector<int> widths = { S(96), S(120), S(150), -S(16), S(120),
+        // EB_PLAYSEL is sized for its *widest* label, "Pause selection", so the
+        // button doesn't have to resize (and re-flow the whole toolbar under the
+        // cursor) the moment playback starts.
+        const std::vector<int> widths = { S(96), S(140), S(150), -S(16), S(120),
                                           S(130), S(130), S(150), S(150), S(120) };
         auto f = layout::flowButtons(widths, pad, by, bh, gap, avail, S(10));
         for (size_t i = 0; i < widths.size(); ++i)
@@ -622,10 +628,21 @@ struct App {
         // toolbar
         RECT top = { 0, 0, client.right, edToolbarH };
         fill(h, top, col::transport);
-        bool playing = (previewClipId == editClipId) && engine.isPlaying();
-        button(h, edBtn[EB_PLAY],    playing ? L"\u275A\u275A Pause" : L"\u25B6 Play",
+        // Two independent transports, so each button reports its own state. The
+        // one that is running shows Pause; the accent marks a transport that can
+        // be started, which for "Play selection" means only when a selection
+        // exists. (It used to be Play alone that was accented and Play selection
+        // that was always grey, even when both were equally clickable -- and a
+        // selection audition flipped *Play* to Pause, i.e. a button the user had
+        // not pressed.)
+        bool playing = previewClipId == editClipId && !timelinePlaying && engine.isPlaying();
+        bool playingSel = playing && previewIsSel;
+        bool playingAll = playing && !previewIsSel;
+        button(h, edBtn[EB_PLAY],    playingAll ? L"\u275A\u275A Pause" : L"\u25B6 Play",
                col::accentDk, col::text, edHot == EB_PLAY, fNorm);
-        button(h, edBtn[EB_PLAYSEL], L"\u25B6 Play selection", col::btn,
+        button(h, edBtn[EB_PLAYSEL], playingSel ? L"\u275A\u275A Pause selection"
+                                                : L"\u25B6 Play selection",
+               sel ? col::accentDk : col::btn,
                sel ? col::text : col::dim, edHot == EB_PLAYSEL, fNorm);
         bool fineOn = editFineNeeded();
         button(h, edBtn[EB_FINE], fineOn ? L"\u2713 Fine-tune edges" : L"Fine-tune edges",
@@ -1179,30 +1196,37 @@ struct App {
     }
 
     // Play / pause a clip preview. `useSel` asks for the selection-only audition;
-    // it is ignored when the clip has no selection.
+    // it is ignored when the clip has no selection. `ownRangeOnly` marks a control
+    // that speaks for one range only (the editor's button pair) as opposed to one
+    // that stands for whatever is playing (the card, the Space key).
     //
-    // Two rules make this predictable:
-    //   * any *playing* preview of this clip pauses, whichever button was pressed
-    //     (so the pause button really pauses a selection audition), and
-    //   * play/resume always starts at previewCursor, so a click on the waveform
-    //     while paused or stopped moves where playback picks up.
-    void togglePreview(int clipId, bool useSel) {
-        if (previewClipId == clipId && !timelinePlaying && engine.isPlaying()) {
-            engine.pause(); refresh(); return;
+    // The decision itself lives in transport::decide so it can be tested headlessly;
+    // this is just the translation to and from the engine. Play/resume always
+    // starts at previewCursor, so clicking the waveform while paused or stopped
+    // moves where playback picks up.
+    void togglePreview(int clipId, bool useSel, bool ownRangeOnly = false) {
+        transport::State st;
+        st.clipId = previewClipId; st.isSel = previewIsSel;
+        st.begin = previewBegin;   st.end = previewEnd;
+        st.playing = engine.isPlaying(); st.paused = engine.isPaused();
+        st.seekPending = previewSeekPending; st.timeline = timelinePlaying;
+
+        transport::Press pr;
+        pr.clipId = clipId;
+        pr.wantSel = useSel && hasSel() && selClipId == clipId;
+        pr.ownRangeOnly = ownRangeOnly;
+        pr.selBegin = selStart; pr.selEnd = selEnd;
+
+        transport::Plan plan = transport::decide(st, pr);
+        switch (plan.act) {
+        case transport::Act::Pause:  engine.pause();  refresh(); return;
+        case transport::Act::Resume: engine.resume(); refresh(); return;
+        case transport::Act::Restart: break;
         }
-        const bool wantSel = useSel && hasSel() && selClipId == clipId;
-        // Same clip, same audition range as the armed source => this is a resume.
-        const bool sameSource = previewClipId == clipId && !timelinePlaying &&
-                                previewIsSel == wantSel &&
-                                (!wantSel || (previewBegin == selStart && previewEnd == selEnd));
-        if (sameSource && engine.isPaused() && !previewSeekPending) {
-            engine.resume(); refresh(); return;    // continue exactly where it stopped
-        }
-        // Otherwise start where the cursor sits; a fresh selection audition begins
-        // at the selection start, and an unrelated clip begins at its head.
-        const int64_t from = wantSel ? (sameSource ? previewCursor : selStart)
-                                     : (previewClipId == clipId ? previewCursor : 0);
-        startPreview(clipId, from, wantSel);
+        const int64_t from = plan.from == transport::From::Cursor   ? previewCursor
+                           : plan.from == transport::From::SelStart ? selStart
+                                                                    : 0;
+        startPreview(clipId, from, pr.wantSel);
     }
     // The library card's play button auditions the selection when there is one.
     void togglePlayClip(int clipId) { togglePreview(clipId, true); }
@@ -2402,7 +2426,14 @@ struct App {
         bool shift = GetKeyState(VK_SHIFT) & 0x8000;
         if (editorActive()) {
             if (k == VK_ESCAPE) { closeClipEditor(); return; }
-            if (k == VK_SPACE) { edButton(EB_PLAY); return; }
+            // Space is the universal play/pause, not a third transport: it acts
+            // on whatever is armed (so it resumes a paused selection audition as
+            // a selection audition) and pauses anything playing, rather than
+            // taking over as a whole-clip play the way the Play button would.
+            if (k == VK_SPACE) {
+                togglePreview(editClipId, previewClipId == editClipId && previewIsSel, false);
+                return;
+            }
             if (ctrl && (k == 'Z')) { if (shift) doRedo(); else doUndo(); return; }
             return;
         }

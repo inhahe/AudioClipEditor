@@ -8,6 +8,7 @@
 #include "document.h"
 #include "engine.h"
 #include "layout.h"
+#include "transport.h"
 #include "waveform.h"
 #include <windows.h>
 #include <shlwapi.h>
@@ -816,7 +817,7 @@ int runSelfTest() {
         // the way S() would. The negative entry is the transport/edit group gap.
         auto toolbar = [](float sc, int winW) {
             auto S = [&](int v) { return (int)(v * sc + 0.5f); };
-            const std::vector<int> w = { S(96), S(120), S(150), -S(16), S(120),
+            const std::vector<int> w = { S(96), S(140), S(150), -S(16), S(120),
                                          S(130), S(130), S(150), S(150), S(120) };
             const int pad = S(16), doneW = S(96);
             const int avail = std::max(S(200), winW - pad - doneW - S(16));
@@ -854,6 +855,130 @@ int runSelfTest() {
         check(everyPlaced, L"editor toolbar: every button is placed even when very narrow");
         check(tiny.rows > 2, L"editor toolbar: keeps wrapping when very narrow",
               std::to_wstring(tiny.rows));
+
+        // The labels and the widths above are declared in different places, so
+        // they can drift -- and the buttons draw with DT_CENTER and no ellipsis,
+        // so a label that outgrows its width is silently clipped at both ends.
+        // Measure every label, including the alternates a button swaps to while
+        // playing or toggled, with the real UI font at both 100% and 150%.
+        //
+        // The transport buttons are sized for their *widest* alternate on purpose:
+        // resizing a button the moment playback starts would re-flow the whole
+        // toolbar under the user's cursor.
+        struct Lbl { size_t idx; const wchar_t* text; };
+        static const Lbl labels[] = {
+            { 0, L"\u25B6 Play" }, { 0, L"\u275A\u275A Pause" },
+            { 1, L"\u25B6 Play selection" }, { 1, L"\u275A\u275A Pause selection" },
+            { 2, L"Fine-tune edges" }, { 2, L"\u2713 Fine-tune edges" },
+            { 4, L"Crop to selection\u2026" },
+            { 5, L"Silence selection" }, { 6, L"Delete selection" },
+            { 7, L"Save selection as clip" },
+            { 8, L"Capture noise (sel)" }, { 8, L"Capture noise (clip)" },
+            { 9, L"Clear selection" },
+        };
+        for (float sc : { 1.0f, 1.5f }) {
+            auto S = [&](int v) { return (int)(v * sc + 0.5f); };
+            const std::vector<int> w = { S(96), S(140), S(150), -S(16), S(120),
+                                         S(130), S(130), S(150), S(150), S(120) };
+            HDC sdc = GetDC(nullptr);
+            HFONT f = CreateFontW(-S(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                                  OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                  VARIABLE_PITCH, L"Segoe UI");
+            HGDIOBJ of = SelectObject(sdc, f);
+            std::wstring worst; int worstOver = -100000;
+            for (const Lbl& l : labels) {
+                SIZE sz{};
+                GetTextExtentPoint32W(sdc, l.text, (int)wcslen(l.text), &sz);
+                int over = sz.cx - w[l.idx];
+                if (over > worstOver) { worstOver = over; worst = l.text; }
+            }
+            SelectObject(sdc, of); DeleteObject(f); ReleaseDC(nullptr, sdc);
+            // A few px of breathing room, since the button also draws a rounded edge.
+            check(worstOver <= -6,
+                  std::wstring(L"editor toolbar: every label fits its button at ") +
+                      (sc == 1.0f ? L"100%" : L"150%") + L" DPI",
+                  L"tightest \"" + worst + L"\" with " + std::to_wstring(-worstOver) + L" px spare");
+        }
+    }
+
+    // ---- preview transport (which control does what to the engine)
+    //
+    // transport::decide is what stands behind the play/pause buttons. The reported
+    // bug was that pressing the editor's "Play selection" turned the neighbouring
+    // "Play" into Pause -- both buttons shared one rule, so a selection audition
+    // was indistinguishable from a whole-clip play. The two-button case is now
+    // ownRangeOnly, and these checks pin both callers' behaviour down.
+    {
+        using namespace transport;
+        const int C = 7;                 // the clip under the buttons
+        const int64_t SB = 1000, SE = 5000;   // its selection
+
+        auto armed = [&](bool isSel, bool playing) {
+            State s; s.clipId = C; s.isSel = isSel;
+            s.begin = isSel ? SB : 0; s.end = isSel ? SE : 20000;
+            s.playing = playing; s.paused = !playing;
+            return s;
+        };
+        auto press = [&](bool wantSel, bool ownRangeOnly) {
+            Press p; p.clipId = C; p.wantSel = wantSel;
+            p.ownRangeOnly = ownRangeOnly; p.selBegin = SB; p.selEnd = SE;
+            return p;
+        };
+
+        // The editor pair: each button pauses only what it started...
+        check(decide(armed(true, true), press(true, true)).act == Act::Pause,
+              L"transport: Play selection pauses its own audition");
+        check(decide(armed(false, true), press(false, true)).act == Act::Pause,
+              L"transport: Play pauses its own whole-clip playback");
+        // ...and switches playback to itself rather than pausing the other one.
+        // This is the reported bug: pressing one used to stop the other.
+        {
+            Plan p = decide(armed(false, true), press(true, true));
+            check(p.act == Act::Restart && p.from == From::SelStart,
+                  L"transport: Play selection during whole-clip play switches to the selection");
+        }
+        {
+            Plan p = decide(armed(true, true), press(false, true));
+            check(p.act == Act::Restart && p.from == From::Cursor,
+                  L"transport: Play during a selection audition switches to the whole clip");
+        }
+
+        // The single combined control (library card / Space) still pauses whatever
+        // is running, whichever range that is -- otherwise its pause button would
+        // restart a selection audition instead of pausing it.
+        check(decide(armed(true, true), press(false, false)).act == Act::Pause,
+              L"transport: the combined control pauses a selection audition");
+        check(decide(armed(false, true), press(true, false)).act == Act::Pause,
+              L"transport: the combined control pauses whole-clip playback");
+
+        // Paused and asked for the same range again => resume in place, not restart,
+        // so pause/play doesn't jump back to the start of the range.
+        check(decide(armed(true, false), press(true, true)).act == Act::Resume,
+              L"transport: pressing Play selection again resumes in place");
+        check(decide(armed(false, false), press(false, true)).act == Act::Resume,
+              L"transport: pressing Play again resumes in place");
+
+        // A seek while paused must re-arm rather than resume, or playback would
+        // carry on from where it stopped and ignore the click.
+        { State s = armed(true, false); s.seekPending = true;
+          check(decide(s, press(true, true)).act == Act::Restart,
+                L"transport: a pending seek forces a restart instead of a resume"); }
+
+        // A selection edited since the audition was armed is a different range,
+        // so it must re-arm at the new head.
+        { State s = armed(true, false); s.begin = SB + 500;
+          Plan p = decide(s, press(true, true));
+          check(p.act == Act::Restart && p.from == From::SelStart,
+                L"transport: a moved selection edge re-arms at the new selection start"); }
+
+        // A different clip, and the timeline owning the engine, both start fresh.
+        { Press p = press(false, true); p.clipId = C + 1;
+          Plan pl = decide(armed(false, true), p);
+          check(pl.act == Act::Restart && pl.from == From::ClipStart,
+                L"transport: playing a different clip starts at its head"); }
+        { State s = armed(false, true); s.timeline = true;
+          check(decide(s, press(false, true)).act == Act::Restart,
+                L"transport: a preview press during timeline playback takes the engine over"); }
     }
 
     // ---- waveform rendering, off-screen

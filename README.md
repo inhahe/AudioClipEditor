@@ -41,8 +41,13 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   Save selection) slices the selection into a new clip you name (rename any time).
 - **Full-window clip editor.** Double-click a clip card (or right-click
   → *Open in editor*) to blow the clip up to a full-window view for precise work.
-  It has its own toolbar (play, play selection, crop, save selection, capture noise, clear, done)
-  and — because dragging a pixel-precise edge on a zoomed-out waveform is fiddly —
+  It has its own toolbar (play, play selection, crop, save selection, capture noise, clear, done).
+  **Play** and **Play selection** are two independent transports: each pauses only
+  what it started, each turns into its own **Pause** button while it is the one
+  running, and pressing one while the other is playing switches straight over — so
+  the button you press is always the button that reacts. `Space` is the universal
+  play/pause and acts on whatever is armed. Because dragging a pixel-precise edge
+  on a zoomed-out waveform is fiddly, the editor also has
   a pair of **fine-tune edge strips**: two zoomed lanes, one centred on the
   selection's **start** and one on its **end**, so you can nudge each boundary
   exactly. The strips appear automatically when the main view is too coarse, or any
@@ -188,6 +193,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 |---|---|
 | Add clips | **+ Add Files** (multi-select) |
 | Play / pause a clip | green button on the card, or `Space` on the active clip (plays only the selection when one is active) |
+| Audition the whole clip vs. the selection | in the editor, **▶ Play** and **▶ Play selection** are separate transports — each becomes its own **Pause**, and pressing one while the other plays switches over |
 | Seek within a clip | click the waveform |
 | Make a selection | drag across the waveform |
 | Adjust one selection edge | grab the left or right edge of an existing selection and drag it (cursor shows ↔); works on cards, the editor main view, and the fine-tune strips |
