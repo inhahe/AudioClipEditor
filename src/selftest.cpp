@@ -595,6 +595,71 @@ int runSelfTest() {
         }
     }
 
+    // A bump next to speech must be removed just like one in the middle of a
+    // silence. The gate's pre-roll / hold / gap-merge used to protect it, so a
+    // take whose bumps cluster around the speech -- the normal case, and exactly
+    // what a user selects when they want one gone -- came back barely changed
+    // (measured -0.9 dB) while an identical isolated bump went to -60 dB.
+    {
+        const int rate = 48000;
+        const double dur = 7.0;
+        const int64_t nf = (int64_t)(dur * rate);
+        auto sig = std::make_shared<AudioBuffer>();
+        sig->sampleRate = rate; sig->channels = 2; sig->samples.assign(nf * 2, 0.0f);
+        uint32_t rng = 99u;
+        auto urand = [&]() { rng = rng * 1664525u + 1013904223u;
+                             return (double)(int32_t)rng / 2147483648.0; };
+        auto voice = [&](double t, double a, double b) {
+            if (t < a || t >= b) return 0.0;
+            double s = 0;
+            for (int k = 1; k <= 12; ++k) s += std::sin(2.0 * 3.14159265358979 * 140.0 * k * (t - a)) / k;
+            return 0.18 * s;
+        };
+        auto thump = [&](double t, double a, double b) {
+            if (t < a || t >= b) return 0.0;
+            return 0.6 * std::exp(-(t - a) * 12.0) * std::sin(2.0 * 3.14159265358979 * 60.0 * (t - a));
+        };
+        for (int64_t i = 0; i < nf; ++i) {
+            const double t = (double)i / rate;
+            double v = 0.004 * urand();
+            v += voice(t, 0.50, 2.00);      // speech
+            v += thump(t, 2.15, 2.45);      // bump 150 ms after speech ends
+            v += voice(t, 3.00, 4.50);      // speech
+            v += thump(t, 6.00, 6.30);      // bump far from any speech
+            sig->samples[i * 2] = (float)v; sig->samples[i * 2 + 1] = (float)v;
+        }
+        auto regionRms = [](const AudioBuffer& b, double t0, double t1) {
+            int64_t a = (int64_t)(t0 * b.sampleRate) * b.channels;
+            int64_t z = std::min<int64_t>((int64_t)(t1 * b.sampleRate) * b.channels, (int64_t)b.samples.size());
+            double s = 0; int64_t n = 0;
+            for (int64_t i = a; i < z; ++i) { s += (double)b.samples[i] * b.samples[i]; ++n; }
+            return n ? std::sqrt(s / n) : 0.0;
+        };
+        dsp::VoiceIsolateOptions vio;
+        auto clean = dsp::isolateVoice(*sig, vio, nullptr);
+        auto db = [&](double t0, double t1) {
+            return 20.0 * std::log10(std::max(regionRms(*clean, t0, t1), 1e-12) /
+                                     std::max(regionRms(*sig, t0, t1), 1e-12));
+        };
+        check(clean != nullptr, L"near-speech bump: isolation ran");
+        if (clean) {
+            // 150 ms after the speech ends, i.e. inside the 200 ms hold window.
+            const double adjacent = db(2.17, 2.45);
+            check(adjacent < -15.0, L"bump 150 ms after speech is removed",
+                  std::to_wstring(adjacent) + L" dB");
+            // The same bump far from any speech, as the upper bound to compare to.
+            // The near one can't quite reach this: its energy is concentrated in
+            // the first few ms and the gate needs fadeMs to close.
+            const double isolated = db(6.02, 6.30);
+            check(isolated < -20.0, L"bump far from speech is removed",
+                  std::to_wstring(isolated) + L" dB");
+            // The override must not eat the speech it sits next to.
+            const double sp = db(0.60, 1.90);
+            check(sp > -0.5, L"speech next to a bump is kept",
+                  std::to_wstring(sp) + L" dB");
+        }
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);

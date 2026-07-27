@@ -534,6 +534,33 @@ std::vector<uint8_t> detectVoiceFrames(const AudioBuffer& buf, const VoiceIsolat
         i = j;
     }
 
+    // Frames that are unmistakably a non-voice *event*, so the growth below must
+    // not swallow them. Pre-roll / hold / gap-merge exist to protect the quiet,
+    // ambiguous material around speech — trailing consonants, breath, the tail of
+    // a word — but they were also shielding loud thumps that land within a couple
+    // of hundred milliseconds of a sentence, which is exactly where a bumped desk
+    // or a door slam usually falls. Such a bump was left untouched while an
+    // identical one in the middle of a silence was removed, so on a take where the
+    // bumps cluster around the speech the effect looked like it did nothing.
+    //
+    // The test is deliberately narrow — audible, energy overwhelmingly below
+    // 150 Hz, and next to no speech-band content — because it *overrides* the
+    // protections: it must fire on thumps and never on a plosive or a breath,
+    // both of which carry mid-band energy. It identifies a bump rather than
+    // grading one, so it isn't tied to the sensitivity knob.
+    std::vector<uint8_t> veto(nFrames, 0);
+    for (size_t fr = 0; fr < nFrames; ++fr)
+        veto[fr] = (!core[fr] && rms[fr] >= levelThr &&
+                    lowFrac[fr] >= 0.90 && spFrac[fr] <= 0.5 * spThr) ? 1 : 0;
+    // Sustained events only, so one odd frame can't punch a hole through a word.
+    const int minVeto = std::max(1, frames(40.0));
+    for (size_t i = 0; i < nFrames; ) {
+        if (!veto[i]) { ++i; continue; }
+        size_t j = i; while (j < nFrames && veto[j]) ++j;
+        if ((int)(j - i) < minVeto) for (size_t k = i; k < j; ++k) veto[k] = 0;
+        i = j;
+    }
+
     // Grow: pre-roll (onsets) + hold (trailing consonants / breath).
     const int pre  = frames(120.0);
     const int post = std::max(0, frames(std::max(0.0f, opts.holdMs)));
@@ -554,6 +581,13 @@ std::vector<uint8_t> detectVoiceFrames(const AudioBuffer& buf, const VoiceIsolat
             for (size_t k = i; k < j; ++k) mask[k] = 1;
         i = j;
     }
+
+    // Growth and gap-merging never keep an identified bump (see `veto` above).
+    // Applied last so it beats every protection, and only ever to frames the
+    // detector did not call voice in the first place. `isolateVoice`'s gate ramp
+    // still fades in and out around the result, so re-opening a hole here can't
+    // click.
+    for (size_t i = 0; i < nFrames; ++i) if (veto[i]) mask[i] = 0;
     return mask;
 }
 

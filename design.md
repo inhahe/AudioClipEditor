@@ -172,6 +172,19 @@ tests / future waveform overlays.
   **hold** (default 200 ms) — the growth is what preserves unvoiced consonants
   (`s`, `f`, `t`) that flank voiced speech; then gaps shorter than **150 ms** are
   merged so words aren't chopped mid-utterance.
+- **Bump override (applied last, beats the growth)**: a frame that is audible,
+  **≥ 90% sub-150 Hz** and carries **≤ half the speech-band threshold** is marked
+  as a definite non-voice *event* and forced out of the mask after the growth and
+  gap-merging have run. Runs shorter than 40 ms are ignored so a single frame
+  can't punch a hole through a word. The override only ever touches frames the
+  detector already rejected, so it cannot take a bite out of detected speech.
+  Without it the pre-roll / hold / gap-merge protected any thump landing within
+  ~120–200 ms of a sentence — the normal place for a bumped desk or a door slam,
+  and precisely what a user selects when they want one gone. Such a bump came
+  back at **−0.9 dB** while an identical isolated one went to **−60 dB**, which
+  made the effect look broken on selections and made a whole-clip run look as
+  though it had skipped the selected region. It is an *identification* test, not
+  a strength knob, so it is deliberately not tied to `sensitivity`.
 - **Application**: the frame mask becomes sample segments, then the output is
   written in one pass with a moving segment index — gain 1 inside a segment,
   `10^(−reductionDb/20)` outside, with a raised-cosine ramp of `fadeMs` on each
@@ -517,6 +530,13 @@ gone or it lies entirely past the end), the unsaved-changes flag
 playhead does not dirty it), and the `BufferSource` sub-range behaviour the clip
 preview depends on (span, begin-relative seek/position, rendering from the seek
 point, stopping and draining at the range end).
+
+Voice isolation is checked against a synthetic take with a bump **150 ms after
+the speech** as well as an isolated one: both must be removed (measured −21.0 dB
+and −60.0 dB — the adjacent one cannot quite reach the isolated one's figure
+because its energy sits in its first few ms and the gate still needs `fadeMs` to
+close) while the neighbouring speech is untouched (0.00 dB). That is the
+regression the bump override exists for.
 
 Selection-scoped processing (`dsp::blendProcessedRange`) is covered on the same
 synthetic signal: length / channel count preserved, audio outside the range
