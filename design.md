@@ -318,6 +318,47 @@ kept sorted via `min/max` so the highlight never blinks or needs a swap on mouse
 - **Cursor hint**: `WM_SETCURSOR` shows `IDC_SIZEWE` when `overSelEdge(p)` (hover
   near an edge on any surface) or `draggingSelEdge()` (an edge drag in progress).
 
+## Dialog layout scaffolding — `DlgUI` (`dialogs.cpp`)
+
+Every dialog in the app is built in code (no `.rc` resources), so nothing lays
+itself out automatically. `DlgUI` is the shared helper that makes those dialogs
+**DPI-aware and self-sizing**; all four dialogs (`promptText`, `exportOptions`,
+`voiceCleaner`, `voiceIsolate`) go through it and none of them contain hardcoded
+pixel coordinates.
+
+Construction (`DlgUI ui(parent)`) captures the parent's DPI via
+`GetDpiForWindow`, builds the matching UI font with
+`SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, …, dpi)` (owning it and
+deleting it in the destructor; falls back to `DEFAULT_GUI_FONT`), measures the
+line height, and scales the base metrics `margin`/`gap`/`rowGap`.
+
+- `S(v)` — `MulDiv(v, dpi, 96)`; the only way a literal becomes a pixel value.
+- `measure(text, wrapWidth)` — `DT_CALCRECT | DT_NOPREFIX` (plus `DT_WORDBREAK`
+  when a wrap width is given) on a screen DC with the dialog font selected.
+  Everything else is derived from it: `textW`, `btnW`, `checkW`, `comboW`
+  (adds room for the drop-down arrow), `rowH`, `editH`, `btnH`.
+- `create(cls, title, parent, clientW, clientH)` takes a **client** size and
+  converts it with `AdjustWindowRectExForDpi`, then clamps the result into the
+  parent monitor's work area. (Passing the size straight to `CreateWindowExW`
+  was the original clipping bug — it treats those as *window* extents, so the
+  frame and caption ate into the content.)
+- `ctl/label/rowLabel/edit/combo/button/check/radio` create children with the
+  dialog font already applied; `rowLabel` vertically centres its text against
+  the control on the same row and uses `SS_ENDELLIPSIS` so a long label degrades
+  gracefully instead of overflowing.
+
+The layout convention in each dialog: measure the widest label and the widest
+control string, derive `labelW`/`ctlW`/`contentW`, walk a running `y` down the
+rows, then compute the client height from that `y` and right-align the buttons
+at `contentW`. Intro paragraphs are stored as one flowing string and wrapped by
+`measure(text, contentW)`, so they can never clip mid-line.
+
+Voice Cleaner additionally **resizes per mode**: `VCState` caches `clientW`,
+`autoH`/`profH` and `autoBtnY`/`profBtnY`, and `vcUpdateVisibility(st, dlg)`
+moves Apply/Cancel and resizes the frame (again via `AdjustWindowRectExForDpi`)
+when the algorithm combo switches between the auto algorithms and Profile — so
+auto mode has no empty gap where the profile rows would be.
+
 ## Voice-cleaner / remove-non-voice dialogs (`dialogs.cpp`)
 
 Manual modal (no resource script), same pattern as the export dialog:
