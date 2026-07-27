@@ -9,6 +9,7 @@
 #include "layout.h"
 #include "transport.h"
 #include "selhistory.h"
+#include "snap.h"
 #include <commctrl.h>
 #include <shlwapi.h>
 #include <windowsx.h>
@@ -160,6 +161,14 @@ struct App {
     int volTrackId = -1;           // TrackVolume drag target
     int moveTrackId = -1, moveIndex = -1;
     int64_t moveGrabOffset = 0;    // frames from clip start to grab point
+    // Where a clip being dragged along a lane would land, and the state machine
+    // that decides it. Snapping is directional, so it depends on the path the
+    // pointer took and not just on where it is now -- which is why the result is
+    // computed once per pointer update and stored, rather than recomputed by
+    // whoever needs it (paint, drop). See snap.h.
+    snapping::Sticky dragSnap;
+    int64_t dragSnapStart = 0;
+    int dragSnapTrackId = -1;
     int hotTB = -1;
     int hotSelClip = -1;           // card whose selection-action button is hovered
     int hotSelBtn = 0;             // 0 none, 1 crop, 2 save-selection
@@ -1096,7 +1105,7 @@ struct App {
             int tid; if (trackAtPoint(p, tid)) {
                 const Clip* c = doc.project().findClip(dragClipId);
                 if (c) {
-                    int64_t start = snapFrame(tid, xToFrame(p.x - (int)(moveGrabOffset * pxPerFrame())), c->frames(), -1);
+                    const int64_t start = dragSnapStart;
                     for (auto& tl : trackLays) if (tl.trackId == tid) {
                         int x0 = frameToX(start), x1 = frameToX(start + c->frames());
                         RECT g = { x0, tl.lane.top + S(4), x1, tl.lane.bottom - S(4) };
@@ -1114,7 +1123,7 @@ struct App {
             const Clip* c = doc.project().findClip(dragClipId);
             if (c) {
                 int ignore = (tid == moveTrackId) ? moveIndex : -1;
-                int64_t start = snapFrame(tid, xToFrame(p.x) - moveGrabOffset, c->frames(), ignore);
+                const int64_t start = dragSnapStart;
                 for (auto& tl : trackLays) if (tl.trackId == tid) {
                     int x0 = frameToX(start), x1 = frameToX(start + c->frames());
                     RECT g = { x0, tl.lane.top + S(4), x1, tl.lane.bottom - S(4) };
@@ -1211,23 +1220,39 @@ struct App {
         return -1;
     }
 
-    int64_t snapFrame(int trackId, int64_t start, int64_t len, int ignoreIndex) {
+    // The frames a dragged clip of length `len` is worth landing exactly on in
+    // this track: flush after each neighbour, flush before each neighbour, and
+    // the start of the timeline. `ignoreIndex` is the clip being dragged, which
+    // must not snap to itself.
+    std::vector<int64_t> snapTargets(int trackId, int64_t len, int ignoreIndex) const {
+        std::vector<int64_t> out{ 0 };
         const Track* t = nullptr;
         for (auto& tt : doc.project().tracks) if (tt.id == trackId) t = &tt;
-        if (!t) return std::max<int64_t>(0, start);
-        int64_t best = start; int64_t bestD = (int64_t)(S(10) / pxPerFrame()) + 1;
-        auto trySnap = [&](int64_t candidate) {
-            int64_t d = std::llabs(candidate - start);
-            if (d < bestD) { bestD = d; best = candidate; }
-        };
-        trySnap(0);
+        if (!t) return out;
         for (int i = 0; i < (int)t->clips.size(); ++i) {
             if (i == ignoreIndex) continue;
-            trySnap(t->clips[i].endFrame());           // butt up after a clip
-            trySnap(t->clips[i].startFrame - len);     // butt up before a clip
-        }
-        if (best < 0) best = 0;
-        return best;
+            out.push_back(t->clips[i].endFrame());          // butt up after a clip
+            const int64_t before = t->clips[i].startFrame - len;
+            if (before > 0) out.push_back(before);          // butt up before a clip
+        }                                                   // (a negative "before" is
+        return out;                                         //  not a reachable position)
+    }
+    // How far the mouse may stray from an engaged snap before it lets go.
+    int64_t snapTol() const { return (int64_t)(S(10) / pxPerFrame()); }
+
+    // Advance the drag's snapping state to the pointer's current position and
+    // remember where the clip would land. Called once per pointer update; the
+    // ghost and the drop both read `dragSnapStart`, because re-deriving it would
+    // step the state machine again (see snap.h).
+    void updateDragSnap(POINT p) {
+        const Clip* c = doc.project().findClip(dragClipId);
+        const int64_t len = c ? c->frames() : 0;
+        int tid = (mode == Mode::ClipMove) ? moveTrackId : -1;
+        trackAtPoint(p, tid);
+        dragSnapTrackId = tid;
+        const int ignore = (mode == Mode::ClipMove && tid == moveTrackId) ? moveIndex : -1;
+        const int64_t raw = xToFrame(p.x) - moveGrabOffset;
+        dragSnapStart = std::max<int64_t>(0, dragSnap.update(raw, snapTargets(tid, len, ignore), snapTol()));
     }
 
     // --------------------------------------------------------- actions
@@ -1881,7 +1906,9 @@ struct App {
             L"  \u2022 Drag the strip knobs (or wheel-zoom a strip) to nudge exact points\n"
             L"  \u2022 Esc closes the editor\n\n"
             L"Timeline:\n"
-            L"  \u2022 Drag placed clips to move them (snaps to neighbours)\n"
+            L"  \u2022 Drag placed clips to move them\n"
+            L"  \u2022 Nudge one just past a neighbour to snap it flush; approach\n"
+            L"    without crossing to leave a gap of any size\n"
             L"  \u2022 Drag a track's volume slider to change the track level\n"
             L"  \u2022 Right-click a track header to clean/isolate voice, rename or remove the track\n"
             L"  \u2022 Click a lane or the ruler to move the playhead\n"
@@ -2079,6 +2106,7 @@ struct App {
                 if (dbl) { openClipEditor(cl->clipId); return; }
                 // start drag-to-timeline
                 mode = Mode::CardDrag; dragClipId = cl->clipId; moveGrabOffset = 0;
+                dragSnap.begin(xToFrame(p.x));
                 SetCapture(hwnd); return;
             }
             return;
@@ -2118,6 +2146,10 @@ struct App {
                 const Track* t=nullptr; for(auto&tt:doc.project().tracks) if(tt.id==pl->trackId)t=&tt;
                 int64_t clipStart = t->clips[pl->index].startFrame;
                 moveGrabOffset = xToFrame(p.x) - clipStart;
+                // Seed with where the clip already is, so one that is already
+                // flush against a neighbour resists the first nudge.
+                dragSnap.begin(clipStart);
+                dragSnapStart = clipStart; dragSnapTrackId = pl->trackId;
                 SetCapture(hwnd); return;
             }
             // seek playhead by clicking a lane / ruler
@@ -2162,6 +2194,8 @@ struct App {
             if (dragged && !PtInRect(&rcLibrary, p) && PtInRect(&rcTimeline, p)) {
                 mode = Mode::CardDrag; moveGrabOffset = 0;
                 selClipId = -1; selStart = selEnd = 0;
+                dragSnap.begin(xToFrame(p.x));   // the drag only becomes a placement here
+                updateDragSnap(p);
                 refresh();
                 return;
             }
@@ -2188,6 +2222,7 @@ struct App {
             setVScrollFromThumbTop(p.y - vscrollGrab); refresh();
         } else if (mode == Mode::CardDrag || mode == Mode::ClipMove || mode == Mode::TimelineSeek) {
             if (mode == Mode::TimelineSeek) { playheadFrame = xToFrame(p.x); if (timelinePlaying) engine.seek(playheadFrame); }
+            else updateDragSnap(p);      // the one place the snap state advances
             refresh();
         }
     }
@@ -2218,7 +2253,10 @@ struct App {
                 if (trackAtPoint(p, tid)) {
                     const Clip* c = doc.project().findClip(dragClipId);
                     if (c) {
-                        int64_t start = snapFrame(tid, xToFrame(p.x - (int)(moveGrabOffset * pxPerFrame())), c->frames(), -1);
+                        // Drop where the ghost was, not where a fresh calculation
+                        // would put it: with directional snapping those can differ.
+                        updateDragSnap(p);
+                        int64_t start = dragSnapStart;
                         if (!doc.placeClip(tid, dragClipId, start, L"Add '" + c->name + L"' to timeline"))
                             MessageBoxW(hwnd, L"Clips can't overlap on a track.", L"Can't place", MB_ICONINFORMATION);
                         else afterPlaceRefresh();
@@ -2232,9 +2270,8 @@ struct App {
         } else if (m == Mode::ClipMove) {
             if (dragged) {
                 int tid = moveTrackId; trackAtPoint(p, tid);
-                const Clip* c = doc.project().findClip(dragClipId);
-                int64_t newStart = snapFrame(tid, xToFrame(p.x) - moveGrabOffset, c ? c->frames() : 0,
-                                             tid == moveTrackId ? moveIndex : -1);
+                updateDragSnap(p);      // land where the ghost was (see CardDrag above)
+                int64_t newStart = dragSnapStart;
                 doc.moveClip(moveTrackId, moveIndex, tid, newStart, L"Move clip");
                 afterPlaceRefresh();
             }

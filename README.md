@@ -73,8 +73,12 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   many as you like — once there are more tracks than fit, the tracks pane grows a
   **vertical scrollbar** (and the wheel over the track headers scrolls them), and
   adding a track scrolls it into view. Drag a clip card up onto a track to drop it
-  at any time offset; drag placed clips to move them. Clips **snap** to butt up
-  against neighbours and **can't overlap** on a track.
+  at any time offset; drag placed clips to move them. Clips **can't overlap** on a
+  track, and they **snap** to butt up flush against a neighbour — but only in the
+  direction that doesn't get in your way. Sliding *toward* a neighbour never pulls,
+  so you can leave a gap as small as you like; nudge *past* it and the clip lands
+  exactly flush and stays there until you drag properly clear. So flush placement
+  needs no aim, and every other position is still reachable.
 - **Prominent Play All** button plays every track together from the playhead.
 - **Per-clip and per-track volume.** Every card and every track header has a
   volume slider (0–200%). Gain is applied live to preview, timeline mixing, and
@@ -223,8 +227,10 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Apply a saved noise capture | right-click a card → *Voice cleaner → Apply noise capture ▸* and pick a recent capture |
 | Track actions | **right-click a track header/lane**: voice-clean the track, rename, remove |
 | Add a track | **+ Add Track** |
-| Place a clip on a track | drag a clip card up into a track lane (drops at any time offset, snaps to a neighbouring clip), or right-click → Add to timeline |
-| Move a placed clip | drag it along the track — a live ghost shows where it will land (snaps to neighbours; drag vertically to change tracks) |
+| Place a clip on a track | drag a clip card up into a track lane (drops at any time offset), or right-click → Add to timeline |
+| Move a placed clip | drag it along the track — a live ghost shows where it will land (drag vertically to change tracks) |
+| Butt a clip flush against a neighbour | drag it slightly *past* the neighbour's edge — it snaps flush and holds |
+| Leave a tiny gap instead | approach the neighbour without crossing it (no pull that way), or pull clear of a snap and come back |
 | Remove a placed clip | right-click it → Remove |
 | Set the playhead | click a track lane or the ruler |
 | Play all tracks | **▶ Play All** (`Space` when nothing is being previewed) |

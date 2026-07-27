@@ -10,6 +10,7 @@
 #include "layout.h"
 #include "transport.h"
 #include "selhistory.h"
+#include "snap.h"
 #include "waveform.h"
 #include <windows.h>
 #include <shlwapi.h>
@@ -1028,6 +1029,80 @@ int runSelfTest() {
         { State s = armed(false, true); s.timeline = true;
           check(decide(s, press(false, true)).act == Act::Restart,
                 L"transport: a preview press during timeline playback takes the engine over"); }
+    }
+
+    // ---- sticky snapping (dragging a clip along a lane)
+    {
+        using snapping::Sticky;
+        // Neighbours make 1000 and 2000 interesting; 0 is the timeline start.
+        const std::vector<int64_t> tg{ 0, 1000, 2000 };
+        const int64_t tol = 50;
+
+        // The point of the whole exercise: approaching a snap point must not
+        // pull, so a position just short of one is actually reachable.
+        { Sticky s; s.begin(500);
+          check(s.update(900, tg, tol) == 900, L"snap: approaching a target does not pull");
+          check(s.update(990, tg, tol) == 990, L"snap: stopping just short of a target keeps the gap");
+          check(s.update(999, tg, tol) == 999, L"snap: one frame short of a target is reachable");
+          check(!s.engaged(), L"snap: nothing is engaged while merely approaching"); }
+
+        // ...but crossing one lands flush, so snapping still costs no aim.
+        { Sticky s; s.begin(500);
+          check(s.update(1010, tg, tol) == 1000, L"snap: crossing a target lands flush on it");
+          check(s.engaged(), L"snap: crossing engages"); }
+        { Sticky s; s.begin(1500);
+          check(s.update(995, tg, tol) == 1000, L"snap: crossing from the far side lands flush too"); }
+
+        // Engaged, it resists until the mouse is more than tol away.
+        { Sticky s; s.begin(500);
+          s.update(1010, tg, tol);
+          check(s.update(1040, tg, tol) == 1000, L"snap: an engaged target holds while dragging away");
+          check(s.update(960, tg, tol) == 1000, L"snap: it holds on the other side as well");
+          check(s.update(1051, tg, tol) == 1051, L"snap: past the tolerance it lets go");
+          check(!s.engaged(), L"snap: letting go disengages"); }
+
+        // Having let go, the far side is approachable -- which is how a position
+        // inside the tolerance band, unreachable on the way in, is reached.
+        { Sticky s; s.begin(500);
+          s.update(1010, tg, tol);
+          s.update(1051, tg, tol);              // pull free
+          check(s.update(1005, tg, tol) == 1005, L"snap: coming back toward a target does not re-pull");
+          check(s.update(1001, tg, tol) == 1001, L"snap: a position inside the band is reachable from outside"); }
+
+        // A clip already sitting flush must resist the first nudge, or one butted
+        // against a neighbour would drift off on a stray pixel.
+        { Sticky s; s.begin(1000);
+          check(s.update(1020, tg, tol) == 1000, L"snap: a clip starting flush resists being nudged off");
+          check(s.update(1060, tg, tol) == 1060, L"snap: ...and still releases when pulled properly"); }
+
+        // A fast drag that sweeps over a target and ends far past it is a move
+        // through, not a landing; grabbing it would strand the clip behind the mouse.
+        { Sticky s; s.begin(0);
+          check(s.update(5000, tg, tol) == 5000, L"snap: sweeping past targets does not grab any of them");
+          check(!s.engaged(), L"snap: a sweep leaves nothing engaged"); }
+
+        // With two targets crossed in one step, the one ending nearest wins.
+        { Sticky s; s.begin(980);
+          const std::vector<int64_t> pair{ 1000, 1030 };
+          check(s.update(1040, pair, tol) == 1030, L"snap: the nearest of several crossed targets wins");
+          // A target the step stopped short of is not crossed, so it cannot win
+          // even when it is the nearer one.
+          Sticky s2; s2.begin(980);
+          check(s2.update(1025, pair, tol) == 1000, L"snap: a target not yet reached is not a candidate"); }
+
+        // Painting must not be able to move the clip: repeating a position is inert.
+        { Sticky s; s.begin(500);
+          const int64_t a = s.update(1010, tg, tol);
+          check(s.update(1010, tg, tol) == a, L"snap: repeating a position changes nothing");
+          check(s.update(1010, tg, tol) == a, L"snap: ...however many times it repeats"); }
+
+        // begin() must wipe the previous gesture, or the next drag inherits a
+        // stuck target it never touched.
+        { Sticky s; s.begin(500);
+          s.update(1010, tg, tol);
+          s.begin(3000);
+          check(!s.engaged(), L"snap: a new drag starts disengaged");
+          check(s.update(3010, tg, tol) == 3010, L"snap: a new drag is free of the old target"); }
     }
 
     // ---- selection history (Ctrl+Z stepping back through selections)

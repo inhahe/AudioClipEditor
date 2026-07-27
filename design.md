@@ -23,6 +23,7 @@ sync with behavior changes.
 | `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`) and toolbar row wrapping (`flowButtons`) |
 | `transport.h` | Pure play/pause decision logic, likewise split out to be testable: `decide(State, Press)` → pause / resume / restart-from-where, for both the single combined control and the editor's labelled button pair |
 | `selhistory.h` | Pure undo/redo state machine for the waveform selection, kept out of the document's snapshot tree; a `base` token ties the stack to a point in the document history |
+| `snap.h` | Pure directional-snapping state machine for dragging clips along a lane: pulls only when moving *away* from a target, so snapping stays convenient without making near-miss positions unreachable |
 | `ui.cpp` | The whole main window: `App` struct, layout, painting, hit-testing, menus, drag/drop, full-window clip editor |
 | `main.cpp` | `wWinMain` → `--selftest` or `runApp()` |
 | `selftest.cpp` | Headless `--selftest`: decode/encode round-trips, DSP checks, writes `bin/selftest.log` |
@@ -347,9 +348,50 @@ waveform) at the snapped target position under the cursor — coloured
 `clipBlkSel` when the drop is legal, `stop` (red) when it would overlap — while
 the clip's home slot is left as a faint outline. The actual `Document::moveClip`
 happens on `onLUp`. The ghost mirrors the existing `Mode::CardDrag`
-(library-card → track) drop preview and uses the same `snapFrame` /
-`Track::overlaps(start, len, ignore)` logic as the commit, so what you see is
+(library-card → track) drop preview and shares the snap result and
+`Track::overlaps(start, len, ignore)` check with the commit, so what you see is
 where it lands.
+
+### Directional ("sticky") snapping — `snapping::Sticky` (`snap.h`)
+
+Snapping used to be symmetric and stateless: `snapFrame` took the raw position
+and returned the nearest interesting frame within ~10 px. Convenient, but it made
+a band around every snap point **unreachable** — you could not leave a 3-frame gap
+after a neighbour, because getting that close was exactly what triggered the jump
+flush against it. The gap you wanted and the snap you wanted were indistinguishable
+to the drag, and the snap always won.
+
+So the pull is now applied in one direction only:
+
+- Moving **toward** a target does nothing at all — the clip tracks the mouse, so
+  any position, however close to a neighbour, is reachable.
+- **Reaching or crossing** a target engages it: the clip parks exactly on it. This
+  is how you land flush, and it needs no aim — anywhere past the point will do.
+- Moving **away** from an engaged target holds the clip there, resisting, until
+  the mouse is more than `tol` away; then it lets go and jumps to the mouse.
+
+Snapping therefore still costs nothing to use (overshoot slightly and you are
+flush — the common case), while every position stays reachable by approaching from
+the far side. The deliberate cost is that pulling free jumps by `tol`; that pop is
+the feedback that you have left the snap, and it introduces no drift because the
+clip is back under the mouse afterwards.
+
+**This makes snapping path-dependent, which has one structural consequence:** the
+result can no longer be re-derived from the cursor position, because it depends on
+how the cursor got there. `Sticky::update` must be called *exactly once per pointer
+update*, so it lives in `onMouseMove` alone (`updateDragSnap`) and stores its
+answer in `dragSnapStart`; `paintTimeline` and the `onLUp` drop both *read* that
+rather than recomputing. Painting used to call `snapFrame` itself — doing that now
+would step the state machine on every `WM_PAINT`, including repaints no user action
+caused. `update` is idempotent for a repeated position so the final `updateDragSnap`
+in `onLUp` (which guarantees the drop matches the ghost) is inert in the normal case.
+
+`snapTargets` supplies the candidates — flush after each neighbour, flush before
+each neighbour, and frame 0 — excluding the dragged clip itself via `ignoreIndex`,
+and dropping "flush before" candidates that land below 0 since those are not
+reachable positions. `dragSnap.begin()` seeds the state at the drag's start with
+the clip's **current** position, which is what makes an already-flush clip resist
+the first nudge.
 
 ## Library ordering (reorder + sort)
 
