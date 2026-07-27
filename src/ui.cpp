@@ -48,8 +48,9 @@ enum TB { TB_ADD, TB_TRACK, TB_PLAYALL, TB_STOP, TB_UNDO, TB_REDO, TB_COUNT };
 enum {
     IDM_PLAY = 100, IDM_PLAYSEL, IDM_CLEARSEL, IDM_SAVESEL, IDM_CROP,
     IDM_EDIT, IDM_RENAME, IDM_DELETE,
-    IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE, IDM_DENOISE_ALL, IDM_GETPROFILE,
-    IDM_GETPROFILE_CLIP, IDM_VOICEISO, IDM_VOICEISO_ALL,
+    IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE, IDM_DENOISE_SEL, IDM_DENOISE_ALL,
+    IDM_GETPROFILE, IDM_GETPROFILE_CLIP,
+    IDM_VOICEISO, IDM_VOICEISO_SEL, IDM_VOICEISO_ALL,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE, IDM_TRK_VOICEISO,
@@ -132,11 +133,6 @@ struct App {
 
     // "Remove non-voice" (voice isolation) options, persisted for the session
     dsp::VoiceIsolateOptions viOpts;
-
-    // Last "Range:" choice from the cleaner / remove-non-voice dialogs, shared by
-    // both and remembered for the session. It is only ever *offered* when the
-    // current clip has a selection, so it can never silently apply on its own.
-    bool rangeOnlySelection = false;
 
     // interaction
     Mode mode = Mode::None;
@@ -1217,21 +1213,24 @@ struct App {
         refresh();
     }
 
-    // Fill in the "Range:" choice offered by the voice cleaner / remove-non-voice
-    // dialogs. Restricting an effect to a range only makes sense when it targets a
-    // single clip, and only that clip's own selection counts — so a selection left
-    // over on some *other* clip can't silently narrow the operation.
-    void fillRangeOption(dlg::RangeOption& r, const std::vector<int>& targets, bool lastChoice) {
-        r.offer = targets.size() == 1;
-        r.hasSelection = r.offer && hasSel() && selClipId == targets[0] && selEnd > selStart;
-        r.selectionOnly = r.hasSelection && lastChoice;
-        if (!r.hasSelection) return;
-        const Clip* c = doc.project().findClip(selClipId);
+    // True when the waveform selection belongs to `clipId` and spans something —
+    // i.e. a "(selection)" menu item may run on that clip. A selection left over
+    // on some *other* clip must never silently narrow an operation.
+    bool selectionCovers(int clipId) const {
+        return hasSel() && selClipId == clipId && selEnd > selStart;
+    }
+
+    // "the selection in 'take 2' (0:12.30 – 0:18.00, 5.70 s)" — the "Applies to:"
+    // line of both effect dialogs, so the range chosen in the menu is restated
+    // where the settings are chosen.
+    std::wstring selectionScopeLabel(int clipId) const {
+        const Clip* c = doc.project().findClip(clipId);
+        const std::wstring name = c ? c->name : L"clip";
         const double rate = (c && c->buffer && c->buffer->sampleRate > 0) ? c->buffer->sampleRate : 48000.0;
         const double t0 = selStart / rate, t1 = selEnd / rate;
-        wchar_t d[128];
-        swprintf(d, 128, L"%s \u2013 %s, %.2f s", fmtTime(t0).c_str(), fmtTime(t1).c_str(), t1 - t0);
-        r.selectionDesc = d;
+        wchar_t d[160];
+        swprintf(d, 160, L" (%s \u2013 %s, %.2f s)", fmtTime(t0).c_str(), fmtTime(t1).c_str(), t1 - t0);
+        return L"the selection in '" + name + L"'" + d;
     }
 
     AudioBufferPtr sliceBuffer(const AudioBuffer& src, int64_t f0, int64_t f1) {
@@ -1289,13 +1288,18 @@ struct App {
     void voiceCleanClip(int clipId) {
         const Clip* c = doc.project().findClip(clipId);
         if (!c) return;
-        voiceCleanClips({ clipId }, L"'" + c->name + L"'");
+        voiceCleanClips({ clipId }, L"'" + c->name + L"'", false);
+    }
+    // ...or over just the waveform selection inside it.
+    void voiceCleanClipSelection(int clipId) {
+        if (!selectionCovers(clipId)) return;
+        voiceCleanClips({ clipId }, selectionScopeLabel(clipId), true);
     }
     // Voice-clean every clip in the library (whole project).
     void voiceCleanAllClips() {
         std::vector<int> ids;
         for (auto& c : doc.project().library) ids.push_back(c.id);
-        voiceCleanClips(ids, L"all clips");
+        voiceCleanClips(ids, L"all clips", false);
     }
     // Voice-clean the (library) clips referenced by everything placed on a track.
     void voiceCleanTrack(int trackId) {
@@ -1303,11 +1307,14 @@ struct App {
         if (!t) return;
         std::vector<int> ids;
         for (auto& pc : t->clips) ids.push_back(pc.clipId);
-        voiceCleanClips(ids, L"track '" + t->name + L"'");
+        voiceCleanClips(ids, L"track '" + t->name + L"'", false);
     }
     // Show the cleaner options once, then denoise the given clips as a single
-    // undo step. Duplicate / empty clips are skipped.
-    void voiceCleanClips(const std::vector<int>& ids, const std::wstring& scopeLabel) {
+    // undo step. Duplicate / empty clips are skipped. `selectionOnly` (only ever
+    // set for a single-clip scope that the selection covers) keeps just the
+    // selected range of the result.
+    void voiceCleanClips(const std::vector<int>& ids, const std::wstring& scopeLabel,
+                         bool selectionOnly) {
         std::vector<int> targets;
         for (int id : ids) {
             bool dup = false;
@@ -1323,10 +1330,14 @@ struct App {
         // The current waveform selection (on any clip) doubles as the noise
         // sample for the Audacity-style profile algorithm's Get Noise Profile.
         AudioBufferPtr noiseSel;
+        const bool selOnly = selectionOnly && targets.size() == 1 && selectionCovers(targets[0]);
+        std::wstring scope = scopeLabel;
+        if (targets.size() > 1) scope += L" (" + std::to_wstring(targets.size()) + L" clips)";
         dlg::VoiceCleanerContext ctx;
         ctx.opts = &nrOpts;
         ctx.profile = &noiseProfile;
         ctx.profileDesc = &noiseProfileDesc;
+        ctx.scopeLabel = scope;
         if (hasSel()) {
             const Clip* sc = doc.project().findClip(selClipId);
             if (sc && sc->buffer) {
@@ -1335,14 +1346,9 @@ struct App {
                 ctx.selectionDesc = L"'" + sc->name + L"'";
             }
         }
-        fillRangeOption(ctx.range, targets, rangeOnlySelection);
         bool okDlg = dlg::voiceCleaner(hwnd, ctx);
         if (ctx.captured) rememberCapture(noiseProfile, noiseProfileDesc);
         if (!okDlg) return;
-        // Only remember the choice when it was actually on offer, so a run over a
-        // whole track can't silently reset the preference.
-        if (ctx.range.hasSelection) rangeOnlySelection = ctx.range.selectionOnly;
-        const bool selOnly = ctx.range.selectionOnly;   // implies a single target clip
         dsp::NROptions opts = nrOpts;             // nrOpts persists for the session
         opts.noiseProfile = &noiseProfile;        // bind profile only for this call
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
@@ -1366,9 +1372,9 @@ struct App {
             return;
         }
         stopAll();   // buffers are changing under any active playback
-        const std::wstring what = selOnly ? L"the selection in " : L"";
+        // scopeLabel already says whether this was a clip or a selection within one.
         std::wstring desc = targets.size() == 1
-            ? L"Voice cleaner on " + what + scopeLabel
+            ? L"Voice cleaner on " + scopeLabel
             : L"Voice cleaner (" + scopeLabel + L", " + std::to_wstring(updates.size()) + L" clips)";
         doc.replaceClipBuffers(updates, desc);
         refresh();
@@ -1380,23 +1386,31 @@ struct App {
     void removeNonVoiceClip(int clipId) {
         const Clip* c = doc.project().findClip(clipId);
         if (!c) return;
-        removeNonVoiceClips({ clipId }, L"'" + c->name + L"'");
+        removeNonVoiceClips({ clipId }, L"'" + c->name + L"'", false);
+    }
+    // ...or over just the waveform selection inside it.
+    void removeNonVoiceClipSelection(int clipId) {
+        if (!selectionCovers(clipId)) return;
+        removeNonVoiceClips({ clipId }, selectionScopeLabel(clipId), true);
     }
     void removeNonVoiceAllClips() {
         std::vector<int> ids;
         for (auto& c : doc.project().library) ids.push_back(c.id);
-        removeNonVoiceClips(ids, L"all clips");
+        removeNonVoiceClips(ids, L"all clips", false);
     }
     void removeNonVoiceTrack(int trackId) {
         const Track* t = doc.project().findTrack(trackId);
         if (!t) return;
         std::vector<int> ids;
         for (auto& pc : t->clips) ids.push_back(pc.clipId);
-        removeNonVoiceClips(ids, L"track '" + t->name + L"'");
+        removeNonVoiceClips(ids, L"track '" + t->name + L"'", false);
     }
     // Show the isolation options once, then process the given clips as a single
-    // undo step. Duplicate / empty clips are skipped.
-    void removeNonVoiceClips(const std::vector<int>& ids, const std::wstring& scopeLabel) {
+    // undo step. Duplicate / empty clips are skipped. `selectionOnly` (only ever
+    // set for a single-clip scope that the selection covers) keeps just the
+    // selected range of the result.
+    void removeNonVoiceClips(const std::vector<int>& ids, const std::wstring& scopeLabel,
+                             bool selectionOnly) {
         std::vector<int> targets;
         for (int id : ids) {
             bool dup = false;
@@ -1409,17 +1423,13 @@ struct App {
             MessageBoxW(hwnd, L"No audio to process here.", L"Remove non-voice", MB_ICONINFORMATION);
             return;
         }
+        const bool selOnly = selectionOnly && targets.size() == 1 && selectionCovers(targets[0]);
         std::wstring scope = scopeLabel;
         if (targets.size() > 1) scope += L" (" + std::to_wstring(targets.size()) + L" clips)";
         dlg::VoiceIsolateContext ctx;
         ctx.opts = &viOpts;
         ctx.scopeLabel = scope;
-        fillRangeOption(ctx.range, targets, rangeOnlySelection);
         if (!dlg::voiceIsolate(hwnd, ctx)) return;
-        // Only remember the choice when it was actually on offer, so a run over a
-        // whole track can't silently reset the preference.
-        if (ctx.range.hasSelection) rangeOnlySelection = ctx.range.selectionOnly;
-        const bool selOnly = ctx.range.selectionOnly;   // implies a single target clip
 
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
         std::vector<std::pair<int, AudioBufferPtr>> updates;
@@ -1447,9 +1457,9 @@ struct App {
             return;
         }
         stopAll();   // buffers are changing under any active playback
-        const std::wstring what = selOnly ? L"the selection in " : L"";
+        // scopeLabel already says whether this was a clip or a selection within one.
         std::wstring desc = (viOpts.residue ? L"Preview removed non-voice in "
-                                            : L"Remove non-voice from ") + what + scopeLabel;
+                                            : L"Remove non-voice from ") + scopeLabel;
         doc.replaceClipBuffers(updates, desc);
         refresh();
         // The counts cover only what was actually changed, so say which that was.
@@ -2124,7 +2134,13 @@ struct App {
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_NORM_MATCH, L"Normalize to match other clips");
         AppendMenuW(m, MF_STRING, IDM_NORM_ALL, L"Normalize all clips (all tracks)");
+        // The range an effect runs over is picked here rather than inside the
+        // dialog, so it's visible before committing to opening one. The selection
+        // entry is greyed (not hidden) so it reads as an available option even
+        // when nothing is selected yet.
         HMENU vc = CreatePopupMenu();
+        AppendMenuW(vc, MF_STRING | (selectionCovers(clipId) ? 0 : MF_GRAYED), IDM_DENOISE_SEL,
+                    L"This clip (selection)\u2026");
         AppendMenuW(vc, MF_STRING, IDM_DENOISE, L"This clip\u2026");
         AppendMenuW(vc, MF_STRING, IDM_DENOISE_ALL, L"All clips (whole project)\u2026");
         AppendMenuW(vc, MF_SEPARATOR, 0, nullptr);
@@ -2146,6 +2162,8 @@ struct App {
         AppendMenuW(vc, MF_POPUP, (UINT_PTR)rec, L"Apply noise capture \u25B8");
         AppendMenuW(m, MF_POPUP, (UINT_PTR)vc, L"Voice cleaner (reduce noise)");
         HMENU vi = CreatePopupMenu();
+        AppendMenuW(vi, MF_STRING | (selectionCovers(clipId) ? 0 : MF_GRAYED), IDM_VOICEISO_SEL,
+                    L"This clip (selection)\u2026");
         AppendMenuW(vi, MF_STRING, IDM_VOICEISO, L"This clip\u2026");
         AppendMenuW(vi, MF_STRING, IDM_VOICEISO_ALL, L"All clips (whole project)\u2026");
         AppendMenuW(m, MF_POPUP, (UINT_PTR)vi, L"Remove non-voice (bumps, shuffling)");
@@ -2166,10 +2184,12 @@ struct App {
         else if (cmd == IDM_NORM_MATCH) normalizeClip(clipId, false);
         else if (cmd == IDM_NORM_ALL) normalizeClip(clipId, true);
         else if (cmd == IDM_DENOISE) voiceCleanClip(clipId);
+        else if (cmd == IDM_DENOISE_SEL) voiceCleanClipSelection(clipId);
         else if (cmd == IDM_DENOISE_ALL) voiceCleanAllClips();
         else if (cmd == IDM_GETPROFILE) captureNoiseProfileFromSelection();
         else if (cmd == IDM_GETPROFILE_CLIP) captureNoiseProfileFromClip(clipId);
         else if (cmd == IDM_VOICEISO) removeNonVoiceClip(clipId);
+        else if (cmd == IDM_VOICEISO_SEL) removeNonVoiceClipSelection(clipId);
         else if (cmd == IDM_VOICEISO_ALL) removeNonVoiceAllClips();
         else if (cmd >= IDM_APPLYCAP_BASE && cmd < IDM_APPLYCAP_BASE + 100)
             applyCaptureToClip(clipId, cmd - IDM_APPLYCAP_BASE);

@@ -106,8 +106,9 @@ apply" maps onto this app's clip model:
   which uses the active editor selection if present, else falls back to the whole
   clip. The button label reflects which (`Capture noise (sel)` / `(clip)`).
 - All three capture paths feed the same `rememberCapture()` recents list.
-- Reduction applies to **whole clips** per the app's existing scope model (this
-  clip / this track / all clips), not to the selection.
+- Reduction applies per the app's scope model (this clip / the selection in this
+  clip / this track / all clips) — see *Applying an effect to the selection only*.
+  A selection is otherwise just the *noise sample*, not the target.
 - **Session persistence**: `App` holds `nrOpts` (last-used options),
   `noiseProfile`/`noiseProfileDesc` (the *active* capture, e.g. `1.20 s from
   'clip'`), and `noiseCaptures` (recent captures, most-recent first). The active
@@ -184,39 +185,66 @@ tests / future waveform overlays.
 
 ### Voice isolation in the app
 
-`App::viOpts` (session-persisted options) → `removeNonVoiceClip/Track/AllClips`
-funnel into `removeNonVoiceClips(ids, scopeLabel)`, mirroring the voice cleaner's
-scope model: one options dialog (`dlg::voiceIsolate`), then every target clip is
-processed and committed through `Document::replaceClipBuffers` as **one undo
-step**. Menu ids `IDM_VOICEISO` / `IDM_VOICEISO_ALL` (clip menu submenu *Remove
-non-voice*) and `IDM_TRK_VOICEISO` (track header menu). A summary message box
-reports how much was silenced across how many voice segments.
+`App::viOpts` (session-persisted options) → `removeNonVoiceClip` /
+`removeNonVoiceClipSelection` / `removeNonVoiceTrack` / `removeNonVoiceAllClips`
+funnel into `removeNonVoiceClips(ids, scopeLabel, selectionOnly)`, mirroring the
+voice cleaner's scope model: one options dialog (`dlg::voiceIsolate`), then every
+target clip is processed and committed through `Document::replaceClipBuffers` as
+**one undo step**. Menu ids `IDM_VOICEISO` / `IDM_VOICEISO_SEL` /
+`IDM_VOICEISO_ALL` (clip menu submenu *Remove non-voice*) and `IDM_TRK_VOICEISO`
+(track header menu). A summary message box reports how much was silenced across
+how many voice segments — counted over the processed range only, so a
+selection-scoped run cannot quote whole-clip numbers.
 
-## Applying an effect to the selection only ("Range:")
+## Applying an effect to the selection only
 
 Both the voice cleaner and remove-non-voice can be limited to the current
-waveform selection instead of the whole clip. The shared pieces:
+waveform selection instead of the whole clip.
 
-- **`dlg::RangeOption`** (`dialogs.h`) — the in/out contract between the app and
-  either dialog: `offer` (show the rows at all), `hasSelection` (…and there is
-  one), `selectionDesc` (the range shown to the user), and `selectionOnly` (the
-  choice, in *and* out so the last answer can be pre-selected).
-- **`RangeRows`** (`dialogs.cpp`) — the two stacked radios ("The whole clip" /
-  "Only the selection (…)") plus the sizing hooks the dialogs need before any
-  control exists (`width`, `height`) and `commit()` to read the answer back.
-  Radios rather than a checkbox so the default is explicit; the second radio is
-  created disabled (with "— nothing is selected") when there's no selection, so
-  the feature stays discoverable instead of vanishing.
-- **`App::fillRangeOption(range, targets, lastChoice)`** (`ui.cpp`) — decides
-  what to offer. The rows appear **only for a single-clip scope**, and only that
-  clip's own selection counts, so a selection left on some *other* clip can never
-  silently narrow a track-wide or project-wide run. `App::rangeOnlySelection`
-  remembers the answer for the session, and is only updated when the choice was
-  genuinely available (`hasSelection`).
+**The range is chosen in the right-click menu, not in the dialog.** Each effect's
+submenu lists its scopes directly:
+
+```
+Voice cleaner (reduce noise)  ▸  This clip (selection)…
+                                 This clip…
+                                 All clips (whole project)…
+                                 ─────
+                                 Capture noise from selection
+                                 …
+Remove non-voice (…)          ▸  This clip (selection)…
+                                 This clip…
+                                 All clips (whole project)…
+```
+
+This puts the *what* in front of the user before they commit to opening a dialog,
+so "only the selection" is discoverable without having to open one and hope. The
+`(selection)` item is **greyed, not hidden**, when nothing is selected on that
+clip — same reason. The dialogs then only choose the *how*.
+
+The pieces:
+
+- **`App::selectionCovers(clipId)`** (`ui.cpp`) — gates the `(selection)` items:
+  there must be a selection, it must belong to *that* clip, and it must be
+  non-empty. A selection left on some *other* clip can never narrow an operation.
+- **`App::selectionScopeLabel(clipId)`** (`ui.cpp`) — builds
+  `the selection in 'take 2' (0:12.30 – 0:18.00, 5.70 s)`.
+- **`VoiceCleanerContext::scopeLabel` / `VoiceIsolateContext::scopeLabel`** — the
+  caller-built string both dialogs restate on their **"Applies to:"** line, so the
+  menu choice is visible where the settings are chosen.
+- **`ScopeLine`** (`dialogs.cpp`) — lays that line out. It is normally the longest
+  text in either dialog, so it may widen the frame (up to `ui.S(460)`), then wrap
+  onto a second line, and only then is ellipsised. `widen()` must be called before
+  anything else is measured against `contentW`.
+- **`voiceCleanClips(ids, scopeLabel, selectionOnly)` /
+  `removeNonVoiceClips(ids, scopeLabel, selectionOnly)`** — `selectionOnly` is
+  re-validated inside (single target + `selectionCovers`) rather than trusted.
 - **`dsp::blendProcessedRange(original, processed, begin, end, blendMs)`** — does
   the actual restriction. Returns a copy of `original` with `[begin, end)` taken
   from `processed`, raised-cosine crossfaded over ~5 ms at each edge (capped at a
   third of the range) so the join can't click.
+
+Track-header and all-clips scopes are inherently multi-clip, so they have no
+selection variant.
 
 **The effect always runs over the whole clip and only the result is narrowed** —
 never "slice the selection out, process the slice, paste it back". This is the
@@ -399,7 +427,8 @@ at `contentW`. Intro paragraphs are stored as one flowing string and wrapped by
 up one dialog over a dummy parent so it can be eyeballed / screenshotted at any
 DPI without loading a project — 1 = Remove Non-Voice, 2 = Voice Cleaner,
 3 = Save As, anything else = the text prompt. Append `sel` (e.g.
-`--dialogtest1sel`) to populate a fake selection and exercise the "Range:" rows.
+`--dialogtest1sel`) for a selection-scoped "Applies to:" label, which is the
+widest thing either effect dialog has to fit (see `ScopeLine`).
 Because these dialogs size themselves from measured text, this is the only way to
 catch a layout regression short of running the real workflow.
 

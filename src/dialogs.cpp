@@ -110,6 +110,34 @@ struct DlgUI {
     }
 };
 
+// ------------------------------------------------------------ "Applies to:" line
+// Both effect dialogs open from a right-click menu that has already chosen *what*
+// to process, so they restate it. That line is the one thing the user must be able
+// to read before pressing Apply, and it is usually longer than anything else in the
+// dialog, so it may widen the frame up to a limit, then wrap onto a second line,
+// and only something longer still gets ellipsised.
+struct ScopeLine {
+    std::wstring text;
+    int height = 0;
+
+    explicit ScopeLine(const std::wstring& scopeLabel) : text(L"Applies to: " + scopeLabel) {}
+
+    // Grow `contentW` to fit the line where that is reasonable. Call before
+    // anything else is measured against contentW.
+    void widen(const DlgUI& ui, int& contentW) const {
+        contentW = std::max(contentW, std::min(ui.textW(text.c_str()), ui.S(460)));
+    }
+    // Height needed at the final content width, capped at two lines.
+    void measure(const DlgUI& ui, int contentW) {
+        height = std::min((int)ui.measure(text.c_str(), contentW).cy, ui.lineH * 2);
+    }
+    int step(const DlgUI& ui) const { return height + ui.S(14); }
+    void build(const DlgUI& ui, int& y, int contentW) const {
+        ui.label(text.c_str(), ui.margin, y, contentW, height, SS_ENDELLIPSIS);
+        y += step(ui);
+    }
+};
+
 static void runModal(HWND hwnd, HWND parent) {
     EnableWindow(parent, FALSE);
     ShowWindow(hwnd, SW_SHOW);
@@ -124,55 +152,6 @@ static void runModal(HWND hwnd, HWND parent) {
     EnableWindow(parent, TRUE);
     SetForegroundWindow(parent);
 }
-
-// ------------------------------------------------------------------ "Range:" rows
-// Shared by the voice cleaner and remove-non-voice dialogs: lets the user run the
-// effect over just the current waveform selection instead of the whole clip. Two
-// stacked radios rather than one checkbox, so the default is explicit and a long
-// selection description can't squeeze the labels. The rows are omitted entirely
-// when the operation targets more than one clip (no single selection applies).
-struct RangeRows {
-    RangeOption* opt = nullptr;
-    HWND rbWhole = 0, rbSel = 0;
-    std::wstring wholeText, selText;
-
-    explicit RangeRows(RangeOption& o) : opt(&o) {
-        wholeText = L"The whole clip";
-        selText = o.hasSelection ? L"Only the selection (" + o.selectionDesc + L")"
-                                 : L"Only the selection \u2014 nothing is selected";
-    }
-    bool shown() const { return opt->offer; }
-    static const wchar_t* rowLabelText() { return L"Range:"; }
-
-    // Width the radio column needs, and the height the rows add, so the dialog
-    // can size itself before anything is created.
-    int width(const DlgUI& ui) const {
-        if (!shown()) return 0;
-        return std::max(ui.checkW(wholeText.c_str()), ui.checkW(selText.c_str()));
-    }
-    // The two radios belong together, so they sit a hair apart rather than a
-    // full row apart; the normal row gap follows the pair.
-    int innerGap(const DlgUI& ui) const { return ui.S(2); }
-    int height(const DlgUI& ui, int rowH, int step) const {
-        return shown() ? rowH + innerGap(ui) + step : 0;
-    }
-
-    void build(const DlgUI& ui, int& y, int labelW, int ctlW, int rowH, int step) {
-        if (!shown()) return;
-        ui.rowLabel(rowLabelText(), ui.margin, y, labelW, rowH);
-        rbWhole = ui.radio(wholeText.c_str(), ui.margin + labelW + ui.gap, y, ctlW, true);
-        y += rowH + innerGap(ui);
-        rbSel = ui.radio(selText.c_str(), ui.margin + labelW + ui.gap, y, ctlW, false);
-        y += step;
-        EnableWindow(rbSel, opt->hasSelection);
-        const bool sel = opt->hasSelection && opt->selectionOnly;
-        SendMessageW(sel ? rbSel : rbWhole, BM_SETCHECK, BST_CHECKED, 0);
-    }
-    void commit() const {
-        opt->selectionOnly = shown() && rbSel &&
-                             SendMessageW(rbSel, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    }
-};
 
 // ------------------------------------------------------------------ prompt text
 struct PromptState {
@@ -409,7 +388,6 @@ enum { IDC_VC_ALGO = 2001, IDC_VC_GETPROFILE = 2002 };
 
 struct VCState {
     VoiceCleanerContext* ctx = nullptr;
-    RangeRows* range = nullptr;
     HWND cbAlgo = 0;
     HWND lbStrength = 0, cbStrength = 0;
     HWND lbProfile = 0, btnProfile = 0, stStatus = 0;
@@ -515,7 +493,6 @@ static LRESULT CALLBACK VCProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             o.profile.sensitivity = (float)vcReadDouble(st->edSens, 0.01, 24.0, 6.0);
             o.profile.freqSmoothingBands = (int)(vcReadDouble(st->edBands, 0.0, 12.0, 6.0) + 0.5);
             o.profile.residue = SendMessageW(st->rbResidue, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            st->range->commit();
             st->ok = true; DestroyWindow(h); return 0;
         }
         break;
@@ -534,8 +511,7 @@ bool voiceCleaner(HWND parent, VoiceCleanerContext& ctx) {
         wc.lpszClassName = L"ACE_VC"; RegisterClassW(&wc); reg = true;
     }
     dsp::NROptions& opts = *ctx.opts;
-    RangeRows range(ctx.range);
-    VCState st; st.ctx = &ctx; st.range = &range;
+    VCState st; st.ctx = &ctx;
     DlgUI ui(parent);
 
     static const wchar_t* kInfo =
@@ -549,26 +525,28 @@ bool voiceCleaner(HWND parent, VoiceCleanerContext& ctx) {
     static const wchar_t* kAlgos[] = { L"Spectral subtraction", L"Wiener filter",
                                        L"Noise profile (Audacity-style)" };
 
-    int labelW = ui.textW(RangeRows::rowLabelText());
+    int labelW = 0;
     for (auto* t : kLabels) labelW = std::max(labelW, ui.textW(t));
     int ctlW = ui.S(150);
     for (auto* t : kAlgos) ctlW = std::max(ctlW, ui.comboW(t));
     ctlW = std::max(ctlW, ui.btnW(L"Get Noise Profile"));
     const int radReduce = ui.checkW(L"Reduce"), radResidue = ui.checkW(L"Residue");
     ctlW = std::max(ctlW, radReduce + ui.gap + radResidue);
-    ctlW = std::max(ctlW, range.width(ui));
-    const int contentW = labelW + ui.gap + ctlW;
+    int contentW = labelW + ui.gap + ctlW;
+    ScopeLine scope(ctx.scopeLabel);
+    scope.widen(ui, contentW);
     const int ctlX = ui.margin + labelW + ui.gap;
     const int editW = std::max(ui.S(80), ui.textW(L"000000") + ui.S(16));
     const int rowH = ui.rowH(), step = rowH + ui.rowGap;
     const int bw = ui.btnW(L"Cancel"), bh = ui.btnH();
     const SIZE infoSz = ui.measure(kInfo, contentW);
     const SIZE statusSz = ui.measure(kLongStatus, contentW);
+    scope.measure(ui, contentW);
 
-    // Rows: info, optional Range radios, Algorithm, Strength/Noise profile
-    // (shared), then — profile mode only — status, three edits and the Noise
-    // radios, then the buttons.
-    const int rowsTop = ui.margin + infoSz.cy + ui.S(10) + range.height(ui, rowH, step) + 2 * step;
+    // Rows: info, "Applies to", Algorithm, Strength/Noise profile (shared),
+    // then — profile mode only — status, three edits and the Noise radios,
+    // then the buttons.
+    const int rowsTop = ui.margin + infoSz.cy + ui.S(10) + scope.step(ui) + 2 * step;
     const int profRows = statusSz.cy + ui.S(8) + 4 * step;
     st.dpi = ui.dpi;
     st.clientW = ui.margin * 2 + contentW;
@@ -583,8 +561,7 @@ bool voiceCleaner(HWND parent, VoiceCleanerContext& ctx) {
 
     int y = ui.margin;
     ui.label(kInfo, ui.margin, y, contentW, infoSz.cy);  y += infoSz.cy + ui.S(10);
-
-    range.build(ui, y, labelW, ctlW, rowH, step);
+    scope.build(ui, y, contentW);
 
     ui.rowLabel(kLabels[0], ui.margin, y, labelW, rowH);
     st.cbAlgo = ui.combo(ctlX, y, ctlW, 4, IDC_VC_ALGO);
@@ -643,7 +620,6 @@ bool voiceCleaner(HWND parent, VoiceCleanerContext& ctx) {
 // ------------------------------------------------------------------ voice isolation
 struct VIState {
     dsp::VoiceIsolateOptions* opts = nullptr;
-    RangeRows* range = nullptr;
     HWND cbSens = 0, edDb = 0, edHold = 0, edFade = 0;
     HWND rbPreview = 0;   // checkbox: output the removed material instead (residue)
     bool ok = false;
@@ -666,7 +642,6 @@ static LRESULT CALLBACK VIProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             o.holdMs      = (float)vcReadDouble(st->edHold, 0.0, 2000.0, 200.0);
             o.fadeMs      = (float)vcReadDouble(st->edFade, 0.0, 500.0, 25.0);
             o.residue     = SendMessageW(st->rbPreview, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            st->range->commit();
             st->ok = true; DestroyWindow(h); return 0;
         }
         break;
@@ -685,8 +660,7 @@ bool voiceIsolate(HWND parent, VoiceIsolateContext& ctx) {
         wc.lpszClassName = L"ACE_VI"; RegisterClassW(&wc); reg = true;
     }
     dsp::VoiceIsolateOptions& opts = *ctx.opts;
-    RangeRows range(ctx.range);
-    VIState st; st.opts = &opts; st.range = &range;
+    VIState st; st.opts = &opts;
     DlgUI ui(parent);
 
     static const wchar_t* kInfo =
@@ -698,34 +672,30 @@ bool voiceIsolate(HWND parent, VoiceIsolateContext& ctx) {
     static const wchar_t* kSens[] = { L"Gentle (keep more)", L"Balanced", L"Strict (remove more)" };
     static const wchar_t* kCheck = L"Preview what would be removed";
 
-    int labelW = ui.textW(RangeRows::rowLabelText());
+    int labelW = 0;
     for (auto* t : kLabels) labelW = std::max(labelW, ui.textW(t));
     int ctlW = ui.S(150);
     for (auto* t : kSens) ctlW = std::max(ctlW, ui.comboW(t));
     ctlW = std::max(ctlW, ui.checkW(kCheck));
-    ctlW = std::max(ctlW, range.width(ui));
-    const int contentW = labelW + ui.gap + ctlW;
+    int contentW = labelW + ui.gap + ctlW;
+    ScopeLine scope(ctx.scopeLabel);
+    scope.widen(ui, contentW);
     const int ctlX = ui.margin + labelW + ui.gap;
     const int editW = std::max(ui.S(80), ui.textW(L"000000") + ui.S(16));
     const int rowH = ui.rowH(), step = rowH + ui.rowGap;
     const int bw = ui.btnW(L"Cancel"), bh = ui.btnH();
     const SIZE infoSz = ui.measure(kInfo, contentW);
+    scope.measure(ui, contentW);
 
-    // Rows: info paragraph, "Applies to", optional Range radios, sensitivity,
-    // three edits, output, buttons.
-    const int clientH = ui.margin + infoSz.cy + ui.S(10) + ui.lineH + ui.S(14)
-                      + range.height(ui, rowH, step) + 5 * step + ui.S(8) + bh + ui.margin;
+    // Rows: info paragraph, "Applies to", sensitivity, three edits, output, buttons.
+    const int clientH = ui.margin + infoSz.cy + ui.S(10) + scope.step(ui)
+                      + 5 * step + ui.S(8) + bh + ui.margin;
     HWND h = ui.create(L"ACE_VI", L"Remove Non-Voice", parent, ui.margin * 2 + contentW, clientH);
     SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
 
     int y = ui.margin;
     ui.label(kInfo, ui.margin, y, contentW, infoSz.cy);   y += infoSz.cy + ui.S(10);
-    // A long clip name is ellipsised rather than allowed to wrap out of its row.
-    ui.label((L"Applies to: " + ctx.scopeLabel).c_str(), ui.margin, y, contentW, ui.lineH,
-             SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS);
-    y += ui.lineH + ui.S(14);
-
-    range.build(ui, y, labelW, ctlW, rowH, step);
+    scope.build(ui, y, contentW);
 
     ui.rowLabel(kLabels[0], ui.margin, y, labelW, rowH);
     st.cbSens = ui.combo(ctlX, y, ctlW, 4);
