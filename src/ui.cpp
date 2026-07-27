@@ -685,7 +685,7 @@ struct App {
                sel ? col::text : col::dim, edHot == EB_SILENCE, fNorm);
         button(h, edBtn[EB_DELSEL], L"Delete selection", col::btn,
                sel ? col::text : col::dim, edHot == EB_DELSEL, fNorm);
-        button(h, edBtn[EB_SAVE],  L"Save selection as clip", col::btn,
+        button(h, edBtn[EB_SAVE],  L"New clip from selection", col::btn,
                sel ? col::text : col::dim, edHot == EB_SAVE, fNorm);
         button(h, edBtn[EB_CAPTURE], sel ? L"Capture noise (sel)" : L"Capture noise (clip)",
                col::btn, col::text, edHot == EB_CAPTURE, fNorm);
@@ -983,11 +983,14 @@ struct App {
                     SelectObject(h, op); DeleteObject(pen);
                 }
             }
-            // selection-action buttons (crop / save selection as new clip)
+            // selection-action buttons (crop / save selection as new clip).
+            // "New clip" rather than "Save sel": the button makes a clip in the
+            // library, and anything starting with "Save"/"Export" reads as writing
+            // a file -- which is a different feature sitting in the same menu.
             if (hasSel() && selClipId == cl.clipId) {
                 button(h, cl.crop, L"Crop", col::accentDk, col::text,
                        hotSelClip == cl.clipId && hotSelBtn == 1, fSmall);
-                button(h, cl.savesel, L"Save sel", col::accentDk, col::text,
+                button(h, cl.savesel, L"New clip", col::accentDk, col::text,
                        hotSelClip == cl.clipId && hotSelBtn == 2, fSmall);
             }
             // duration inside the wave, bottom-right
@@ -1092,8 +1095,8 @@ struct App {
                 // and it isn't: timeline playback renders the whole placement
                 // (TimelineSegment has no trim, see engine.cpp). The selection is
                 // an editing cursor scoped to the library, not an in/out point. To
-                // put part of a clip on a track, Save selection as clip and drag
-                // that; that clip's own length is then the honest arrangement.
+                // put part of a clip on a track, "New clip from selection" and
+                // drag that; that clip's length is then the honest arrangement.
                 RestoreDC(h, -1);
             }
             RECT nm = { pl.rc.left + S(6), pl.rc.top + S(2), pl.rc.right - S(4), pl.rc.top + S(18) };
@@ -1376,9 +1379,9 @@ struct App {
         const Clip* c = doc.project().findClip(selClipId);
         if (!c || !c->buffer) return;
         std::wstring name = c->name + L" (clip)";
-        if (!dlg::promptText(hwnd, L"Save selection as new clip", L"Clip name:", name)) return;
+        if (!dlg::promptText(hwnd, L"New clip from selection", L"Clip name:", name)) return;
         auto slice = sliceBuffer(*c->buffer, selStart, selEnd);
-        doc.addClip(name, slice, L"", L"Save selection as '" + name + L"'");
+        doc.addClip(name, slice, L"", L"New clip '" + name + L"' from selection");
         clampScroll(); refresh();
     }
 
@@ -1391,7 +1394,7 @@ struct App {
 
         // Crop only trims the clip in-editor (undoable). We never overwrite or
         // delete the original file on disk — to keep a cropped copy, use
-        // "Save selection as clip" or export.
+        // "New clip from selection" or export.
         doc.replaceClipBuffer(id, slice, L"Crop '" + nm + L"'");
         selStart = 0; selEnd = 0; selClipId = -1;
         refresh();
@@ -1894,6 +1897,8 @@ struct App {
             L"Library clips:\n"
             L"  \u2022 Click the \u25B6 button to play/pause a clip\n"
             L"  \u2022 Click-drag across the waveform to select a section\n"
+            L"  \u2022 With a selection, the card grows Crop and New clip buttons;\n"
+            L"    New clip slices the selection out as its own library clip\n"
             L"  \u2022 Double-click a clip (or right-click \u2192 Open in editor) for a full-window editor\n"
             L"  \u2022 Drag a clip up onto a track to place it (drops at any offset)\n"
             L"  \u2022 Right-click for save-selection, crop, normalize, voice cleaner\u2026\n"
@@ -2360,7 +2365,7 @@ struct App {
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_PLAY, L"Play / Pause");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_PLAYSEL, L"Play selection");
-        AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_SAVESEL, L"Save selection as new clip");
+        AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_SAVESEL, L"New clip from selection");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_CROP, L"Crop to selection\u2026");
         // The manual way to get rid of something "Remove non-voice" won't touch.
         // Silencing keeps the clip's length (so a pause between sentences stays
@@ -2372,8 +2377,8 @@ struct App {
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_CLEARSEL, L"Clear selection");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         // Writing audio back out. Edits only ever live in the .acep, so this is
-        // the one way to get an edited clip out as a file; "Save selection as new
-        // clip" above is its in-project counterpart. Greyed like the other
+        // the one way to get an edited clip out as a file; "New clip from
+        // selection" above is its in-project counterpart. Greyed like the other
         // selection entries so the option reads as available before there is one.
         AppendMenuW(m, MF_STRING, IDM_EXPORTCLIP, L"Export clip to file\u2026");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_EXPORTSEL,

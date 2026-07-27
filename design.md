@@ -698,8 +698,8 @@ prompted "won't the timing be off, and won't multiple tracks then be visually
 misaligned?", which is a real problem, but only for the trim semantics the overlay
 implied.
 
-The supported way to put *part* of a clip into an arrangement is **Save selection
-as clip** → drag the new clip onto the track. That preserves the invariant that a
+The supported way to put *part* of a clip into an arrangement is **New clip from
+selection** → drag the new clip onto the track. That preserves the invariant that a
 block's width is its audio, so lanes stay aligned, the playhead stays linear, and
 there is no per-placement in/out state to serialise.
 
