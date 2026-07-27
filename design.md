@@ -598,6 +598,33 @@ blocky) and from `PeakCache::rangeMinMax` otherwise.
 `paint()` was already double-buffered (`CreateCompatibleDC` + `CreateCompatibleBitmap`
 + `BitBlt`, with `WM_ERASEBKGND` returning 1), so no tearing work was needed.
 
+**The audio driver's clock is not linear for the first ~130 ms.** After
+`IAudioClient::Start()`, `IAudioClock` reports exactly one **~12 ms (510–530
+frame) downward step**, 60–130 ms in, and thereafter tracks QPC to within 0.1%
+for the rest of the stream. It is a property of the *device clock reading
+itself* — verified with `PlaybackEngine::posDiag()`, which exposes `devPlayed`
+alongside the mapped `heard`/`rendered` values and both clamp flags: at the step,
+`devPlayed` dips by the full amount while neither clamp is engaged and the
+render lead stays healthy. So the engine has nothing to correct; it is faithfully
+reporting what the hardware says, and the step is a one-off that never
+accumulates.
+
+This mattered because the selftest's stall check used to skip a fixed **tick
+count** (`i < 4`) to clear startup, which made it fail about **one run in six**
+at 0.60–0.65×. The transient happens at a fixed time after `Start()`, but a tick
+count anchors to whenever the sampling loop began, so the step fell inside the
+skip on most runs and just outside it on the rest. The check now skips by
+**elapsed time since the stream started** (350 ms), which is the quantity the
+transient is actually tied to. Two measurements pinned the cause down and are
+worth keeping in mind for anything similar: raising the process priority made the
+failure *more* frequent (5/8 rather than 1/8), which rules out CPU starvation
+since starvation would go the other way; and the per-tick `dt` stays a uniform
+~31 ms straight through the dip, so there is no scheduling gap. `posDiag()` is
+retained, and the check dumps the full per-tick series (dt, Δpos, rate,
+`devPlayed`, `heard`, `rendered`, clamp flags) whenever it fails — the playhead
+maps three independent clocks onto each other, and the reported frame number
+alone cannot say which one misbehaved.
+
 **Playhead in the fine-tune strips.** `paintFineStrip` draws the cursor whenever
 it falls inside that strip's window:
 `if (previewClipId == editClipId && previewCursor >= ws && previewCursor < we)`.

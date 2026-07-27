@@ -757,9 +757,18 @@ int runSelfTest() {
     {
         PlaybackEngine eng;
         std::wstring engErr;
+        LARGE_INTEGER qf; QueryPerformanceFrequency(&qf);
+        auto nowSec = [&] {
+            LARGE_INTEGER q; QueryPerformanceCounter(&q);
+            return (double)q.QuadPart / (double)qf.QuadPart;
+        };
         if (!eng.init(&engErr)) {
             out(L"[SKIP] playback engine: no audio device (" + engErr + L")");
         } else {
+            // init() is what calls IAudioClient::Start(), so this is the moment
+            // the device clock starts running -- the anchor the startup settling
+            // window below is measured from.
+            const double tStreamStart = nowSec();
             auto silence = std::make_shared<AudioBuffer>();
             silence->sampleRate = eng.sampleRate(); silence->channels = 2;
             silence->samples.assign((size_t)eng.sampleRate() * 2 * 2, 0.0f);   // 2 s
@@ -769,22 +778,39 @@ int runSelfTest() {
             // Sample the position repeatedly, timing each sample with QPC --
             // Sleep(20) really sleeps ~30 ms at the default timer resolution, so
             // the ticks have to be measured rather than assumed.
-            LARGE_INTEGER qf; QueryPerformanceFrequency(&qf);
-            auto nowSec = [&] {
-                LARGE_INTEGER q; QueryPerformanceCounter(&q);
-                return (double)q.QuadPart / (double)qf.QuadPart;
-            };
             std::vector<int64_t> pos; std::vector<double> at;
+            std::vector<PlaybackEngine::PosDiag> dg;
             const double t0 = nowSec();
-            for (int i = 0; i < 35; ++i) { Sleep(20); pos.push_back(eng.position()); at.push_back(nowSec()); }
+            for (int i = 0; i < 35; ++i) {
+                Sleep(20);
+                pos.push_back(eng.position()); dg.push_back(eng.posDiag()); at.push_back(nowSec());
+            }
             eng.stop();
 
             bool monotonic = true;
             double worstRate = 0.0, bestRate = 1e9;
             for (size_t i = 1; i < pos.size(); ++i) {
                 if (pos[i] < pos[i - 1]) monotonic = false;
-                // Skip the first few: the stream is still filling its buffer.
-                if (i < 4) continue;
+                // Skip the stream's startup settling, measured from the moment
+                // IAudioClient::Start() ran rather than as a tick count.
+                //
+                // Two separate things happen in that window. The buffer is still
+                // filling, so the heard position legitimately lags. And the audio
+                // driver's own clock is not yet linear: IAudioClock reports one
+                // ~12 ms (~510-530 frame) downward step, exactly once, 60-130 ms
+                // after Start(), after which it tracks QPC to within 0.1% for the
+                // rest of the stream. That step is in the *device* clock reading
+                // itself -- not the render timeline, not either clamp in
+                // position() -- so the engine has nothing to correct: it is
+                // faithfully reporting what the hardware says.
+                //
+                // This used to be `i < 4`, which made the check fail about one run
+                // in six. The transient happens at a fixed time after Start(), but
+                // a tick count anchors to whenever this loop happened to begin, so
+                // the step landed inside the skip on most runs and just past it on
+                // the rest. (Raising the process priority made it *more* frequent,
+                // not less -- which is what ruled out CPU starvation as the cause.)
+                if (at[i - 1] - tStreamStart < 0.35) continue;
                 const double dt = at[i] - at[i - 1];
                 if (dt <= 0) continue;
                 // Frames advanced per second of wall clock, as a multiple of the
@@ -803,10 +829,32 @@ int runSelfTest() {
             // right (0.99x) while swinging between 0.63x and 1.31x tick to tick,
             // which is what a stuttering playhead looks like. Measured here:
             // 0.9991x to 1.0008x. The thresholds sit between the two.
-            check(bestRate > 0.8, L"playback position never stalls between ticks",
+            const bool steady = bestRate > 0.8;
+            check(steady, L"playback position never stalls between ticks",
                   std::to_wstring(bestRate) + L"x");
             check(worstRate < 1.25, L"playback position never lurches between ticks",
                   std::to_wstring(worstRate) + L"x");
+            // This one fails intermittently and only on a loaded machine, so when
+            // it does, dump the series that produced it: a plateau followed by a
+            // catch-up looks quite different from a single lost increment, and
+            // without the samples the two are indistinguishable after the fact.
+            if (!steady) {
+                for (size_t i = 1; i < pos.size(); ++i) {
+                    const double dt = at[i] - at[i - 1];
+                    wchar_t line[160];
+                    swprintf(line, 160,
+                             L"       tick %2d  dt %6.2f ms  dpos %7lld  rate %6.3fx  "
+                             L"dev %8lld (+%5lld)  heard %8lld  rend %8lld  lead %6lld  recs %2d%s%s",
+                             (int)i, dt * 1000.0, (long long)(pos[i] - pos[i - 1]),
+                             dt > 0 ? (double)(pos[i] - pos[i - 1]) / dt / eng.sampleRate() : 0.0,
+                             (long long)dg[i].devPlayed,
+                             (long long)(dg[i].devPlayed - dg[i - 1].devPlayed),
+                             (long long)dg[i].heard, (long long)dg[i].rendered,
+                             (long long)(dg[i].rendered - dg[i].heard), dg[i].recCount,
+                             dg[i].clamped ? L"  CLAMPED" : L"", dg[i].drained ? L"  DRAINED" : L"");
+                    out(line);
+                }
+            }
             eng.shutdown();
         }
     }

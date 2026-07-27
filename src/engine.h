@@ -139,6 +139,21 @@ public:
     int64_t position() const;
     int64_t total() const;
 
+    // Why the last position() returned what it did: the raw device position, the
+    // two candidate answers, and which clamp (if either) bound. The playhead maps
+    // three independent clocks onto each other, so when it misbehaves the reported
+    // frame number alone cannot say which one was responsible.
+    struct PosDiag {
+        int64_t devPlayed = 0;   // device frames played (clock + extrapolation)
+        int64_t heard = 0;       // what the timeline mapped that to
+        int64_t rendered = 0;    // source frames pulled so far (a staircase)
+        int64_t devEnd = 0;      // device frames written as of the newest record
+        int     recCount = 0;
+        bool    drained = false; // devPlayed ran past everything written
+        bool    clamped = false; // heard > rendered, so `rendered` won
+    };
+    PosDiag posDiag() const;
+
 private:
     void threadMain();
     void writeFrames(void* dst, const float* stereo, int frames);
