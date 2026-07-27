@@ -821,15 +821,13 @@ struct App {
     // buffer spread across [wv.left, wv.right): a tinted band, the waveform
     // redrawn in the accent colour inside it, and an edge line each side.
     //
-    // Shared by the library card and by the clip's block on a track lane. A
-    // selection belongs to the clip, not to the view that made it, so every place
-    // the clip is shown has to show it -- a selection made on a card used to be
-    // invisible on that same clip's placement in the timeline, which made the two
-    // look like unrelated pieces of audio.
+    // Used by the library card. Not by the clip's block on a track lane, even
+    // though the geometry would work: see the note in paintTimeline for why a
+    // selection must not appear on an arrangement.
     //
-    // `wv` may extend past the visible area (a placed clip scrolled half off the
-    // lane), so callers clip; the frame->x mapping deliberately uses the full
-    // untrimmed rect so it agrees with the wf::draw underneath.
+    // `wv` may extend past the visible area, so callers clip; the frame->x mapping
+    // deliberately uses the full untrimmed rect so it agrees with the wf::draw
+    // underneath.
     void drawSelOverlay(HDC h, const RECT& wv, const Clip& c) {
         if (!c.buffer || !c.peaks) return;
         const int64_t nf = std::max<int64_t>(1, c.frames());
@@ -1078,9 +1076,15 @@ struct App {
             if (c && c->buffer && c->peaks && wv.right > wv.left) {
                 SaveDC(h); IntersectClipRect(h, wv.left, wv.top, wv.right, wv.bottom);
                 wf::draw(h, wv, *c->buffer, *c->peaks, 0, c->frames(), RGB(180, 210, 245));
-                // The selection belongs to the clip, so it shows here too -- this
-                // block is the same audio as the library card above.
-                if (selectionCovers(pl.clipId)) drawSelOverlay(h, wv, *c);
+                // Deliberately *no* selection overlay here. It was drawn for a
+                // while, on the reasoning that a selection belongs to the clip and
+                // so belongs on every surface showing that clip -- but on a track
+                // lane a highlighted band reads as "this is the part that plays",
+                // and it isn't: timeline playback renders the whole placement
+                // (TimelineSegment has no trim, see engine.cpp). The selection is
+                // an editing cursor scoped to the library, not an in/out point. To
+                // put part of a clip on a track, Save selection as clip and drag
+                // that; that clip's own length is then the honest arrangement.
                 RestoreDC(h, -1);
             }
             RECT nm = { pl.rc.left + S(6), pl.rc.top + S(2), pl.rc.right - S(4), pl.rc.top + S(18) };

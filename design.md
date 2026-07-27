@@ -636,35 +636,45 @@ after all three fixes: the cursor advances 36–37 px per 16.7 ms sample, i.e.
 15.3–15.7 ms of audio per screen refresh, uniformly (it was 66–70 px lumps at
 irregular ~33 ms intervals).
 
-## Where the selection is drawn
+## Where the selection is drawn — and where it deliberately isn't
 
-**A selection belongs to the clip, not to the view that made it.** There is one
-selection in the whole app (`selClipId` + `selStart`/`selEnd`), so *every* surface
-that shows that clip's audio has to show it — otherwise the same audio appears in
-two places looking like two unrelated pieces, which is exactly the bug that was
-reported: a selection dragged on a library card was invisible on that clip's
-block in the track lane.
+**A selection is an editing cursor, not a trim.** There is one selection in the
+whole app (`selClipId` + `selStart`/`selEnd`) and it means "what the next
+operation applies to". It is scoped to the *library*: the clip card, the
+full-window editor's main view, and the editor's fine-tune strips.
 
-`drawSelOverlay(hdc, wv, clip)` is the single implementation, shared by the
-library card and the timeline placement (the editor's main view and fine-tune
-strips have their own zoomed mapping). It takes a rect across which the clip's
-**whole** buffer is spread and paints the tinted band, the waveform redrawn in
-`col::waveSel` inside it, and an edge line each side. Two details:
+It is **not** drawn on a clip's block in a track lane, and that omission is
+load-bearing rather than an oversight. It *was* drawn there for one version, on
+the reasoning that a selection belongs to the clip and so belongs on every surface
+showing that clip. That reasoning is fine in the abstract and wrong in this UI: on
+a track lane a highlighted band inevitably reads as *"this is the part that
+plays"* — and it isn't. `TimelineSource::render` maps `src = p - seg.timelineStart`
+across the whole placement, and `TimelineSegment` is `{buf, timelineStart, length,
+gain}`; there is no trim field anywhere in the playback path. The overlay was
+advertising a feature that does not exist, and it did in fact mislead — it
+prompted "won't the timing be off, and won't multiple tracks then be visually
+misaligned?", which is a real problem, but only for the trim semantics the overlay
+implied.
 
-- The frame→x mapping deliberately uses the full, untrimmed `wv`, because a
-  placed clip can extend past the visible lane; callers clip with
-  `IntersectClipRect` so the geometry still agrees with the `wf::draw` beneath.
-- A sub-pixel selection is widened to one pixel, so a very short selection on a
-  narrow placement is still visible rather than collapsing to nothing.
+The supported way to put *part* of a clip into an arrangement is **Save selection
+as clip** → drag the new clip onto the track. That preserves the invariant that a
+block's width is its audio, so lanes stay aligned, the playhead stays linear, and
+there is no per-placement in/out state to serialise.
 
-Callers guard with the existing `selectionCovers(clipId)` rather than re-deriving
-"does this clip own the selection".
+If timeline trimming is ever actually wanted, the shape is a per-placement
+`srcOffset`/`srcLength` on `PlacedClip` (in/out points — no audio duplication,
+re-trimmable later), an `.acep` version bump to 4, and a revisit of the placement
+clamp in `document.cpp` (`len = min(pc.lengthFrames, c->frames())`). It is a
+separate feature from the selection and should not be spelled by overloading it.
 
-Verified by measurement rather than by eye: with the timeline zoomed so the
-placement is ~158 px wide, the band matches the card's to **0.63 px** at the start
-edge and **0.46 px** at the end — pure rounding. (At the default scale a 0.4 s
-placement is only ~26 px, where one pixel is 4% of the block and nothing finer
-than that can be concluded.)
+`drawSelOverlay(hdc, wv, clip)` remains the single implementation, now used only
+by the library card. It takes a rect across which the clip's **whole** buffer is
+spread and paints the tinted band, the waveform redrawn in `col::waveSel` inside
+it, and an edge line each side. The frame→x mapping uses the full untrimmed `wv`
+so it agrees with the `wf::draw` beneath, and a sub-pixel selection is widened to
+one pixel so a very short selection still shows. Callers guard with
+`selectionCovers(clipId)` rather than re-deriving "does this clip own the
+selection".
 
 ## Selection editing (independent edges)
 
