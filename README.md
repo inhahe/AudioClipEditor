@@ -21,7 +21,10 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   (oldest first)** — the time being the source file's date, or when a derived clip
   was created. Reorders and sorts are each a single undo step.
 - **Play any clip** with a per-card play/pause button. Click the waveform to
-  seek / skip around. Playback is real, mixed, low-latency WASAPI.
+  seek / skip around — the yellow cursor is always where playback will pick up,
+  so clicking while paused (or stopped) moves the restart point. Pause always
+  pauses, including in the middle of a selection audition, and play continues
+  from where it stopped. Playback is real, mixed, low-latency WASAPI.
 - **Select a section** of any clip by dragging across its waveform. While a
   selection is active the card shows **Crop** and **Save sel** buttons, and the
   card's play button auditions **only the selected part** (so you can preview

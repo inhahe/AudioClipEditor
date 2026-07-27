@@ -104,10 +104,16 @@ struct App {
     std::vector<PlacedLayout> placed;
     std::vector<TrackLayout> trackLays;
 
-    // playback / preview state
+    // playback / preview state.
+    // previewCursor is the authoritative play position for the previewed clip: the
+    // yellow cursor is drawn there, and play/resume always (re)starts there, so a
+    // seek made while stopped or paused is honoured.
     int previewClipId = -1;
-    bool previewIsSel = false;
+    bool previewIsSel = false;     // the armed source spans the selection, not the whole clip
     int64_t previewCursor = 0;     // frame within clip (display + start point)
+    int64_t previewBegin = 0;      // frame range the armed source covers, [begin,end)
+    int64_t previewEnd = 0;
+    bool previewSeekPending = false;  // cursor moved while not playing; re-arm on resume
     bool timelinePlaying = false;
     int64_t playheadFrame = 0;
 
@@ -313,12 +319,8 @@ struct App {
     // ----- editor interaction ------------------------------------------------
     void edButton(int id) {
         switch (id) {
-        case EB_PLAY:
-            if (previewClipId == editClipId && !previewIsSel && engine.isPlaying()) engine.pause();
-            else if (previewClipId == editClipId && !previewIsSel && engine.isPaused()) engine.resume();
-            else startClipPreview(editClipId, 0);
-            break;
-        case EB_PLAYSEL: if (hasSel() && selClipId == editClipId) playSelection(); break;
+        case EB_PLAY: togglePreview(editClipId, false); break;   // whole clip
+        case EB_PLAYSEL: if (hasSel() && selClipId == editClipId) togglePreview(editClipId, true); break;
         case EB_FINE: editFineToggle = !editFineToggle; break;
         case EB_CROP: if (hasSel() && selClipId == editClipId) cropSelection(); break;
         case EB_SAVE: if (hasSel() && selClipId == editClipId) saveSelectionAsClip(); break;
@@ -1146,49 +1148,67 @@ struct App {
         clampScroll(); refresh();
     }
 
-    void togglePlayClip(int clipId) {
-        // When this clip has an active selection, the play button auditions only
-        // the selected part.
-        if (hasSel() && selClipId == clipId) {
-            if (previewClipId == clipId && previewIsSel) {
-                if (engine.isPlaying())     { engine.pause();  refresh(); return; }
-                if (engine.isPaused())      { engine.resume(); refresh(); return; }
-            }
-            playSelection();   // (re)start from selection start
-            return;
+    // Play / pause a clip preview. `useSel` asks for the selection-only audition;
+    // it is ignored when the clip has no selection.
+    //
+    // Two rules make this predictable:
+    //   * any *playing* preview of this clip pauses, whichever button was pressed
+    //     (so the pause button really pauses a selection audition), and
+    //   * play/resume always starts at previewCursor, so a click on the waveform
+    //     while paused or stopped moves where playback picks up.
+    void togglePreview(int clipId, bool useSel) {
+        if (previewClipId == clipId && !timelinePlaying && engine.isPlaying()) {
+            engine.pause(); refresh(); return;
         }
-        if (previewClipId == clipId && !previewIsSel) {
-            if (engine.isPlaying()) engine.pause();
-            else if (engine.isPaused()) engine.resume();
-            else startClipPreview(clipId, previewCursor);
-        } else {
-            startClipPreview(clipId, 0);
+        const bool wantSel = useSel && hasSel() && selClipId == clipId;
+        // Same clip, same audition range as the armed source => this is a resume.
+        const bool sameSource = previewClipId == clipId && !timelinePlaying &&
+                                previewIsSel == wantSel &&
+                                (!wantSel || (previewBegin == selStart && previewEnd == selEnd));
+        if (sameSource && engine.isPaused() && !previewSeekPending) {
+            engine.resume(); refresh(); return;    // continue exactly where it stopped
         }
-        refresh();
+        // Otherwise start where the cursor sits; a fresh selection audition begins
+        // at the selection start, and an unrelated clip begins at its head.
+        const int64_t from = wantSel ? (sameSource ? previewCursor : selStart)
+                                     : (previewClipId == clipId ? previewCursor : 0);
+        startPreview(clipId, from, wantSel);
     }
-    void startClipPreview(int clipId, int64_t startFrame) {
+    // The library card's play button auditions the selection when there is one.
+    void togglePlayClip(int clipId) { togglePreview(clipId, true); }
+
+    // (Re)arm a preview source for `clipId` and start it at `startFrame`.
+    void startPreview(int clipId, int64_t startFrame, bool useSel) {
         const Clip* c = doc.project().findClip(clipId);
         if (!c || !c->buffer) return;
-        if (startFrame < 0 || startFrame >= c->frames()) startFrame = 0;  // restart if at end
+        const bool sel = useSel && hasSel() && selClipId == clipId;
+        const int64_t begin = sel ? selStart : 0;
+        const int64_t end   = sel ? selEnd   : c->frames();
+        if (end <= begin) return;
+        if (startFrame < begin || startFrame >= end) startFrame = begin;   // restart if at the end
         timelinePlaying = false;
-        previewClipId = clipId; previewIsSel = false; previewCursor = startFrame;
-        engine.play(std::make_shared<BufferSource>(c->buffer, 0, c->frames(), c->gain), startFrame);
-    }
-    void playSelection() {
-        if (!hasSel()) return;
-        const Clip* c = doc.project().findClip(selClipId);
-        if (!c || !c->buffer) return;
-        timelinePlaying = false;
-        previewClipId = selClipId; previewIsSel = true; previewCursor = selStart;
-        engine.play(std::make_shared<BufferSource>(c->buffer, selStart, selEnd, c->gain), 0);
+        previewClipId = clipId; previewIsSel = sel;
+        previewBegin = begin; previewEnd = end;
+        previewCursor = startFrame; previewSeekPending = false;
+        engine.play(std::make_shared<BufferSource>(c->buffer, begin, end, c->gain), startFrame - begin);
         refresh();
     }
+    void playSelection() { if (hasSel()) startPreview(selClipId, selStart, true); }
+
+    // Move the play cursor. Takes effect immediately while playing; otherwise it is
+    // remembered and honoured by the next play/resume.
     void seekClip(int clipId, int64_t frame) {
-        previewClipId = clipId; previewIsSel = false; previewCursor = frame; timelinePlaying = false;
-        if (engine.hasSource() && engine.isPlaying()) {
-            const Clip* c = doc.project().findClip(clipId);
-            if (c) engine.play(std::make_shared<BufferSource>(c->buffer, 0, c->frames(), c->gain), frame);
-        }
+        const Clip* c = doc.project().findClip(clipId);
+        if (!c) return;
+        frame = std::max<int64_t>(0, std::min(frame, c->frames()));
+        // Stay inside a selection audition only while the target is still in range.
+        const bool keepSel = previewIsSel && previewClipId == clipId && hasSel() &&
+                             selClipId == clipId && frame >= selStart && frame < selEnd;
+        const bool playing = !timelinePlaying && previewClipId == clipId && engine.isPlaying();
+        timelinePlaying = false;
+        if (playing) { startPreview(clipId, frame, keepSel); return; }
+        previewClipId = clipId; previewIsSel = keepSel;
+        previewCursor = frame; previewSeekPending = true;
         refresh();
     }
 
@@ -1662,7 +1682,10 @@ struct App {
         refresh();
     }
     void stopAll() {
-        engine.stop(); timelinePlaying = false; previewClipId = -1; refresh();
+        engine.stop(); timelinePlaying = false;
+        previewClipId = -1; previewIsSel = false; previewSeekPending = false;
+        previewBegin = previewEnd = 0; previewCursor = 0;
+        refresh();
     }
 
     // --------------------------------------------------------- undo / redo
@@ -2232,20 +2255,14 @@ struct App {
         if (projectModified() != lastTitleDirty) { lastTitleDirty = projectModified(); setTitle(); }
         if (engine.isPlaying()) {
             if (timelinePlaying) playheadFrame = engine.position();
-            else if (previewClipId >= 0) {
-                int64_t pos = engine.position();
-                previewCursor = previewIsSel ? (selStart + pos) : pos;
-            }
+            else if (previewClipId >= 0) previewCursor = previewBegin + engine.position();
             refresh();
         }
     }
     void onPlayEnd() {
         // source drained
         if (timelinePlaying) { timelinePlaying = false; }
-        else if (previewClipId >= 0) {
-            const Clip* c = doc.project().findClip(previewClipId);
-            previewCursor = previewIsSel ? selEnd : (c ? c->frames() : 0);
-        }
+        else if (previewClipId >= 0) previewCursor = previewEnd;
         refresh();
     }
 };

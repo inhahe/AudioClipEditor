@@ -6,6 +6,7 @@
 #include "encoder.h"
 #include "dsp.h"
 #include "document.h"
+#include "engine.h"
 #include <windows.h>
 #include <shlwapi.h>
 #include <string>
@@ -325,6 +326,30 @@ int runSelfTest() {
         d.view().playheadFrame = 4321;
         check(!d.isModified(), L"playhead move does not mark the project modified");
         DeleteFileW(proj.c_str());
+    }
+
+    // Sub-range preview source: the UI arms a BufferSource over [begin,end) and
+    // maps clip frames to source frames with (frame - begin), so position() must
+    // stay relative to begin and rendering must stop at end.
+    {
+        const int64_t begin = 1000, end = 5000, from = 1250;
+        BufferSource src(sine, begin, end, 1.0f);
+        check(src.total() == end - begin && src.position() == 0,
+              L"preview source spans the selection",
+              L"total=" + std::to_wstring(src.total()));
+        src.seek(from - begin);                       // start playback at clip frame `from`
+        check(src.position() == from - begin, L"preview source seek is begin-relative",
+              L"pos=" + std::to_wstring(src.position()));
+        float got[16] = { 0 };
+        int n = src.render(got, 8);
+        bool sameAudio = (n == 8);
+        for (int i = 0; i < 8 && sameAudio; ++i)
+            sameAudio = std::fabs(got[i * 2] - sine->samples[(size_t)(from + i) * 2]) < 1e-6f;
+        check(sameAudio, L"preview source renders from the seek point");
+        src.seek(end - begin - 4);                    // 4 frames left before the end
+        float tail[64] = { 0 };
+        check(src.render(tail, 32) == 4, L"preview source stops at the selection end");
+        check(src.render(tail, 32) == 0, L"preview source drains once past the end");
     }
 
     // Voice isolation ("remove non-voice"): a harmonic speech-like stretch plus a

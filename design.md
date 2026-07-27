@@ -258,6 +258,46 @@ alongside — deliberately **not inside** — `Project`:
   or whose bounds fall outside the clip (e.g. the clip was cropped in another
   session), is dropped rather than restored as a bogus highlight.
 
+## Clip preview playback (cursor, play/pause, seeking)
+
+Clip auditioning is driven from `App` by a small block of preview state, with
+`previewCursor` as the **single authoritative play position** (in clip frames):
+it is what the yellow cursor is drawn at, and what play/resume starts from.
+
+- `previewClipId` — the clip the armed source belongs to (`-1` = none).
+- `previewBegin` / `previewEnd` — the frame range the armed `BufferSource`
+  covers: the whole clip, or `[selStart, selEnd)` for a selection audition.
+  `previewIsSel` records which of the two it is.
+- `previewSeekPending` — the cursor was moved while stopped/paused, so the next
+  play must re-arm the source instead of resuming the engine in place.
+
+Three functions own all of it:
+
+- **`startPreview(clipId, startFrame, useSel)`** arms a `BufferSource` over the
+  chosen range and starts it at `startFrame - previewBegin` (the source's
+  `seek`/`position` are begin-relative). A start frame outside the range snaps to
+  the range start, which is what makes "play again after it finished" restart.
+- **`togglePreview(clipId, useSel)`** is the play/pause button for both the
+  library card (`togglePlayClip` → `useSel = true`, so the button auditions the
+  selection when there is one) and the clip editor (`EB_PLAY` → whole clip,
+  `EB_PLAYSEL` → selection). Two rules keep it predictable: **any playing preview
+  of this clip pauses**, whichever button was pressed (so the pause button really
+  pauses a selection audition instead of restarting it), and **resume happens in
+  place only when the armed source still matches** what was asked for
+  (same clip, same range) and no seek is pending — otherwise it re-arms at
+  `previewCursor`.
+- **`seekClip(clipId, frame)`** moves the cursor. While playing it re-arms
+  immediately (staying inside the selection audition only while the target is
+  still within it); while stopped or paused it just records `previewCursor` and
+  sets `previewSeekPending`, so clicking the waveform decides where the next
+  play/resume picks up.
+
+`onTimer` tracks the cursor as `previewBegin + engine.position()` and `onPlayEnd`
+parks it at `previewEnd` — neither reads the live selection, so editing the
+selection mid-playback can't drag the cursor around. `stopAll()` clears the whole
+block. The selftest covers the `BufferSource` sub-range arithmetic these rely on
+(begin-relative seek/position and stopping at the range end).
+
 ## Selection editing (independent edges)
 
 A selection can be adjusted one edge at a time instead of redrawn. All three
@@ -304,9 +344,11 @@ region by ≈20 dB (measured −20.00 dB) while preserving ≥70% of an embedded
 dispatch through `denoise()` incl. missing-profile rejection. Also covers a
 `Document` `.acep` **v3 round-trip** (library order, per-clip timestamps, and the
 saved selection + playhead preserved; a stale selection is dropped on load),
-library **sort-by-name / sort-by-time / reorder**, and the unsaved-changes flag
+library **sort-by-name / sort-by-time / reorder**, the unsaved-changes flag
 (an edit or a selection change dirties the project, saving clears it, moving the
-playhead does not dirty it).
+playhead does not dirty it), and the `BufferSource` sub-range behaviour the clip
+preview depends on (span, begin-relative seek/position, rendering from the seek
+point, stopping and draining at the range end).
 
 Voice-isolation coverage builds a synthetic 5.2 s signal — harmonic speech-like
 stretch (F0 140 Hz + 12 harmonics), a 60 Hz decaying thump, a broadband shuffle
