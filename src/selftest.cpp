@@ -433,6 +433,59 @@ int runSelfTest() {
                         std::fabs((double)clean->samples[i] + res->samples[i] - sig->samples[i]));
             check(res && maxDiff < 1e-5, L"voice isolation reduce+residue == original",
                   L"maxDiff=" + std::to_wstring(maxDiff));
+
+            // "Only the selection": the effect still runs over the whole clip, then
+            // blendProcessedRange keeps just part of that result. Chosen range
+            // covers the bump (3.00-3.30) but not the shuffle (4.00-4.50).
+            const int64_t r0 = (int64_t)(2.90 * rate), r1 = (int64_t)(3.50 * rate);
+            auto partial = dsp::blendProcessedRange(*sig, *clean, r0, r1);
+            check(partial && partial->frames() == nf && partial->channels == sig->channels,
+                  L"range blend preserves length and channels");
+            if (partial) {
+                double outside = 0.0;
+                for (int64_t i = 0; i < nf; ++i) {
+                    if (i >= r0 && i < r1) continue;
+                    for (int c = 0; c < 2; ++c)
+                        outside = std::max(outside, std::fabs((double)partial->samples[i * 2 + c] -
+                                                              sig->samples[i * 2 + c]));
+                }
+                check(outside == 0.0, L"range blend leaves audio outside the range untouched",
+                      L"maxDiff=" + std::to_wstring(outside));
+
+                // Past the crossfade edges the range holds the processed result exactly.
+                double inside = 0.0;
+                const int64_t guard = (int64_t)(0.02 * rate);
+                for (int64_t i = r0 + guard; i < r1 - guard; ++i)
+                    for (int c = 0; c < 2; ++c)
+                        inside = std::max(inside, std::fabs((double)partial->samples[i * 2 + c] -
+                                                             clean->samples[i * 2 + c]));
+                check(inside < 1e-6, L"range blend keeps the processed result inside the range",
+                      L"maxDiff=" + std::to_wstring(inside));
+
+                double pb = dbDrop(regionRms(*sig, bA + 0.02, bB), regionRms(*partial, bA + 0.02, bB));
+                check(pb < -20.0, L"range blend removes non-voice inside the range",
+                      std::to_wstring(pb) + L" dB");
+                double ps = dbDrop(regionRms(*sig, sA + 0.05, sB - 0.05),
+                                   regionRms(*partial, sA + 0.05, sB - 0.05));
+                check(std::fabs(ps) < 0.01, L"range blend keeps non-voice outside the range",
+                      std::to_wstring(ps) + L" dB");
+            }
+            check(dsp::blendProcessedRange(*sig, *clean, r1, r0) == nullptr,
+                  L"range blend rejects an empty range");
+            AudioBuffer shortBuf; shortBuf.sampleRate = rate; shortBuf.channels = 2;
+            shortBuf.samples.assign(1024, 0.0f);
+            check(dsp::blendProcessedRange(*sig, shortBuf, r0, r1) == nullptr,
+                  L"range blend rejects a mismatched buffer");
+
+            // Statistics follow that range instead of covering the whole clip:
+            // 0.0-0.6 s is room tone only, so nothing there is voice.
+            dsp::VoiceIsolateStats rst;
+            dsp::isolateVoice(*sig, vio, &rst, 0, (int64_t)(0.6 * rate));
+            check(rst.segments == 0 && rst.voiceSeconds == 0.0 &&
+                  std::fabs(rst.removedSeconds - 0.6) < 0.01,
+                  L"voice isolation stats follow the range",
+                  L"segments=" + std::to_wstring(rst.segments) +
+                  L" removed=" + std::to_wstring(rst.removedSeconds) + L"s");
         }
     }
 

@@ -24,6 +24,17 @@ bool exportOptions(HWND parent, mfio::ExportOptions& opts, std::wstring& outPath
 // a Get Noise Profile button that captures `*profile` from `noiseSelection`
 // (the current waveform selection, may be null) and describes it in
 // `*profileDesc`. Returns true on Apply.
+// "Range:" rows shared by the voice cleaner and remove-non-voice dialogs: let the
+// user restrict the effect to the current waveform selection instead of the whole
+// clip. Only meaningful when the operation targets exactly one clip, so the rows
+// are omitted entirely for multi-clip scopes.
+struct RangeOption {
+    bool offer = false;               // single-clip scope: show the Range rows at all
+    bool hasSelection = false;        // ...and there is a selection on that clip
+    std::wstring selectionDesc;       // e.g. "0:12.30 - 0:18.00 (5.70 s)"
+    bool selectionOnly = false;       // in/out: process only the selected range
+};
+
 struct VoiceCleanerContext {
     dsp::NROptions* opts = nullptr;               // in/out
     dsp::NoiseProfile* profile = nullptr;         // in/out (session-scoped)
@@ -33,6 +44,7 @@ struct VoiceCleanerContext {
     bool captured = false;                        // set true if the user captured a new
                                                   // profile via Get Noise Profile, so the
                                                   // caller can add it to recent captures
+    RangeOption range;                            // in/out: whole clip vs selection only
 };
 bool voiceCleaner(HWND parent, VoiceCleanerContext& ctx);
 
@@ -40,7 +52,12 @@ bool voiceCleaner(HWND parent, VoiceCleanerContext& ctx);
 // last-used settings in and the chosen settings out; `scopeLabel` describes what
 // the operation will be applied to (e.g. "'interview take 2'", "all clips").
 // Returns true on Apply.
-bool voiceIsolate(HWND parent, dsp::VoiceIsolateOptions& opts, const std::wstring& scopeLabel);
+struct VoiceIsolateContext {
+    dsp::VoiceIsolateOptions* opts = nullptr;     // in/out
+    std::wstring scopeLabel;                      // "'clip'", "all clips (3 clips)"
+    RangeOption range;                            // in/out: whole clip vs selection only
+};
+bool voiceIsolate(HWND parent, VoiceIsolateContext& ctx);
 
 // Project open/save file dialogs (.acep). Return empty string on cancel.
 std::wstring openProject(HWND parent);

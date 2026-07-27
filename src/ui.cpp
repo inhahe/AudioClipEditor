@@ -133,6 +133,11 @@ struct App {
     // "Remove non-voice" (voice isolation) options, persisted for the session
     dsp::VoiceIsolateOptions viOpts;
 
+    // Last "Range:" choice from the cleaner / remove-non-voice dialogs, shared by
+    // both and remembered for the session. It is only ever *offered* when the
+    // current clip has a selection, so it can never silently apply on its own.
+    bool rangeOnlySelection = false;
+
     // interaction
     Mode mode = Mode::None;
     POINT downPt{};
@@ -1212,6 +1217,23 @@ struct App {
         refresh();
     }
 
+    // Fill in the "Range:" choice offered by the voice cleaner / remove-non-voice
+    // dialogs. Restricting an effect to a range only makes sense when it targets a
+    // single clip, and only that clip's own selection counts — so a selection left
+    // over on some *other* clip can't silently narrow the operation.
+    void fillRangeOption(dlg::RangeOption& r, const std::vector<int>& targets, bool lastChoice) {
+        r.offer = targets.size() == 1;
+        r.hasSelection = r.offer && hasSel() && selClipId == targets[0] && selEnd > selStart;
+        r.selectionOnly = r.hasSelection && lastChoice;
+        if (!r.hasSelection) return;
+        const Clip* c = doc.project().findClip(selClipId);
+        const double rate = (c && c->buffer && c->buffer->sampleRate > 0) ? c->buffer->sampleRate : 48000.0;
+        const double t0 = selStart / rate, t1 = selEnd / rate;
+        wchar_t d[128];
+        swprintf(d, 128, L"%s \u2013 %s, %.2f s", fmtTime(t0).c_str(), fmtTime(t1).c_str(), t1 - t0);
+        r.selectionDesc = d;
+    }
+
     AudioBufferPtr sliceBuffer(const AudioBuffer& src, int64_t f0, int64_t f1) {
         auto out = std::make_shared<AudioBuffer>();
         out->sampleRate = src.sampleRate; out->channels = src.channels;
@@ -1313,9 +1335,14 @@ struct App {
                 ctx.selectionDesc = L"'" + sc->name + L"'";
             }
         }
+        fillRangeOption(ctx.range, targets, rangeOnlySelection);
         bool okDlg = dlg::voiceCleaner(hwnd, ctx);
         if (ctx.captured) rememberCapture(noiseProfile, noiseProfileDesc);
         if (!okDlg) return;
+        // Only remember the choice when it was actually on offer, so a run over a
+        // whole track can't silently reset the preference.
+        if (ctx.range.hasSelection) rangeOnlySelection = ctx.range.selectionOnly;
+        const bool selOnly = ctx.range.selectionOnly;   // implies a single target clip
         dsp::NROptions opts = nrOpts;             // nrOpts persists for the session
         opts.noiseProfile = &noiseProfile;        // bind profile only for this call
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
@@ -1325,6 +1352,11 @@ struct App {
             const Clip* c = doc.project().findClip(id);
             if (!c || !c->buffer) continue;
             auto cleaned = dsp::denoise(*c->buffer, opts);
+            // "Only the selection": the whole clip is analysed and cleaned (so the
+            // noise estimate still sees the quiet gaps), then only the selected
+            // range of that result is kept.
+            if (cleaned && selOnly)
+                cleaned = dsp::blendProcessedRange(*c->buffer, *cleaned, selStart, selEnd);
             if (cleaned) updates.push_back({ id, cleaned });
             else ++failed;
         }
@@ -1334,8 +1366,9 @@ struct App {
             return;
         }
         stopAll();   // buffers are changing under any active playback
+        const std::wstring what = selOnly ? L"the selection in " : L"";
         std::wstring desc = targets.size() == 1
-            ? L"Voice cleaner on " + scopeLabel
+            ? L"Voice cleaner on " + what + scopeLabel
             : L"Voice cleaner (" + scopeLabel + L", " + std::to_wstring(updates.size()) + L" clips)";
         doc.replaceClipBuffers(updates, desc);
         refresh();
@@ -1378,7 +1411,15 @@ struct App {
         }
         std::wstring scope = scopeLabel;
         if (targets.size() > 1) scope += L" (" + std::to_wstring(targets.size()) + L" clips)";
-        if (!dlg::voiceIsolate(hwnd, viOpts, scope)) return;
+        dlg::VoiceIsolateContext ctx;
+        ctx.opts = &viOpts;
+        ctx.scopeLabel = scope;
+        fillRangeOption(ctx.range, targets, rangeOnlySelection);
+        if (!dlg::voiceIsolate(hwnd, ctx)) return;
+        // Only remember the choice when it was actually on offer, so a run over a
+        // whole track can't silently reset the preference.
+        if (ctx.range.hasSelection) rangeOnlySelection = ctx.range.selectionOnly;
+        const bool selOnly = ctx.range.selectionOnly;   // implies a single target clip
 
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
         std::vector<std::pair<int, AudioBufferPtr>> updates;
@@ -1387,7 +1428,14 @@ struct App {
             const Clip* c = doc.project().findClip(id);
             if (!c || !c->buffer) continue;
             dsp::VoiceIsolateStats st;
-            auto processed = dsp::isolateVoice(*c->buffer, viOpts, &st);
+            // "Only the selection": voice detection still runs over the whole clip
+            // (it needs the surrounding context), but only the selected range of
+            // the result is kept — and only that range is counted in the stats.
+            auto processed = selOnly
+                ? dsp::isolateVoice(*c->buffer, viOpts, &st, selStart, selEnd)
+                : dsp::isolateVoice(*c->buffer, viOpts, &st);
+            if (processed && selOnly)
+                processed = dsp::blendProcessedRange(*c->buffer, *processed, selStart, selEnd);
             if (!processed) continue;
             removedSec += st.removedSeconds;
             segments += st.segments;
@@ -1399,18 +1447,21 @@ struct App {
             return;
         }
         stopAll();   // buffers are changing under any active playback
+        const std::wstring what = selOnly ? L"the selection in " : L"";
         std::wstring desc = (viOpts.residue ? L"Preview removed non-voice in "
-                                            : L"Remove non-voice from ") + scopeLabel;
+                                            : L"Remove non-voice from ") + what + scopeLabel;
         doc.replaceClipBuffers(updates, desc);
         refresh();
-        wchar_t msg[256];
-        swprintf(msg, 256,
+        // The counts cover only what was actually changed, so say which that was.
+        const wchar_t* where = selOnly ? L" (within the selection)" : L"";
+        wchar_t msg[320];
+        swprintf(msg, 320,
                  viOpts.residue
-                     ? L"Kept only the non-voice material: %.1f s across %d voice segment(s).\n\n"
+                     ? L"Kept only the non-voice material: %.1f s across %d voice segment(s)%s.\n\n"
                        L"Undo (Ctrl+Z) to go back."
-                     : L"Silenced %.1f s of non-voice, keeping %d voice segment(s).\n\n"
+                     : L"Silenced %.1f s of non-voice, keeping %d voice segment(s)%s.\n\n"
                        L"Undo (Ctrl+Z) to go back.",
-                 removedSec, segments);
+                 removedSec, segments, where);
         MessageBoxW(hwnd, msg, L"Remove non-voice", MB_ICONINFORMATION);
     }
 
