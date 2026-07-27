@@ -20,7 +20,7 @@ sync with behavior changes.
 | `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms + voice isolation (see below) |
 | `waveform.{h,cpp}` | GDI oscilloscope: min/max envelope zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, file/project pickers |
-| `layout.h` | Pure drop geometry for the reflowing library grid (`insertIndex`, `caretAnchor`) — split out of `ui.cpp` so it is headlessly testable |
+| `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`) and toolbar row wrapping (`flowButtons`) |
 | `ui.cpp` | The whole main window: `App` struct, layout, painting, hit-testing, menus, drag/drop, full-window clip editor |
 | `main.cpp` | `wWinMain` → `--selftest` or `runApp()` |
 | `selftest.cpp` | Headless `--selftest`: decode/encode round-trips, DSP checks, writes `bin/selftest.log` |
@@ -196,6 +196,67 @@ tests / future waveform overlays.
   kept/removed seconds and the segment count for the confirmation message.
 - Audio shorter than one window (2048 frames) is treated as all-voice rather than
   failing, so the call never returns nullptr for non-empty input.
+
+### What the detector cannot do (and why the manual edits exist)
+
+The bump override above catches *low-frequency* thumps. There is a second class of
+non-speech event it deliberately does not attempt: sounds that are **harmonic,
+mid-band and syllable-length** — chair creaks, swallows, a shuffle that happens to
+ring. Measured on a real user recording (`bumps.wav`, three events in 0.56 s) these
+score `harm` 0.49–0.98, `lowFrac` ≈ 0, `spFrac` 0.46–0.98: every one of the four
+core voice tests passes, at **every** sensitivity from 0 to 1, so no setting removes
+them. Two candidate discriminators were measured against the same speaker's real
+takes and both were rejected:
+
+| Candidate | Result |
+| --- | --- |
+| Presence of energy above 4 kHz | Refuted — this speaker's *speech* also has 0.0–0.4% above 4 kHz |
+| 400–1000 Hz vs 150–400 Hz band balance | Refuted — 15–46% of real speech frames land on the "bump" side |
+
+The conclusion is that these events are not separable from voiced speech by any
+per-frame spectral feature. The proper answer is therefore not a cleverer detector
+but a **manual route** — `dsp::silenceRange` / `dsp::deleteRange` below — for the
+case where the user can hear the problem and the machine cannot.
+
+### Manual region edits
+
+Two operations on the waveform selection, both in `dsp.cpp` so the selftest can
+exercise them headlessly, both committed through `Document::replaceClipBuffer` as
+one undo step by `App::removeSelectedRange(clipId, keepLength)`:
+
+- **`dsp::silenceRange(src, begin, end, fadeMs = 5)`** — zeroes `[begin, end)`
+  with raised-cosine ramps **inside** the range at each edge, so audio outside the
+  selection is bit-identical and the clip's length is unchanged. Ramps are capped
+  at half the range so a very short selection still reaches zero. This is the one
+  to use between sentences: the pause stays the length it was, so nothing
+  downstream on the timeline shifts.
+- **`dsp::deleteRange(src, begin, end, fadeMs = 5)`** — cuts `[begin, end)` and
+  closes the gap with an **equal-power** (sin/cos) crossfade. The overlap is taken
+  from the audio being *kept* on either side — never from the removed material,
+  which would defeat the point — so the result is `fadeMs` shorter than a plain
+  concatenation, and the crossfade shrinks to nothing when the cut touches the
+  clip's start or end. Equal-power rather than linear because the two sides are
+  unrelated room tone; a linear fade would dip audibly there.
+
+Both return `nullptr` for an empty range, and `deleteRange` also refuses to delete
+the entire clip (that is what *Delete clip* is for). Silencing keeps the selection
+alive so the result can be auditioned with *Play selection*; deleting clears it,
+because everything after the cut has moved.
+
+Reachable from the clip context menu (`IDM_SILENCESEL` / `IDM_DELETESEL`, next to
+*Crop to selection*, which is their inverse) and from the full-window editor
+toolbar (`EB_SILENCE` / `EB_DELSEL`).
+
+Adding those two buttons pushed the editor toolbar past the window width, so
+`computeEditorLayout` now **wraps** it via `layout::flowButtons`: buttons flow
+left-to-right and start a new row when the next would collide with the *Done*
+button's reserved strip, and the resulting height is published as
+`App::edToolbarH` for the painter and the content area below (floored at the
+historical `S(56)` so an unwrapped toolbar is laid out exactly as before). The row
+already didn't fit at the default 1500 px window above 125% DPI, where the
+rightmost buttons ran off the edge and were simply unreachable — that is a
+pre-existing bug this fixes. Keeping the flow in `layout.h` means the selftest can
+assert the wrapping at both 100% and 150% DPI without a window.
 
 ### Voice isolation in the app
 
@@ -547,7 +608,11 @@ saved selection + playhead preserved; a stale selection is dropped on load),
 library **sort-by-name / sort-by-time / reorder**, the **library drop geometry**
 in `layout.h` (insertion index for each region of a reflowed 3-per-row grid, and
 the caret anchor for each — including the regression where a row's empty tail and
-the next row's head share an index but must draw different carets),
+the next row's head share an index but must draw different carets), the **editor
+toolbar wrapping** also in `layout.h` (one row when it fits with the height
+unchanged, two rows at 150% DPI on the default window, no button ever past the
+window edge, wrapped rows restarting at the left margin, and every button still
+placed at an absurd 300 px width),
 **`clampSelection`** (a selection survives removing an unrelated placement or
 deleting a different clip — the reported bug — is clamped rather than dropped
 when it merely runs past a shortened buffer, and is dropped only when its clip is
@@ -568,6 +633,17 @@ and −60.0 dB — the adjacent one cannot quite reach the isolated one's figure
 because its energy sits in its first few ms and the gate still needs `fadeMs` to
 close) while the neighbouring speech is untouched (0.00 dB). That is the
 regression the bump override exists for.
+
+The manual region edits are checked on a steady 220 Hz tone, where any level or
+length error is unmissable: `silenceRange` keeps the clip length, drives the range
+to exact zero, leaves everything outside it **bit-identical**, and ramps rather
+than cutting at the boundary; `deleteRange` shortens by the range plus one
+crossfade, holds its level across the splice, preserves rate/channels, and needs
+no crossfade when the cut touches the clip's start or end. Empty ranges and
+"delete the whole clip" are rejected. (The splice-level check allows a wide band:
+the two sides of that particular test are the same tone a whole number of cycles
+apart, so they add coherently and equal-power weights give up to +3 dB. Real
+splices join unrelated room tone, which is the case equal-power is chosen for.)
 
 Selection-scoped processing (`dsp::blendProcessedRange`) is covered on the same
 synthetic signal: length / channel count preserved, audio outside the range

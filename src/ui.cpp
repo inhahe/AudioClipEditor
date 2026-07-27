@@ -53,6 +53,7 @@ enum {
     IDM_GETPROFILE, IDM_GETPROFILE_CLIP,
     IDM_VOICEISO, IDM_VOICEISO_SEL, IDM_VOICEISO_ALL,
     IDM_EXPORTCLIP, IDM_EXPORTSEL,
+    IDM_SILENCESEL, IDM_DELETESEL,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE, IDM_TRK_VOICEISO,
@@ -161,8 +162,10 @@ struct App {
     int edHot = 0;                 // hovered editor button (see EB_* below)
     // editor layout rects (rebuilt in computeEditorLayout)
     RECT edMain{}, edRuler{}, edLeft{}, edRight{};
-    enum { EB_NONE, EB_PLAY, EB_PLAYSEL, EB_FINE, EB_CROP, EB_SAVE, EB_CAPTURE, EB_CLEAR, EB_DONE, EB_COUNT };
+    enum { EB_NONE, EB_PLAY, EB_PLAYSEL, EB_FINE, EB_CROP, EB_SILENCE, EB_DELSEL, EB_SAVE,
+           EB_CAPTURE, EB_CLEAR, EB_DONE, EB_COUNT };
     RECT edBtn[EB_COUNT]{};
+    int edToolbarH = 0;            // computed in computeEditorLayout; the row wraps when narrow
 
     // ------------------------------------------------------------- helpers
     int S(int v) const { return (int)(v * sc + 0.5f); }
@@ -326,6 +329,8 @@ struct App {
         case EB_PLAYSEL: if (hasSel() && selClipId == editClipId) togglePreview(editClipId, true); break;
         case EB_FINE: editFineToggle = !editFineToggle; break;
         case EB_CROP: if (hasSel() && selClipId == editClipId) cropSelection(); break;
+        case EB_SILENCE: removeSelectedRange(editClipId, true); break;
+        case EB_DELSEL: removeSelectedRange(editClipId, false); break;
         case EB_SAVE: if (hasSel() && selClipId == editClipId) saveSelectionAsClip(); break;
         case EB_CAPTURE: captureNoiseProfileFromEditor(); break;
         case EB_CLEAR: selClipId = editClipId; selStart = selEnd = 0; break;
@@ -447,24 +452,31 @@ struct App {
 
     void computeEditorLayout(const RECT& rc) {
         int pad = S(16);
-        int topH = S(56);                       // toolbar row
-        // toolbar buttons, left to right
-        int by = S(10), bh = S(34), bx = pad;
-        auto put = [&](int id, int w) { edBtn[id] = { bx, by, bx + w, by + bh }; bx += w + S(8); };
-        put(EB_PLAY, S(96));
-        put(EB_PLAYSEL, S(120));
-        put(EB_FINE, S(150));
-        bx += S(16);
-        put(EB_CROP, S(120));
-        put(EB_SAVE, S(150));
-        put(EB_CAPTURE, S(150));
-        put(EB_CLEAR, S(120));
-        // Done on the far right, but never overlapping the left button group: if the
-        // window is too narrow, park it right after the last left button instead.
-        int doneW = S(96);
-        int doneLeft = std::max(bx, (int)rc.right - pad - doneW);
-        edBtn[EB_DONE] = { doneLeft, by, doneLeft + doneW, by + bh };
+        // Toolbar buttons, left to right, wrapping to a second row when they don't
+        // fit. They no longer fit on one row at the default window size above
+        // 125% DPI, and a button that runs off the edge is simply unreachable, so
+        // the toolbar grows downwards instead and the waveform below starts lower.
+        const int by = S(10), bh = S(34), gap = S(8), doneW = S(96);
+        // Reserve room for Done, which is pinned to the right of the final row.
+        const int avail = std::max(S(200), (int)rc.right - pad - doneW - S(16));
+        // Order matches the enum below; the negative entry is the group gap that
+        // separates transport from the edit actions.
+        static const int order[] = { EB_PLAY, EB_PLAYSEL, EB_FINE, EB_NONE, EB_CROP,
+                                     EB_SILENCE, EB_DELSEL, EB_SAVE, EB_CAPTURE, EB_CLEAR };
+        const std::vector<int> widths = { S(96), S(120), S(150), -S(16), S(120),
+                                          S(130), S(130), S(150), S(150), S(120) };
+        auto f = layout::flowButtons(widths, pad, by, bh, gap, avail, S(10));
+        for (size_t i = 0; i < widths.size(); ++i)
+            if (order[i] != EB_NONE) edBtn[order[i]] = f.rects[i];
+        // Done on the far right of the final row, but never overlapping the group:
+        // if even that row is too narrow, park it right after the last button.
+        int doneLeft = std::max(f.endX, (int)rc.right - pad - doneW);
+        edBtn[EB_DONE] = { doneLeft, f.endY, doneLeft + doneW, f.endY + bh };
+        // Floor at the original single-row height so an unwrapped toolbar lays
+        // out exactly as it did before wrapping existed.
+        edToolbarH = std::max(f.height, S(56));
 
+        int topH = edToolbarH;
         int contentTop = topH + pad;
         int contentBot = rc.bottom - pad;
         int rulerH2 = S(18);
@@ -607,7 +619,7 @@ struct App {
         bool sel = hasSel() && selClipId == editClipId;
 
         // toolbar
-        RECT top = { 0, 0, client.right, S(56) };
+        RECT top = { 0, 0, client.right, edToolbarH };
         fill(h, top, col::transport);
         bool playing = (previewClipId == editClipId) && engine.isPlaying();
         button(h, edBtn[EB_PLAY],    playing ? L"\u275A\u275A Pause" : L"\u25B6 Play",
@@ -619,6 +631,10 @@ struct App {
                fineOn ? col::accentDk : col::btn, col::text, edHot == EB_FINE, fNorm);
         button(h, edBtn[EB_CROP],  L"Crop to selection\u2026", col::btn,
                sel ? col::text : col::dim, edHot == EB_CROP, fNorm);
+        button(h, edBtn[EB_SILENCE], L"Silence selection", col::btn,
+               sel ? col::text : col::dim, edHot == EB_SILENCE, fNorm);
+        button(h, edBtn[EB_DELSEL], L"Delete selection", col::btn,
+               sel ? col::text : col::dim, edHot == EB_DELSEL, fNorm);
         button(h, edBtn[EB_SAVE],  L"Save selection as clip", col::btn,
                sel ? col::text : col::dim, edHot == EB_SAVE, fNorm);
         button(h, edBtn[EB_CAPTURE], sel ? L"Capture noise (sel)" : L"Capture noise (clip)",
@@ -1270,6 +1286,38 @@ struct App {
         // "Save selection as clip" or export.
         doc.replaceClipBuffer(id, slice, L"Crop '" + nm + L"'");
         selStart = 0; selEnd = 0; selClipId = -1;
+        refresh();
+    }
+
+    // "Crop to selection" keeps the selection and throws away the rest; these
+    // two are its opposite, and the manual counterpart to "Remove non-voice".
+    // The automatic detector can only remove what it can recognise, and some
+    // non-speech events (a creak, a swallow, a shuffle that rings) are harmonic
+    // and syllable-length -- indistinguishable from voice at any sensitivity.
+    // When the user can hear it but the detector can't, they select it and say
+    // so directly.
+    //
+    // `keepLength` silences the range in place, which is what you want between
+    // sentences: the pause stays the length it was, so nothing downstream in the
+    // timeline shifts. Otherwise the range is cut out and the gap closed.
+    void removeSelectedRange(int clipId, bool keepLength) {
+        if (!selectionCovers(clipId)) return;
+        Clip* c = doc.project().findClip(clipId);
+        if (!c || !c->buffer) return;
+        const std::wstring nm = c->name;
+        auto edited = keepLength ? dsp::silenceRange(*c->buffer, selStart, selEnd)
+                                 : dsp::deleteRange(*c->buffer, selStart, selEnd);
+        if (!edited) {
+            MessageBoxW(hwnd, L"The selection is empty.", L"Edit selection", MB_ICONINFORMATION);
+            return;
+        }
+        doc.replaceClipBuffer(clipId, edited,
+                              (keepLength ? L"Silence selection in '" : L"Delete selection from '") + nm + L"'");
+        // Silencing leaves the timeline intact, so the selection still points at
+        // the same audio and is worth keeping (the user can audition the result
+        // with "Play selection"). Deleting moves everything after the cut, so
+        // the old range no longer means anything.
+        if (!keepLength) { selStart = selEnd = 0; selClipId = -1; }
         refresh();
     }
 
@@ -2169,6 +2217,13 @@ struct App {
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_PLAYSEL, L"Play selection");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_SAVESEL, L"Save selection as new clip");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_CROP, L"Crop to selection\u2026");
+        // The manual way to get rid of something "Remove non-voice" won't touch.
+        // Silencing keeps the clip's length (so a pause between sentences stays
+        // the length it was); deleting closes the gap.
+        AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_SILENCESEL,
+                    L"Silence selection (keep timing)");
+        AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_DELETESEL,
+                    L"Delete selection (close gap)");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_CLEARSEL, L"Clear selection");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         // Writing audio back out. Edits only ever live in the .acep, so this is
@@ -2234,6 +2289,8 @@ struct App {
         else if (cmd == IDM_PLAYSEL) { selClipId = clipId; playSelection(); }
         else if (cmd == IDM_SAVESEL) { selClipId = clipId; saveSelectionAsClip(); }
         else if (cmd == IDM_CROP) { selClipId = clipId; cropSelection(); }
+        else if (cmd == IDM_SILENCESEL) removeSelectedRange(clipId, true);
+        else if (cmd == IDM_DELETESEL) removeSelectedRange(clipId, false);
         else if (cmd == IDM_CLEARSEL) { selClipId = -1; selStart = selEnd = 0; refresh(); }
         else if (cmd == IDM_EXPORTCLIP) exportClipAudio(clipId, false);
         else if (cmd == IDM_EXPORTSEL) exportClipAudio(clipId, true);

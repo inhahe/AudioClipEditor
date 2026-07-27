@@ -110,6 +110,18 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   inside the selection is exactly what a whole-clip run would have put there. Handy
   for killing one door slam, or one noisy passage, without touching the rest of the
   take. Track- and project-wide runs are always whole-clip.
+- **Silence or delete a selection.** *Remove non-voice* can only remove what it can
+  recognise, and some noises genuinely aren't recognisable: a chair creak, a
+  swallow, a shuffle that happens to ring is harmonic, mid-band and about as long
+  as a syllable — which is to say it looks exactly like a spoken vowel to any
+  detector, at any sensitivity. When you can hear it but the machine can't, say so
+  directly: drag a selection, then right-click the clip (or use the full-window
+  editor's toolbar) and pick **Silence selection (keep timing)** or
+  **Delete selection (close gap)**. Silencing leaves the clip exactly as long as it
+  was, so a pause between sentences stays the length it was and nothing downstream
+  on the timeline shifts; deleting cuts the range out and closes the gap. Both fade
+  at the edges so the edit can't click, both are a single undo step, and neither
+  touches the file on disk.
 - **Reusable noise captures.** Each captured noise profile is remembered as a
   **recent capture** (its computed spectral profile — the per-capture work that's
   shared across every clip it cleans — is cached, so re-using it is instant). Any
@@ -186,6 +198,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |
 | Remove bumps / shuffling (keep only voice) | right-click a card → *Remove non-voice → This clip / All clips*, or right-click a track header → *Remove non-voice — this track* |
 | Clean / de-noise only part of a clip | drag a selection, then right-click a card → *Voice cleaner* / *Remove non-voice* → **This clip (selection)…** |
+| Get rid of a noise *Remove non-voice* won't touch | drag a selection over it, then right-click a card (or use the editor toolbar) → *Silence selection (keep timing)* / *Delete selection (close gap)* |
 | Capture a noise profile | select a noise-only stretch, then right-click → *Voice cleaner → Capture noise from selection* (or the **Get noise profile** button in the dialog); or *Capture noise from whole clip*; or the **Capture noise** button in the full-window editor |
 | Apply a saved noise capture | right-click a card → *Voice cleaner → Apply noise capture ▸* and pick a recent capture |
 | Track actions | **right-click a track header/lane**: voice-clean the track, rename, remove |

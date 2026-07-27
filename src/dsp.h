@@ -102,6 +102,27 @@ AudioBufferPtr isolateVoice(const AudioBuffer& buf, const VoiceIsolateOptions& o
 std::vector<uint8_t> detectVoiceFrames(const AudioBuffer& buf, const VoiceIsolateOptions& opts,
                                        int* winOut = nullptr, int* hopOut = nullptr);
 
+// --- Manual region edits ---
+// The detectors above are the automatic route, but they can only remove what
+// they can recognise. Some non-speech events -- a chair creak, a swallow, a
+// shuffle that happens to ring -- are harmonic, mid-band and syllable-length,
+// which is to say they look exactly like voiced speech to any per-frame feature
+// test; no sensitivity setting separates them. These two functions are the
+// manual fallback for that material: the user hears it, selects it, and says so.
+
+// Silence [begin, end), ramping down over the first `fadeMs` of the range and
+// back up over the last `fadeMs` so the edit can't click. The ramps live
+// *inside* the selection, so audio outside it is bit-identical and the clip's
+// length and timing are unchanged. Returns nullptr for an empty range.
+AudioBufferPtr silenceRange(const AudioBuffer& src, int64_t begin, int64_t end, float fadeMs = 5.0f);
+
+// Cut [begin, end) out and close the gap, equal-power crossfading across the
+// join so the splice can't click. The crossfade overlaps `fadeMs` of the audio
+// *kept* on either side (never the removed material, which would defeat the
+// point), so the result is `fadeMs` shorter than a plain concatenation.
+// Returns nullptr for an empty range or if nothing would be left.
+AudioBufferPtr deleteRange(const AudioBuffer& src, int64_t begin, int64_t end, float fadeMs = 5.0f);
+
 // --- Applying an effect to only part of a clip ---
 // Returns a copy of `original` in which [begin, end) is taken from `processed`,
 // crossfaded over `blendMs` at each edge so the join between processed and

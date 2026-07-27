@@ -680,6 +680,132 @@ int runSelfTest() {
         }
     }
 
+    // ---- editor toolbar wrapping
+    {
+        // The real editor toolbar: the widths computeEditorLayout passes, scaled
+        // the way S() would. The negative entry is the transport/edit group gap.
+        auto toolbar = [](float sc, int winW) {
+            auto S = [&](int v) { return (int)(v * sc + 0.5f); };
+            const std::vector<int> w = { S(96), S(120), S(150), -S(16), S(120),
+                                         S(130), S(130), S(150), S(150), S(120) };
+            const int pad = S(16), doneW = S(96);
+            const int avail = std::max(S(200), winW - pad - doneW - S(16));
+            return layout::flowButtons(w, pad, S(10), S(34), S(8), avail, S(10));
+        };
+        // 100% DPI, wide window: everything still fits on one row. The height
+        // comes out just under the toolbar's historical 56 px, which is why
+        // computeEditorLayout floors it there -- so nothing below it moves.
+        auto wide = toolbar(1.0f, 1900);
+        check(wide.rows == 1, L"editor toolbar: one row when it fits",
+              std::to_wstring(wide.rows));
+        check(wide.height <= 56, L"editor toolbar: single row still fits the old height",
+              std::to_wstring(wide.height));
+        // 150% DPI at the default 1500 px window -- the case that motivated this.
+        auto dpi150 = toolbar(1.5f, 1500);
+        check(dpi150.rows == 2, L"editor toolbar wraps at 150% DPI",
+              std::to_wstring(dpi150.rows));
+        // Every button must land somewhere reachable, i.e. inside the window.
+        bool allVisible = true;
+        for (const RECT& r : dpi150.rects)
+            if (r.right > 1500) allVisible = false;
+        check(allVisible, L"editor toolbar: no button runs off the window edge");
+        // A wrapped row restarts at the left margin rather than continuing.
+        int secondRowLeft = -1;
+        for (const RECT& r : dpi150.rects)
+            if (r.right > r.left && r.top != dpi150.rects[0].top) { secondRowLeft = r.left; break; }
+        check(secondRowLeft == (int)(16 * 1.5f + 0.5f),
+              L"editor toolbar: wrapped row starts at the left margin",
+              std::to_wstring(secondRowLeft));
+        // Absurdly narrow: still lays out, one button per row, nothing lost.
+        auto tiny = toolbar(1.0f, 300);
+        bool everyPlaced = true;
+        for (size_t i = 0; i < tiny.rects.size(); ++i)
+            if (i != 3 && tiny.rects[i].right == tiny.rects[i].left) everyPlaced = false;
+        check(everyPlaced, L"editor toolbar: every button is placed even when very narrow");
+        check(tiny.rows > 2, L"editor toolbar: keeps wrapping when very narrow",
+              std::to_wstring(tiny.rows));
+    }
+
+    // ---- manual region edits (the fallback for non-voice the detector can't see)
+    {
+        // 1 s of a steady tone at 48 kHz stereo, so any level change is obvious
+        // and the crossfade has something continuous to be judged against.
+        auto src = std::make_shared<AudioBuffer>();
+        src->sampleRate = 48000; src->channels = 2;
+        const int64_t n = 48000;
+        src->samples.resize((size_t)n * 2);
+        for (int64_t i = 0; i < n; ++i) {
+            const float v = (float)(0.5 * std::sin(2.0 * 3.14159265358979 * 220.0 * i / 48000.0));
+            src->samples[(size_t)i * 2] = v; src->samples[(size_t)i * 2 + 1] = v;
+        }
+        auto rms = [](const AudioBuffer& b, double t0, double t1) {
+            int64_t a = (int64_t)(t0 * b.sampleRate) * b.channels;
+            int64_t z = std::min<int64_t>((int64_t)(t1 * b.sampleRate) * b.channels, (int64_t)b.samples.size());
+            double s = 0; int64_t c = 0;
+            for (int64_t i = std::max<int64_t>(0, a); i < z; ++i) { s += (double)b.samples[i] * b.samples[i]; ++c; }
+            return c ? std::sqrt(s / c) : 0.0;
+        };
+
+        // --- silenceRange: [0.4, 0.6) goes quiet, everything else is untouched,
+        //     and the clip keeps its length.
+        auto sil = dsp::silenceRange(*src, (int64_t)(0.4 * 48000), (int64_t)(0.6 * 48000));
+        check(sil != nullptr, L"silenceRange: returned a buffer");
+        if (sil) {
+            check(sil->frames() == n, L"silenceRange keeps the clip length",
+                  std::to_wstring(sil->frames()));
+            // Skip the 5 ms ramps at each edge when measuring the silent part.
+            check(rms(*sil, 0.41, 0.59) < 1e-6, L"silenceRange silences the range",
+                  std::to_wstring(rms(*sil, 0.41, 0.59)));
+            bool outsideIntact = true;
+            for (int64_t i = 0; i < (int64_t)(0.4 * 48000) * 2 && outsideIntact; ++i)
+                outsideIntact = (sil->samples[(size_t)i] == src->samples[(size_t)i]);
+            for (int64_t i = (int64_t)(0.6 * 48000) * 2;
+                 i < (int64_t)src->samples.size() && outsideIntact; ++i)
+                outsideIntact = (sil->samples[(size_t)i] == src->samples[(size_t)i]);
+            check(outsideIntact, L"silenceRange leaves audio outside the range bit-identical");
+            // The ramp has to actually be a ramp, not a hard edge: audio just
+            // inside the boundary still carries most of the original signal.
+            check(rms(*sil, 0.400, 0.401) > 0.2, L"silenceRange ramps in rather than cutting",
+                  std::to_wstring(rms(*sil, 0.400, 0.401)));
+        }
+
+        // --- deleteRange: [0.4, 0.6) is cut and the gap closed. The result is
+        //     the 0.2 s range shorter, less the 5 ms crossfade overlap.
+        auto del = dsp::deleteRange(*src, (int64_t)(0.4 * 48000), (int64_t)(0.6 * 48000));
+        check(del != nullptr, L"deleteRange: returned a buffer");
+        if (del) {
+            const int64_t want = n - (int64_t)(0.2 * 48000) - (int64_t)(0.005 * 48000);
+            check(del->frames() == want, L"deleteRange shortens by the range plus the crossfade",
+                  std::to_wstring(del->frames()) + L" vs " + std::to_wstring(want));
+            // The level across the splice must not collapse, which is how a bad
+            // overlap or an off-by-one would show up. The window is deliberately
+            // wide: the two sides here are the *same* 220 Hz tone a whole number
+            // of cycles apart, so they add coherently and equal-power weights
+            // give up to +3 dB (0.354 -> 0.5). Real splices join unrelated room
+            // tone, which is the case equal-power is chosen for.
+            const double atJoin = rms(*del, 0.396, 0.400);
+            check(atJoin > 0.2 && atJoin < 0.55, L"deleteRange splice holds its level",
+                  std::to_wstring(atJoin));
+            check(del->channels == 2 && del->sampleRate == 48000,
+                  L"deleteRange preserves format");
+        }
+
+        // --- degenerate ranges are refused rather than producing an empty clip
+        check(dsp::silenceRange(*src, 100, 100) == nullptr, L"silenceRange rejects an empty range");
+        check(dsp::deleteRange(*src, 100, 100) == nullptr, L"deleteRange rejects an empty range");
+        check(dsp::deleteRange(*src, 0, n) == nullptr, L"deleteRange refuses to delete everything");
+        // Deleting from the very start leaves no audio before the cut to fade
+        // against, so it must splice cleanly instead of reading out of bounds.
+        auto head = dsp::deleteRange(*src, 0, (int64_t)(0.1 * 48000));
+        check(head && head->frames() == n - (int64_t)(0.1 * 48000),
+              L"deleteRange at the clip start needs no crossfade",
+              head ? std::to_wstring(head->frames()) : L"(null)");
+        auto tailCut = dsp::deleteRange(*src, n - (int64_t)(0.1 * 48000), n);
+        check(tailCut && tailCut->frames() == n - (int64_t)(0.1 * 48000),
+              L"deleteRange at the clip end needs no crossfade",
+              tailCut ? std::to_wstring(tailCut->frames()) : L"(null)");
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);

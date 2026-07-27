@@ -677,6 +677,85 @@ AudioBufferPtr isolateVoice(const AudioBuffer& buf, const VoiceIsolateOptions& o
     return out;
 }
 
+// ---------------- manual region edits ----------------
+
+AudioBufferPtr silenceRange(const AudioBuffer& src, int64_t begin, int64_t end, float fadeMs) {
+    const int ch = src.channels;
+    const int64_t nf = src.frames();
+    if (ch <= 0) return nullptr;
+    begin = std::max<int64_t>(0, begin);
+    end   = std::min<int64_t>(nf, end);
+    if (end <= begin) return nullptr;
+
+    auto out = std::make_shared<AudioBuffer>(src);
+    const int rate = src.sampleRate > 0 ? src.sampleRate : 48000;
+    // Both ramps have to fit inside the range without meeting, so a selection
+    // shorter than two fades gets proportionally shorter ones rather than a
+    // ramp that never reaches zero.
+    int64_t fade = (int64_t)(std::max(0.0f, fadeMs) * 0.001 * rate);
+    fade = std::min(fade, (end - begin) / 2);
+
+    for (int64_t i = begin; i < end; ++i) {
+        double g = 0.0;   // gain applied to the original signal
+        if (fade > 0) {
+            const int64_t d = std::min(i - begin, end - 1 - i);
+            if (d < fade) g = 0.5 + 0.5 * std::cos(PI * (d + 0.5) / fade);
+        }
+        for (int c = 0; c < ch; ++c) {
+            const size_t k = (size_t)i * ch + c;
+            out->samples[k] = (float)(src.samples[k] * g);
+        }
+    }
+    return out;
+}
+
+AudioBufferPtr deleteRange(const AudioBuffer& src, int64_t begin, int64_t end, float fadeMs) {
+    const int ch = src.channels;
+    const int64_t nf = src.frames();
+    if (ch <= 0) return nullptr;
+    begin = std::max<int64_t>(0, begin);
+    end   = std::min<int64_t>(nf, end);
+    if (end <= begin) return nullptr;
+
+    const int64_t head = begin, tail = nf - end;
+    if (head + tail <= 0) return nullptr;
+
+    const int rate = src.sampleRate > 0 ? src.sampleRate : 48000;
+    // The overlap is taken from the audio being *kept*, so it can never be
+    // longer than the shorter side; deleting from the very start or end of a
+    // clip leaves nothing to fade against and simply splices.
+    int64_t fade = (int64_t)(std::max(0.0f, fadeMs) * 0.001 * rate);
+    fade = std::min({ fade, head, tail });
+
+    auto out = std::make_shared<AudioBuffer>();
+    out->sampleRate = src.sampleRate; out->channels = ch;
+    const int64_t nOut = head + tail - fade;
+    out->samples.assign((size_t)nOut * ch, 0.0f);
+
+    for (int64_t i = 0; i < head - fade; ++i)
+        for (int c = 0; c < ch; ++c)
+            out->samples[(size_t)i * ch + c] = src.samples[(size_t)i * ch + c];
+
+    // Equal-power crossfade: the two sides are unrelated room tone, so summing
+    // them with sin/cos weights holds the level steady where a linear fade
+    // would dip.
+    for (int64_t i = 0; i < fade; ++i) {
+        const double t = (i + 0.5) / fade;
+        const double a = std::cos(t * PI * 0.5), b = std::sin(t * PI * 0.5);
+        for (int c = 0; c < ch; ++c)
+            out->samples[(size_t)(head - fade + i) * ch + c] =
+                (float)(src.samples[(size_t)(head - fade + i) * ch + c] * a +
+                        src.samples[(size_t)(end + i) * ch + c] * b);
+    }
+
+    for (int64_t i = fade; i < tail; ++i)
+        for (int c = 0; c < ch; ++c)
+            out->samples[(size_t)(head - fade + i) * ch + c] =
+                src.samples[(size_t)(end + i) * ch + c];
+
+    return out;
+}
+
 // ---------------- applying a result to part of a clip ----------------
 
 AudioBufferPtr blendProcessedRange(const AudioBuffer& original, const AudioBuffer& processed,
