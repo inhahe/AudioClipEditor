@@ -56,6 +56,58 @@ private:
     int64_t total_ = 0;
 };
 
+// Maps "device frames the sound card has played" to "source frames the user is
+// hearing". A source's own position() is the *render* position -- how much has
+// been pushed into the output buffer -- which leads what you hear by the whole
+// buffer depth and jumps by a chunk on every audio-thread wakeup, so a playhead
+// driven from it both stutters and runs early. The engine records one entry per
+// buffer fill and queries it with the audio clock's reading.
+//
+// Pure integer arithmetic, kept out of engine.cpp so the selftest can exercise
+// it without a sound card -- see the "playback position" block in selftest.cpp.
+struct RenderTimeline {
+    struct Write { int64_t devEnd = 0, srcEnd = 0; int32_t devLen = 0, srcLen = 0; };
+    static constexpr int kRecs = 64;      // ~2 s of history at a 30 ms buffer
+    Write recs[kRecs]{};
+    int recCount = 0, recHead = 0;
+    int64_t devWritten = 0;               // device frames given to the device since the stream started
+    int64_t srcAtReset = 0;               // source position when the history was last cleared
+
+    // Playing, seeking or stopping makes every queued frame describe audio the
+    // caller no longer cares about, so the history is dropped. That is also what
+    // makes a seek feel instant: the position reads as the new one at once,
+    // instead of tracking the stale audio still draining out of the buffer.
+    // `devWritten` deliberately keeps counting -- it is tied to the device clock,
+    // which never restarts.
+    void reset(int64_t srcPos) { recCount = 0; recHead = 0; srcAtReset = srcPos; }
+
+    // `srcLen` is recorded rather than derived from `devLen` so that resampling
+    // and a source draining part-way through a chunk are both handled exactly.
+    void push(int32_t devLen, int32_t srcLen, int64_t srcEnd) {
+        devWritten += devLen;
+        recs[recHead] = { devWritten, srcEnd, devLen, srcLen };
+        recHead = (recHead + 1) % kRecs;
+        if (recCount < kRecs) ++recCount;
+    }
+
+    int64_t sourceAt(int64_t devPlayed) const {
+        if (recCount == 0) return srcAtReset;
+        const Write& newest = recs[(recHead - 1 + kRecs) % kRecs];
+        if (devPlayed >= newest.devEnd) return newest.srcEnd;   // all written audio has played
+        for (int i = 0; i < recCount; ++i) {
+            const Write& r = recs[(recHead - 1 - i + kRecs) % kRecs];
+            if (devPlayed >= r.devEnd - r.devLen) {
+                // Interpolating *inside* the chunk is what makes the result
+                // smooth: chunks are 10-30 ms but a query lands anywhere in one.
+                const double back = r.devLen > 0
+                    ? (double)(r.devEnd - devPlayed) / (double)r.devLen : 0.0;
+                return r.srcEnd - (int64_t)(back * r.srcLen + 0.5);
+            }
+        }
+        return srcAtReset;   // older than anything still remembered
+    }
+};
+
 class PlaybackEngine {
 public:
     PlaybackEngine();

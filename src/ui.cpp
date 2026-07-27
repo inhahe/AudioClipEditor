@@ -166,6 +166,7 @@ struct App {
            EB_CAPTURE, EB_CLEAR, EB_DONE, EB_COUNT };
     RECT edBtn[EB_COUNT]{};
     int edToolbarH = 0;            // computed in computeEditorLayout; the row wraps when narrow
+    bool timerFast = false;        // timer is at playhead-animation rate (see setTimerRate)
 
     // ------------------------------------------------------------- helpers
     int S(int v) const { return (int)(v * sc + 0.5f); }
@@ -713,6 +714,14 @@ struct App {
         if (c->buffer && c->peaks) wf::draw(h, wv, *c->buffer, *c->peaks, ws, we, col::wave);
         // shade the selected side (left strip: right of edge is inside selection;
         // right strip: left of edge is inside selection)
+        // The playhead, when it is inside this strip's window. These strips are
+        // the most zoomed-in view in the app -- a few hundred ms across half the
+        // window -- so they are exactly where you want to watch the cursor cross
+        // an edge you are placing, and they were the one waveform that never
+        // drew it. Drawn under the edge marker so the edge stays readable when
+        // the two coincide, which is the moment that matters.
+        if (previewClipId == editClipId && previewCursor >= ws && previewCursor < we)
+            drawVLine(h, fx(previewCursor), wv.top, wv.bottom, col::playhead);
         int ex = fx(edge);
         drawVLine(h, ex, wv.top, wv.bottom, col::waveSel);
         // draggable handle
@@ -2433,10 +2442,32 @@ struct App {
     }
 
     // --------------------------------------------------------- timer / playend
+    // The playhead is the only thing in the window that animates, so the timer
+    // runs fast enough for it to look continuous while something is playing and
+    // drops back to the idle housekeeping rate when nothing is. The rate matters
+    // most in the fine-tune strips: at their zoom (a few hundred ms across half
+    // the window) a 33 ms step is over a hundred pixels, which reads as a
+    // stutter however accurate the position underneath it is.
+    //
+    // The fast period is 15 ms, not 16, on purpose. WM_TIMER fires on the system
+    // clock tick, which is ~15.6 ms by default, and a requested period is rounded
+    // *up* to a whole number of ticks -- so asking for 16 ms waits two ticks and
+    // yields ~31 ms, no better than idle. (Measured: with 16 ms the playhead
+    // stepped every 33-35 ms.) Anything at or below one tick fires once per tick,
+    // and 15 ms stays sane if some other component has raised the timer
+    // resolution: it caps the repaint rate at ~66 Hz instead of running away.
+    void setTimerRate(bool playing) {
+        if (playing == timerFast) return;
+        timerFast = playing;
+        SetTimer(hwnd, 1, playing ? 15 : 33, nullptr);
+    }
+
     void onTimer() {
         // Keep the title's unsaved-changes marker (" *") in sync as edits happen.
         if (projectModified() != lastTitleDirty) { lastTitleDirty = projectModified(); setTitle(); }
-        if (engine.isPlaying()) {
+        const bool playing = engine.isPlaying();
+        setTimerRate(playing);
+        if (playing) {
             if (timelinePlaying) playheadFrame = engine.position();
             else if (previewClipId >= 0) previewCursor = previewBegin + engine.position();
             refresh();
@@ -2468,7 +2499,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         a->buildMenu();
         a->setTitle();
         a->computeLayout();
-        SetTimer(hwnd, 1, 33, nullptr);
+        SetTimer(hwnd, 1, 33, nullptr);    // idle rate; onTimer speeds it up while playing
         return 0;
     }
     case WM_SIZE: a->computeLayout(); a->clampScroll(); a->refresh(); return 0;

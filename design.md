@@ -18,7 +18,7 @@ sync with behavior changes.
 | `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker |
 | `document.{h,cpp}` | Owns `Project` + undo tree + `ViewState`; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`) |
 | `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms + voice isolation (see below) |
-| `waveform.{h,cpp}` | GDI oscilloscope: min/max envelope zoomed out, per-sample trace zoomed in |
+| `waveform.{h,cpp}` | GDI oscilloscope: per-column min/max envelope (one `PolyPolyline`) zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, file/project pickers |
 | `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`) and toolbar row wrapping (`flowButtons`) |
 | `ui.cpp` | The whole main window: `App` struct, layout, painting, hit-testing, menus, drag/drop, full-window clip editor |
@@ -509,6 +509,68 @@ selection mid-playback can't drag the cursor around. `stopAll()` clears the whol
 block. The selftest covers the `BufferSource` sub-range arithmetic these rely on
 (begin-relative seek/position and stopping at the range end).
 
+## Playhead accuracy and smoothness
+
+The play cursor has to answer "which sample am I hearing *right now*", and three
+separate things stood between the naive implementation and that answer. All three
+had to be fixed for the cursor to look continuous; each on its own left it jumpy.
+
+**1. Heard position, not render position (`engine.{h,cpp}`).**
+`IPlaybackSource::position()` is where the *mixer* has read to, which leads what
+is audible by the whole WASAPI buffer depth (30 ms here) and advances in
+chunk-sized lumps rather than continuously. `RenderTimeline` closes that gap: the
+audio thread records, for each chunk it renders, how many device frames had been
+written and which source frame that chunk began at, and the UI thread converts
+"device frames the hardware has actually played" back into a source frame,
+interpolating **within** a chunk so the answer moves continuously. Device frames
+played come from `IAudioClock::GetPosition(&pos, &qpcPos)` — a stream position
+plus a QPC timestamp in 100 ns units — extrapolated to "now" with
+`QueryPerformanceCounter`. The clock is sampled **on the audio thread** and the
+result published for the UI thread, so the UI never touches the COM object.
+`position()` finally returns `max(0, min(heard.sourceAt(devPlayed), rendered))`,
+clamped so it can never run past what has been produced. Measured effect: the
+per-timer-tick advance rate went from swinging 0.634x–1.314x of real time to
+0.9991x–1.0008x.
+
+**2. The timer really fires at ~31 ms when you ask for 16 (`ui.cpp`).**
+`setTimerRate(playing)` switches `SetTimer(hwnd, 1, …)` between a fast rate while
+something plays and 33 ms when idle, since the playhead is the only thing in the
+window that animates. The fast rate is **15 ms, not 16**: `WM_TIMER` fires on the
+system clock tick (~15.6 ms by default) and a requested period is rounded **up**
+to a whole number of ticks, so 16 ms waits two ticks. (Measured: with 16 the
+playhead stepped every 33–35 ms — no better than idle.) 15 ms is also safe if
+something else on the machine has raised the timer resolution: it caps the
+repaint rate at ~66 Hz rather than running away.
+
+**3. A repaint cost 29 ms, so the UI ran at 34 fps flat out (`waveform.cpp`).**
+This was the dominant cause and it hid the other two. The envelope path used to be
+a single `Polygon` tracing the max edge left-to-right and the min edge back again;
+GDI has to scan-convert that ~3000-vertex, wildly self-overlapping outline,
+intersecting every edge with every scanline. Profiling attributed **11.5 ms** to
+the main `wf::draw` and **11.0 ms** to the selection-coloured overlay draw — the
+editor issues both every paint. It is now one **`PolyPolyline` of per-column
+two-point vertical segments**, which draws the identical picture: ~1.0 ms for the
+main draw, 5.4 ms median for the whole paint, and the repaint interval settles at
+the intended 15.6 ms median (64 Hz). Because each column is stroked independently
+it also cannot produce the tangles the polygon did where the two edges crossed.
+Two details matter: `Polyline` does not draw its final point, so a silent column
+is forced to `yBot = yTop + 1` rather than vanishing; and the columns come from
+the raw samples when `framesPerPx < pc.bucketFrames` (else the cache would look
+blocky) and from `PeakCache::rangeMinMax` otherwise.
+
+`paint()` was already double-buffered (`CreateCompatibleDC` + `CreateCompatibleBitmap`
++ `BitBlt`, with `WM_ERASEBKGND` returning 1), so no tearing work was needed.
+
+**Playhead in the fine-tune strips.** `paintFineStrip` draws the cursor whenever
+it falls inside that strip's window:
+`if (previewClipId == editClipId && previewCursor >= ws && previewCursor < we)`.
+The strips are where accuracy is most visible — at their zoom (a few hundred ms
+across half the window) a 33 ms step is over a hundred pixels, which reads as a
+stutter however accurate the position underneath it is. End-to-end measurement
+after all three fixes: the cursor advances 36–37 px per 16.7 ms sample, i.e.
+15.3–15.7 ms of audio per screen refresh, uniformly (it was 66–70 px lumps at
+irregular ~33 ms intervals).
+
 ## Selection editing (independent edges)
 
 A selection can be adjusted one edge at a time instead of redrawn. All three
@@ -621,6 +683,19 @@ gone or it lies entirely past the end), the unsaved-changes flag
 playhead does not dirty it), and the `BufferSource` sub-range behaviour the clip
 preview depends on (span, begin-relative seek/position, rendering from the seek
 point, stopping and draining at the range end).
+
+**Waveform rendering is tested off-screen.** `wf::draw` is GDI, but it draws into
+whatever DC it is given, so a `CreateDIBSection` (32bpp `BI_RGB`, negative
+`biHeight` for top-down) makes it fully headless: render, `GdiFlush()`, then read
+the pixels back as `DWORD` BGRA and count coloured pixels per column. On a buffer
+whose left half is a 300 Hz tone and right half is silence the checks are: a loud
+column fills most of the height, a **silent column still collapses to a 1-px
+centre line** rather than vanishing, **every** pixel column is drawn, the
+raw-sample zoom (`10 frames/px`, past the bucket size) still draws an envelope,
+the sub-sample zoom (`4 px/frame`) draws a scope trace, and an empty/inverted
+range draws nothing rather than asserting. This exists because the envelope path
+was rewritten from a `Polygon` to a `PolyPolyline` purely for speed, and the
+correctness of that rewrite is entirely about the column geometry.
 
 `mfio::safeFileName` is covered directly (clean names untouched, path-illegal
 characters substituted, leading/trailing blanks and trailing dots stripped, and

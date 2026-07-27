@@ -24,7 +24,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   seek / skip around — the yellow cursor is always where playback will pick up,
   so clicking while paused (or stopped) moves the restart point. Pause always
   pauses, including in the middle of a selection audition, and play continues
-  from where it stopped. Playback is real, mixed, low-latency WASAPI.
+  from where it stopped. Playback is real, mixed, low-latency WASAPI, and the
+  cursor follows the audio you are **actually hearing** rather than the audio
+  already handed to the sound card, moving smoothly at the screen refresh rate
+  instead of hopping in lumps — so it lines up with the waveform under it even at
+  the fine-tune strips' zoom.
 - **Select a section** of any clip by dragging across its waveform. While a
   selection is active the card shows **Crop** and **Save sel** buttons, and the
   card's play button auditions **only the selected part** (so you can preview
@@ -43,7 +47,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   selection's **start** and one on its **end**, so you can nudge each boundary
   exactly. The strips appear automatically when the main view is too coarse, or any
   time via the **Fine-tune edges** toggle, and each strip **wheel-zooms** to dial in
-  the window. `Esc` closes the editor.
+  the window. The play cursor is drawn in the strips too whenever playback passes
+  through their window, so you can watch (and hear) exactly where an edge falls
+  relative to the audio. `Esc` closes the editor.
 - **Crop a clip** to the selection — the **Crop** button (or right-click → Crop).
   Cropping only trims the clip inside the editor (a single undo step); it **never
   overwrites or deletes the original file on disk**. To keep a cropped copy, use
