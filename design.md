@@ -20,7 +20,7 @@ sync with behavior changes.
 | `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms + voice isolation (see below) |
 | `waveform.{h,cpp}` | GDI oscilloscope: per-column min/max envelope (one `PolyPolyline`) zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, file/project pickers |
-| `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`) and toolbar row wrapping (`flowButtons`) |
+| `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`), toolbar row wrapping (`flowButtons`), and scrollbar sizing (`scrollBarsNeeded`, `scrollThumb`, `scrollFromThumb`) |
 | `transport.h` | Pure play/pause decision logic, likewise split out to be testable: `decide(State, Press)` → pause / resume / restart-from-where, for both the single combined control and the editor's labelled button pair |
 | `selhistory.h` | Pure undo/redo state machine for the waveform selection, kept out of the document's snapshot tree; a `base` token ties the stack to a point in the document history |
 | `snap.h` | Pure directional-snapping state machine for dragging clips along a lane: pulls only when moving *away* from a target, so snapping stays convenient without making near-miss positions unreachable |
@@ -339,6 +339,64 @@ which at ≈50× realtime is not worth optimising.
 message would quote whole-clip numbers for a selection-sized edit. The undo
 label and the summary message both say "the selection" / "(within the
 selection)" when the run was narrowed.
+
+## Timeline: scrolling a long arrangement
+
+An arrangement longer than the window used to be reachable only by rolling the
+mouse wheel over the lanes. That worked, but nothing on screen said so, there was
+no indication of how much arrangement lay off-screen or where in it you were, and
+during playback the playhead simply left the window and never came back.
+
+Three things address that, all keyed off `tlScrollX` (which already existed):
+
+- **A horizontal scrollbar** along the bottom of the tracks pane. It spans the
+  *lane* area only, starting at `trackHeaderW`, so it sits under exactly the
+  content it scrolls rather than under the fixed header column. Clicking the
+  gutter beside the thumb jumps there *and* begins a drag, so click and drag are
+  one gesture (matching the vertical bar).
+- **Keyboard**: `←`/`→` step, `Ctrl`+`←`/`→` and `PgUp`/`PgDn` page,
+  `Home`/`End` jump to the start/end. `End` matters most — it is the only quick
+  way to find where an arrangement actually stops.
+- **Playhead follow** during timeline playback (`followPlayheadIfPlaying`).
+
+**Follow pages rather than recentres.** Scrolling continuously at playback speed
+makes the waveforms crawl sideways and is markedly harder to read than an
+occasional jump, so the view only moves when the playhead reaches a margin near an
+edge, and then jumps by most of a screen.
+
+**Manual scrolling wins.** Any hand scroll — wheel, scrollbar, or key — clears
+`followPlayhead`, because scrolling during playback means you have deliberately
+gone to look somewhere other than where the audio is; without this the next timer
+tick would haul the view straight back and manual scrolling would appear broken
+while playing. It is re-armed by starting playback and by clicking to move the
+playhead (both are statements about where you want to be watching).
+
+### Two bars, one pane
+
+`layout::scrollBarsNeeded` resolves bar visibility over **two passes**, because
+each bar steals space from the other: a horizontal bar shortens the pane and can
+be exactly what pushes the tracks over into needing a vertical one, and a vertical
+bar narrows the lanes and can force a horizontal one. A single pass silently
+clips a strip of content in those cases. Both bars then share
+`layout::scrollThumb` / `scrollFromThumb`, which is also what guarantees the thumb
+reaches both ends exactly and never shrinks below a grabbable minimum — the case
+that matters precisely when the arrangement is longest.
+
+Lane content is clipped to `laneClipBottom()` so it stops above the horizontal
+bar instead of running under it, and both bars are painted *after* the lane clip
+is released (drawing them inside it would clip the horizontal one away). Hit
+testing checks both bars before the lanes, since the lane rects extend underneath
+them.
+
+There is one more coupling, in `computeLayout()`: the tracks pane is sized *to
+just fit* its tracks, so introducing a horizontal bar would push the bottom lane
+under it and — correctly, per the two-pass rule — summon a vertical bar as well.
+Two bars where one would do reads as a bug. So `computeLayout()` adds `sbT()` to
+the pane's needed height when the arrangement is wider than the lane area, and
+the pane then fits its tracks *plus* its bar. It tests against the full lane
+width (i.e. assuming no vertical bar), which is the right assumption for a pane
+that fits its tracks; when the pane is instead clamped short to keep the library
+visible, `tlBars()` resolves the pair as usual.
 
 ## Timeline: moving a placed clip (drag feedback)
 

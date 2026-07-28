@@ -76,13 +76,21 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   number of tracks) with the clip library below it. Start with one track, add as
   many as you like — once there are more tracks than fit, the tracks pane grows a
   **vertical scrollbar** (and the wheel over the track headers scrolls them), and
-  adding a track scrolls it into view. Drag a clip card up onto a track to drop it
+  adding a track scrolls it into view. An arrangement wider than the window grows a
+  **horizontal scrollbar** to match, and can also be scrolled with the wheel or the
+  `←`/`→`/`Home`/`End` keys. Drag a clip card up onto a track to drop it
   at any time offset; drag placed clips to move them. Clips **can't overlap** on a
   track, and they **snap** to butt up flush against a neighbour — but only in the
   direction that doesn't get in your way. Sliding *toward* a neighbour never pulls,
   so you can leave a gap as small as you like; nudge *past* it and the clip lands
   exactly flush and stays there until you drag properly clear. So flush placement
   needs no aim, and every other position is still reachable.
+- **The view follows the playhead** while the timeline plays, so a long
+  arrangement doesn't just run off the right-hand edge. It pages ahead when the
+  playhead nears the edge rather than scrolling continuously, which keeps the
+  waveforms readable. Scrolling by hand during playback stops it following (you
+  went to look at something on purpose); pressing play again, or clicking to move
+  the playhead, re-arms it.
 - **Prominent Play All** button plays every track together from the playhead.
 - **Per-clip and per-track volume.** Every card and every track header has a
   volume slider (0–200%). Gain is applied live to preview, timeline mixing, and
@@ -244,7 +252,10 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Add files / Save project | `Ctrl+O` / `Ctrl+S` |
 | Open / Save / Export | **File** menu |
 | Scroll library | mouse wheel over the clip area |
-| Scroll / zoom timeline | wheel = scroll, `Ctrl`+wheel = zoom, `Shift`+wheel (or wheel over the track headers) = scroll tracks vertically; drag the scrollbar on the right when there are more tracks than fit |
+| Scroll the timeline sideways | drag the **horizontal scrollbar** along the bottom, roll the wheel over the lanes, or `←` / `→` (`Ctrl`+`←`/`→` or `PgUp`/`PgDn` to page) |
+| Jump to the start / end of the arrangement | `Home` / `End` |
+| Scroll the tracks vertically | `Shift`+wheel, wheel over the track headers, or drag the scrollbar on the right |
+| Zoom the timeline | `Ctrl`+wheel over the lanes, or drag the zoom slider |
 | Time scale (zoom) | the **Scale** slider in the toolbar sets pixels-per-second for both the timeline *and* the clip cards |
 
 ## Architecture

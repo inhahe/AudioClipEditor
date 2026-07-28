@@ -82,7 +82,7 @@ struct TrackLayout { int trackId; RECT header, lane; RECT nameRc, delRc, volRc; 
 // rather than recomputing when the user picks the capture again from recents.
 struct NoiseCapture { dsp::NoiseProfile profile; std::wstring desc; };
 
-enum class Mode { None, WaveSelect, CardDrag, ClipMove, TimelineSeek, ClipVolume, TrackVolume, ZoomDrag, TlVScroll };
+enum class Mode { None, WaveSelect, CardDrag, ClipMove, TimelineSeek, ClipVolume, TrackVolume, ZoomDrag, TlVScroll, TlHScroll };
 
 struct App {
     HWND hwnd = nullptr;
@@ -105,6 +105,11 @@ struct App {
     int tlScrollX = 0, tlScrollY = 0, tlContentH = 0;
     int trackHeaderW = 128, rulerH = 22;
     int vscrollGrab = 0;           // grab offset within the timeline scrollbar thumb
+    int hscrollGrab = 0;           // ...and within the horizontal one
+    // Whether the view chases the playhead during timeline playback. Cleared by
+    // any manual scroll (you are looking somewhere on purpose) and set again when
+    // playback starts.
+    bool followPlayhead = true;
 
     // layout caches (rebuilt each layout())
     std::vector<CardLayout> cards;
@@ -471,6 +476,14 @@ struct App {
         int nTracks = (int)doc.project().tracks.size();
         int laneH = trackLaneH(), gap = trackGap();
         int neededTL = rulerH + nTracks * (laneH + gap) + gap;
+        // A horizontal scrollbar eats into the lanes from below, so the pane has
+        // to be that much taller to still "just fit" its tracks. Without this, a
+        // long arrangement would push the bottom lane under the new bar and
+        // summon a vertical scrollbar too -- two bars where one is enough. The
+        // width tested against is the full lane width, i.e. assuming no vertical
+        // bar, which is right for a pane that fits its tracks; if the pane ends
+        // up clamped shorter than that, tlBars() resolves the pair properly.
+        if (tlContentW() > rc.right - trackHeaderW) neededTL += sbT();
         int availBelow = rc.bottom - tH;
         int minLib = S(150);
         int tlH = neededTL;
@@ -1053,7 +1066,7 @@ struct App {
             }
         }
 
-        SaveDC(h); IntersectClipRect(h, rcTimeline.left, rcTimeline.top + rulerH, rcTimeline.right, rcTimeline.bottom);
+        SaveDC(h); IntersectClipRect(h, rcTimeline.left, rcTimeline.top + rulerH, rcTimeline.right, laneClipBottom());
         for (const auto& tl : trackLays) {
             const Track* t = nullptr;
             for (auto& tt : doc.project().tracks) if (tt.id == tl.trackId) t = &tt;
@@ -1150,19 +1163,25 @@ struct App {
             int px = frameToX(playheadFrame);
             if (px >= rcTimeline.left + trackHeaderW && px <= rcTimeline.right) {
                 HPEN pen = CreatePen(PS_SOLID, S(1), col::playhead); HGDIOBJ op = SelectObject(h, pen);
-                MoveToEx(h, px, rcTimeline.top + rulerH, nullptr); LineTo(h, px, rcTimeline.bottom);
+                MoveToEx(h, px, rcTimeline.top + rulerH, nullptr); LineTo(h, px, laneClipBottom());
                 SelectObject(h, op); DeleteObject(pen);
             }
         }
-        // vertical scrollbar when there are more tracks than fit
+        RestoreDC(h, -1);
+
+        // Scrollbars last and outside the lane clip, which now stops above the
+        // horizontal one -- drawing them inside it would clip the bar away.
         {
             RECT gutter, thumb;
             if (tlVScrollGeom(gutter, thumb)) {
                 fill(h, gutter, col::panel);
                 roundFill(h, thumb, mode == Mode::TlVScroll ? col::accentDk : col::btn, col::cardEdge, S(4));
             }
+            if (tlHScrollGeom(gutter, thumb)) {
+                fill(h, gutter, col::panel);
+                roundFill(h, thumb, mode == Mode::TlHScroll ? col::accentDk : col::btn, col::cardEdge, S(4));
+            }
         }
-        RestoreDC(h, -1);
     }
 
     void paintRulerTicks(HDC h, const RECT& rr) {
@@ -1917,8 +1936,13 @@ struct App {
             L"  \u2022 Drag a track's volume slider to change the track level\n"
             L"  \u2022 Right-click a track header to clean/isolate voice, rename or remove the track\n"
             L"  \u2022 Click a lane or the ruler to move the playhead\n"
-            L"  \u2022 Ctrl+wheel zooms, Shift+wheel scrolls vertically\n\n"
-            L"Keys:  Space = play/pause   Ctrl+Z = undo   Ctrl+Shift+Z = redo",
+            L"  \u2022 Wheel scrolls sideways; Ctrl+wheel zooms; Shift+wheel scrolls\n"
+            L"    vertically. A longer-than-the-window arrangement also gets a\n"
+            L"    scrollbar along the bottom, and the view follows the playhead\n"
+            L"    while playing (scrolling by hand stops it until you play again)\n\n"
+            L"Keys:  Space = play/pause   Ctrl+Z = undo   Ctrl+Shift+Z = redo\n"
+            L"       \u2190 \u2192 scroll the timeline (Ctrl or PgUp/PgDn = page)\n"
+            L"       Home / End = jump to the start / end of the arrangement",
             L"Controls", MB_ICONINFORMATION);
     }
 
@@ -1940,7 +1964,11 @@ struct App {
         int64_t total = doc.project().timelineLengthFrames();
         if (total <= 0) return;
         previewClipId = -1; previewIsSel = false; timelinePlaying = true;
+        // Starting playback re-arms the view to chase the playhead, so a scroll
+        // made while the last pass was running doesn't silently stay in force.
+        followPlayhead = true;
         engine.play(std::make_shared<TimelineSource>(std::move(segs), total), playheadFrame);
+        followPlayheadIfPlaying();
         refresh();
     }
     void stopAll() {
@@ -2006,34 +2034,101 @@ struct App {
     void validateSelection() { clampSelection(doc.project(), selClipId, selStart, selEnd); }
 
     // --------------------------------------------------------- scroll
+    static int scrollBarThickness() { return 12; }   // in unscaled units; S() applied by callers
+    int sbT() const { return S(scrollBarThickness()); }
+
+    // How wide the arranged content is, in pixels at the current zoom. The slack
+    // past the last clip is deliberate: without it there would be nowhere to drop
+    // a clip *after* the end of the arrangement.
+    int tlContentW() const {
+        return (int)(doc.project().timelineLengthFrames() * pxPerFrame()) + S(200);
+    }
+    int tlFullLaneW() const { return rcTimeline.right - (rcTimeline.left + trackHeaderW); }
+    int tlFullLaneH() const { return rcTimeline.bottom - (rcTimeline.top + rulerH); }
+
+    layout::ScrollBars tlBars() const {
+        return layout::scrollBarsNeeded(tlContentW(), tlContentH, tlFullLaneW(), tlFullLaneH(), sbT());
+    }
+    int tlLaneVisW() const { return tlFullLaneW() - (tlBars().vert ? sbT() : 0); }
+    int tlLaneVisH() const { return tlFullLaneH() - (tlBars().horz ? sbT() : 0); }
+    // Lane content stops above the horizontal bar rather than running under it.
+    int laneClipBottom() const { return rcTimeline.bottom - (tlBars().horz ? sbT() : 0); }
+    int maxScrollX() const { return std::max(0, tlContentW() - tlLaneVisW()); }
+    int maxScrollY() const { return std::max(0, tlContentH - tlLaneVisH()); }
+
     // Vertical scrollbar for the tracks pane. Returns false when all tracks fit
     // (nothing to scroll). `gutter` is the full track, `thumb` the draggable knob.
     bool tlVScrollGeom(RECT& gutter, RECT& thumb) const {
-        int tlVis = rcTimeline.bottom - (rcTimeline.top + rulerH);
-        if (tlVis <= 0 || tlContentH <= tlVis) return false;
-        int gw = S(12);
-        gutter = { rcTimeline.right - gw, rcTimeline.top + rulerH, rcTimeline.right, rcTimeline.bottom };
-        int trackH = gutter.bottom - gutter.top;
-        int thumbH = std::max(S(28), (int)((double)tlVis / tlContentH * trackH));
-        thumbH = std::min(thumbH, trackH);
-        int maxY = std::max(1, tlContentH - tlVis);
-        int travel = std::max(0, trackH - thumbH);
-        int thumbTop = gutter.top + (int)((double)tlScrollY / maxY * travel);
-        thumb = { gutter.left + S(2), thumbTop, gutter.right - S(1), thumbTop + thumbH };
+        const layout::ScrollBars b = tlBars();
+        if (!b.vert) return false;
+        gutter = { rcTimeline.right - sbT(), rcTimeline.top + rulerH,
+                   rcTimeline.right, rcTimeline.bottom - (b.horz ? sbT() : 0) };
+        const layout::ScrollThumb t = layout::scrollThumb(
+            tlScrollY, tlContentH, tlLaneVisH(), gutter.bottom - gutter.top, S(28));
+        const int top = gutter.top + t.offset;
+        thumb = { gutter.left + S(2), top, gutter.right - S(1), top + t.length };
         return true;
     }
     // Map a thumb-top pixel position back to a tlScrollY value.
     void setVScrollFromThumbTop(int thumbTop) {
         RECT gutter, thumb;
         if (!tlVScrollGeom(gutter, thumb)) return;
-        int trackH = gutter.bottom - gutter.top;
-        int thumbH = thumb.bottom - thumb.top;
-        int travel = std::max(1, trackH - thumbH);
-        int tlVis = rcTimeline.bottom - (rcTimeline.top + rulerH);
-        int maxY = std::max(0, tlContentH - tlVis);
-        double frac = (double)(thumbTop - gutter.top) / travel;
-        tlScrollY = (int)(std::max(0.0, std::min(1.0, frac)) * maxY);
+        tlScrollY = layout::scrollFromThumb(thumbTop - gutter.top, gutter.bottom - gutter.top,
+                                            thumb.bottom - thumb.top, maxScrollY());
         clampScroll();
+    }
+
+    // Horizontal scrollbar along the bottom of the tracks pane. It starts at the
+    // lane edge rather than the pane edge, so it sits under exactly the content
+    // it scrolls and not under the fixed track-header column.
+    bool tlHScrollGeom(RECT& gutter, RECT& thumb) const {
+        const layout::ScrollBars b = tlBars();
+        if (!b.horz) return false;
+        gutter = { rcTimeline.left + trackHeaderW, rcTimeline.bottom - sbT(),
+                   rcTimeline.right - (b.vert ? sbT() : 0), rcTimeline.bottom };
+        if (gutter.right <= gutter.left) return false;
+        const layout::ScrollThumb t = layout::scrollThumb(
+            tlScrollX, tlContentW(), tlLaneVisW(), gutter.right - gutter.left, S(28));
+        const int left = gutter.left + t.offset;
+        thumb = { left, gutter.top + S(2), left + t.length, gutter.bottom - S(1) };
+        return true;
+    }
+    void setHScrollFromThumbLeft(int thumbLeft) {
+        RECT gutter, thumb;
+        if (!tlHScrollGeom(gutter, thumb)) return;
+        tlScrollX = layout::scrollFromThumb(thumbLeft - gutter.left, gutter.right - gutter.left,
+                                            thumb.right - thumb.left, maxScrollX());
+        clampScroll();
+    }
+
+    // Scroll the lanes horizontally by hand. Doing so during playback means the
+    // user wants to look somewhere other than where the audio is, so it stops the
+    // view chasing the playhead until playback is (re)started -- otherwise the
+    // next tick would drag the view straight back and manual scrolling would look
+    // broken while playing.
+    void scrollTimelineBy(int dx) {
+        tlScrollX += dx; followPlayhead = false; clampScroll(); refresh();
+    }
+    void scrollTimelineTo(int x) {
+        tlScrollX = x; followPlayhead = false; clampScroll(); refresh();
+    }
+
+    // Keep the playhead on screen while the timeline plays. Paging by most of a
+    // screen (rather than recentring every tick) keeps the lanes still enough to
+    // read: continuous scrolling at playback speed makes the waveforms crawl and
+    // is much harder to follow than an occasional jump.
+    void followPlayheadIfPlaying() {
+        if (!timelinePlaying || !followPlayhead) return;
+        if (!tlBars().horz) return;    // it all fits; nothing to chase
+        const int visW = tlLaneVisW();
+        if (visW <= 0) return;
+        const int laneLeft = rcTimeline.left + trackHeaderW;
+        const int px = frameToX(playheadFrame) - laneLeft + tlScrollX;   // content-space x
+        const int margin = S(24);
+        if (px < tlScrollX + margin || px > tlScrollX + visW - margin) {
+            tlScrollX = std::max(0, px - margin);
+            clampScroll(); refresh();
+        }
     }
 
     void clampScroll() {
@@ -2041,12 +2136,8 @@ struct App {
         int visH = rcLibrary.bottom - rcLibrary.top;
         int maxS = std::max(0, libContentH - visH);
         libScroll = std::max(0, std::min(libScroll, maxS));
-        int64_t total = doc.project().timelineLengthFrames();
-        int maxX = std::max(0, (int)(total * pxPerFrame()) - (int)(rcTimeline.right - rcTimeline.left - trackHeaderW) + S(200));
-        tlScrollX = std::max(0, std::min(tlScrollX, maxX));
-        int tlVis = rcTimeline.bottom - rcTimeline.top - rulerH;
-        int maxY = std::max(0, tlContentH - tlVis);
-        tlScrollY = std::max(0, std::min(tlScrollY, maxY));
+        tlScrollX = std::max(0, std::min(tlScrollX, maxScrollX()));
+        tlScrollY = std::max(0, std::min(tlScrollY, maxScrollY()));
     }
 
     void refresh() { InvalidateRect(hwnd, nullptr, FALSE); }
@@ -2119,13 +2210,22 @@ struct App {
 
         // timeline
         if (PtInRect(&rcTimeline, p)) {
-            // vertical scrollbar (takes priority over lane/header hits at the far right)
+            // Scrollbars take priority over lane/header hits: the lane rects run
+            // underneath them, so testing the lanes first would swallow the click.
             {
                 RECT gutter, thumb;
                 if (tlVScrollGeom(gutter, thumb) && PtInRect(&gutter, p)) {
                     mode = Mode::TlVScroll;
                     if (PtInRect(&thumb, p)) vscrollGrab = p.y - thumb.top;
                     else { vscrollGrab = (thumb.bottom - thumb.top) / 2; setVScrollFromThumbTop(p.y - vscrollGrab); }
+                    SetCapture(hwnd); refresh(); return;
+                }
+                if (tlHScrollGeom(gutter, thumb) && PtInRect(&gutter, p)) {
+                    mode = Mode::TlHScroll; followPlayhead = false;
+                    // Clicking the gutter beside the thumb jumps there and then
+                    // keeps dragging, so a click and a drag are the same gesture.
+                    if (PtInRect(&thumb, p)) hscrollGrab = p.x - thumb.left;
+                    else { hscrollGrab = (thumb.right - thumb.left) / 2; setHScrollFromThumbLeft(p.x - hscrollGrab); }
                     SetCapture(hwnd); refresh(); return;
                 }
             }
@@ -2162,6 +2262,9 @@ struct App {
             if (trackAtPoint(p, tid) || (p.y < rcTimeline.top + rulerH && p.x > rcTimeline.left + trackHeaderW)) {
                 playheadFrame = xToFrame(p.x);
                 if (timelinePlaying) engine.seek(playheadFrame);
+                // Putting the playhead somewhere you can see re-arms following:
+                // you have just said where you want to be watching.
+                followPlayhead = true;
                 mode = Mode::TimelineSeek; SetCapture(hwnd); refresh(); return;
             }
         }
@@ -2225,6 +2328,8 @@ struct App {
             clampScroll(); refresh();
         } else if (mode == Mode::TlVScroll) {
             setVScrollFromThumbTop(p.y - vscrollGrab); refresh();
+        } else if (mode == Mode::TlHScroll) {
+            setHScrollFromThumbLeft(p.x - hscrollGrab); refresh();
         } else if (mode == Mode::CardDrag || mode == Mode::ClipMove || mode == Mode::TimelineSeek) {
             if (mode == Mode::TimelineSeek) { playheadFrame = xToFrame(p.x); if (timelinePlaying) engine.seek(playheadFrame); }
             else updateDragSnap(p);      // the one place the snap state advances
@@ -2597,6 +2702,18 @@ struct App {
             else playAll();
             return;
         }
+        // Scrolling the arrangement from the keyboard. A long timeline is mostly
+        // off-screen, so reaching a distant point by wheel alone is tedious; End
+        // in particular is the only quick way to get to where the arrangement
+        // actually stops.
+        const int step = std::max(S(24), tlLaneVisW() / 12);
+        const int page = std::max(step, tlLaneVisW() - S(40));
+        if (k == VK_LEFT)  { scrollTimelineBy(-(ctrl ? page : step)); return; }
+        if (k == VK_RIGHT) { scrollTimelineBy(  ctrl ? page : step);  return; }
+        if (k == VK_PRIOR) { scrollTimelineBy(-page); return; }   // Page Up
+        if (k == VK_NEXT)  { scrollTimelineBy( page); return; }   // Page Down
+        if (k == VK_HOME)  { scrollTimelineTo(0); return; }
+        if (k == VK_END)   { scrollTimelineTo(INT_MAX); return; }
     }
 
     void onWheel(POINT p, int delta, bool ctrl, bool shift) {
@@ -2617,7 +2734,7 @@ struct App {
                 // column, scrolls the tracks vertically.
                 tlScrollY -= delta / 2;
             } else {
-                tlScrollX -= delta;
+                tlScrollX -= delta; followPlayhead = false;
             }
             clampScroll(); refresh();
         }
@@ -2650,7 +2767,7 @@ struct App {
         const bool playing = engine.isPlaying();
         setTimerRate(playing);
         if (playing) {
-            if (timelinePlaying) playheadFrame = engine.position();
+            if (timelinePlaying) { playheadFrame = engine.position(); followPlayheadIfPlaying(); }
             else if (previewClipId >= 0) previewCursor = previewBegin + engine.position();
             refresh();
         }
