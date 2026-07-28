@@ -1513,6 +1513,153 @@ int runSelfTest() {
               tailCut ? std::to_wstring(tailCut->frames()) : L"(null)");
     }
 
+    // ---- timbre matching (making separately-recorded clips sound alike)
+    {
+        const int RATE = 48000, TWIN = 2048;
+        // Noise, not tones: a continuous spectrum makes the long-term average
+        // smooth, so the test measures the matching rather than the luck of
+        // where harmonics happened to land between FFT bins. Deterministic LCG
+        // so a failure is always reproducible.
+        auto shapedNoise = [](int64_t n, double lp, double tilt) {
+            auto b = std::make_shared<AudioBuffer>();
+            b->sampleRate = 48000; b->channels = 1;
+            b->samples.resize((size_t)n);
+            uint32_t s = 12345u;
+            double y = 0.0, prev = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                s = s * 1664525u + 1013904223u;
+                const double w = (double)(int32_t)(s >> 1) / 1073741824.0 - 1.0;
+                // One-pole low-pass: a falling spectrum, roughly speech-shaped.
+                y = lp * y + (1.0 - lp) * w;
+                // First-order high-frequency emphasis: a smooth, known tilt --
+                // this is the "different recording conditions" being simulated.
+                const double v = y - tilt * prev;
+                prev = y;
+                b->samples[(size_t)i] = (float)(0.4 * v);
+            }
+            return b;
+        };
+        const int64_t N = 3 * RATE;
+        auto clipA = shapedNoise(N, 0.7, 0.0);    // the reference tone colour
+        auto clipB = shapedNoise(N, 0.7, 0.6);    // same source, noticeably brighter
+
+        // RMS of the de-meaned dB difference between two profiles over the band
+        // that carries speech. De-meaned because a broadband offset is loudness,
+        // which timbre matching deliberately does not touch.
+        auto curveRms = [&](const dsp::TimbreProfile& a, const dsp::TimbreProfile& b) {
+            if (!a.valid() || !b.valid()) return 999.0;
+            const double toDb = 10.0 / std::log(10.0);
+            const int k0 = 100 * TWIN / RATE, k1 = std::min<int>(10000 * TWIN / RATE,
+                                                                 (int)a.logPower.size() - 1);
+            double s = 0; int c = 0;
+            for (int k = k0; k <= k1; ++k) { s += (b.logPower[k] - a.logPower[k]) * toDb; ++c; }
+            const double m = c ? s / c : 0.0;
+            double q = 0;
+            for (int k = k0; k <= k1; ++k) {
+                const double d = (b.logPower[k] - a.logPower[k]) * toDb - m; q += d * d;
+            }
+            return c ? std::sqrt(q / c) : 999.0;
+        };
+
+        dsp::TimbreProfile pa = dsp::computeTimbreProfile(*clipA);
+        dsp::TimbreProfile pb = dsp::computeTimbreProfile(*clipB);
+        check(pa.valid() && pb.valid() && pa.sampleRate == RATE,
+              L"timbre: profiles measured from both clips");
+        check((int)pa.logPower.size() == TWIN / 2 + 1, L"timbre: profile covers bins 0..Nyquist",
+              std::to_wstring(pa.logPower.size()));
+        const double diffBefore = curveRms(pa, pb);
+        check(diffBefore > 2.0, L"timbre: the two takes really do differ in tone",
+              std::to_wstring(diffBefore) + L" dB rms");
+
+        // --- the point of the whole thing: filtering B toward A's spectrum
+        //     should collapse that difference.
+        dsp::TimbreMatchOptions opt;   // defaults: 12 dB clamp, 1/2-octave smoothing
+        opt.maxCorrectionDb = 24.0f;
+        std::vector<float> curve;
+        auto fixed = dsp::matchTimbre(*clipB, pa, opt, &curve);
+        check(fixed != nullptr, L"timbre: matchTimbre returned a buffer");
+        if (fixed) {
+            const double diffAfter = curveRms(pa, dsp::computeTimbreProfile(*fixed));
+            check(diffAfter < diffBefore * 0.25,
+                  L"timbre: matching pulls a clip onto the reference spectrum",
+                  std::to_wstring(diffBefore) + L" -> " + std::to_wstring(diffAfter) + L" dB rms");
+            check(fixed->frames() == N && fixed->channels == 1 && fixed->sampleRate == RATE,
+                  L"timbre: matching preserves length and format");
+            check(curve.size() == pa.logPower.size(),
+                  L"timbre: the applied curve is reported per bin");
+            // A pure tone-colour change: the correction must not smuggle in a
+            // level change, or this would quietly double as a normalizer.
+            const double lb = dsp::speechLoudness(*clipB), lf = dsp::speechLoudness(*fixed);
+            check(lb > 0 && lf > 0 && std::fabs(20.0 * std::log10(lf / lb)) < 1.5,
+                  L"timbre: matching keeps the clip's loudness",
+                  std::to_wstring(20.0 * std::log10(lf / std::max(1e-12, lb))) + L" dB");
+        }
+
+        // --- matching a clip to its own spectrum must be a no-op, which also
+        //     pins that the STFT filter reconstructs the signal exactly.
+        auto same = dsp::matchTimbre(*clipA, pa, opt);
+        check(same != nullptr, L"timbre: matching a clip to itself returns a buffer");
+        if (same && same->frames() == N) {
+            double worst = 0.0;
+            for (size_t i = 0; i < same->samples.size(); ++i)
+                worst = std::max(worst, (double)std::fabs(same->samples[i] - clipA->samples[i]));
+            check(worst < 1e-3, L"timbre: matching a clip to its own spectrum changes nothing",
+                  std::to_wstring(worst));
+        }
+
+        // --- the real workflow: pull both clips onto their common average and
+        //     they should end up sounding like each other, not like either one.
+        dsp::TimbreProfile avg = dsp::averageTimbre({ pa, pb });
+        check(avg.valid() && avg.count == 2 && avg.sampleRate == RATE,
+              L"timbre: averageTimbre pooled both profiles");
+        if (avg.valid()) {
+            double worst = 0.0;
+            for (size_t k = 0; k < avg.logPower.size(); ++k)
+                worst = std::max(worst, (double)std::fabs(
+                    avg.logPower[k] - 0.5f * (pa.logPower[k] + pb.logPower[k])));
+            check(worst < 1e-4, L"timbre: the average is the per-bin mean of the log spectra",
+                  std::to_wstring(worst));
+            auto ma = dsp::matchTimbre(*clipA, avg, opt);
+            auto mb = dsp::matchTimbre(*clipB, avg, opt);
+            check(ma && mb, L"timbre: both clips matched to the average");
+            if (ma && mb) {
+                const double conv = curveRms(dsp::computeTimbreProfile(*ma),
+                                             dsp::computeTimbreProfile(*mb));
+                check(conv < diffBefore * 0.25,
+                      L"timbre: clips matched to the average converge on each other",
+                      std::to_wstring(diffBefore) + L" -> " + std::to_wstring(conv) + L" dB rms");
+            }
+        }
+        // A profile of another sample rate isn't comparable bin-for-bin, so it
+        // must be ignored rather than averaged into nonsense.
+        dsp::TimbreProfile odd = pb; odd.sampleRate = 44100;
+        check(dsp::averageTimbre({ pa, odd }).count == 1,
+              L"timbre: averageTimbre ignores a profile of a different rate");
+        check(!dsp::averageTimbre({}).valid(), L"timbre: averaging nothing gives no profile");
+
+        // --- the clamp is a hard limit on how far a clip may be moved
+        dsp::TimbreMatchOptions tight; tight.maxCorrectionDb = 3.0f;
+        std::vector<float> tightCurve;
+        auto lim = dsp::matchTimbre(*clipB, pa, tight, &tightCurve);
+        double biggest = 0.0;
+        for (float d : tightCurve) biggest = std::max(biggest, (double)std::fabs(d));
+        check(lim && biggest <= 3.0001, L"timbre: the correction respects the dB clamp",
+              std::to_wstring(biggest));
+
+        // --- refusals, rather than silently returning something wrong
+        check(dsp::matchTimbre(*clipB, dsp::TimbreProfile{}, opt) == nullptr,
+              L"timbre: matching against an unmeasured profile is refused");
+        dsp::TimbreProfile wrongRate = pa; wrongRate.sampleRate = 44100;
+        check(dsp::matchTimbre(*clipB, wrongRate, opt) == nullptr,
+              L"timbre: matching across sample rates is refused");
+        auto tiny = std::make_shared<AudioBuffer>();
+        tiny->sampleRate = RATE; tiny->channels = 1; tiny->samples.resize(1000, 0.1f);
+        check(!dsp::computeTimbreProfile(*tiny).valid(),
+              L"timbre: audio shorter than one window can't be profiled");
+        check(dsp::matchTimbre(*tiny, pa, opt) == nullptr,
+              L"timbre: a clip too short to measure is refused");
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);

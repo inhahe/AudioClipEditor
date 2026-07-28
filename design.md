@@ -17,7 +17,7 @@ sync with behavior changes.
 | `engine.{h,cpp}` | WASAPI shared-mode render thread; `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
 | `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker |
 | `document.{h,cpp}` | Owns `Project` + undo tree + `ViewState`; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`) |
-| `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms + voice isolation (see below) |
+| `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms, voice isolation, LTAS timbre matching, manual region edits (see below) |
 | `waveform.{h,cpp}` | GDI oscilloscope: per-column min/max envelope (one `PolyPolyline`) zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, file/project pickers |
 | `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`), toolbar row wrapping (`flowButtons`), and scrollbar sizing (`scrollBarsNeeded`, `scrollThumb`, `scrollFromThumb`) |
@@ -274,10 +274,114 @@ target clip is processed and committed through `Document::replaceClipBuffers` as
 how many voice segments — counted over the processed range only, so a
 selection-scoped run cannot quote whole-clip numbers.
 
+## DSP: timbre matching (`dsp.{h,cpp}`)
+
+Sentences recorded in separate takes drift in tone even when nothing obvious
+changed: a few centimetres of mic distance moves the low end (proximity effect),
+a few degrees off-axis rolls off the top, a different position in the room
+recolours the mids. All of that is one slowly-varying difference in the clip's
+**long-term average spectrum** (LTAS), so one gentle static EQ curve per clip
+fixes it.
+
+**The model.** Averaging a clip's power spectrum over all of its speech cancels
+the *content* — which words happened to be said — and leaves the recording
+chain's colouration. The ratio between two clips' LTASs is therefore exactly the
+EQ that turns one clip's tone into the other's, and applying it is the whole
+algorithm. This is precisely parallel to `normalizeClips`, which matches one
+number (loudness); this matches the whole curve.
+
+**What it can't fix**, because these are not spectral-average differences:
+reverb and early reflections (a room tail is a *time* difference — EQ cannot add
+or remove one), differing background noise (that's the voice cleaner's job),
+clipping, and differences in delivery. The dialog says so.
+
+| Function | Role |
+|---|---|
+| `computeTimbreProfile(buf)` | measure one clip's LTAS → `TimbreProfile` (per-bin mean `ln(power)`) |
+| `averageTimbre(profiles)` | per-bin mean of the log spectra = **geometric mean of power** |
+| `matchTimbre(buf, target, opts, curveDbOut)` | filter a clip onto `target`; reports the applied dB curve |
+
+Framing is 2048/512 — deliberately identical to the voice detector's, so
+`detectVoiceFrames`' per-frame mask lines up frame for frame with the analysis.
+
+### Decisions worth keeping
+
+- **Speech frames only.** Room tone differs between takes too, and a clip with
+  longer pauses would otherwise be dragged toward its own noise floor — matching
+  noise floors is not what "the same timbre" means. Fallback chain when the
+  detector finds under 4 voiced frames: the loudest frames (`speechLoudness`'s
+  same "within ~20 dB of peak" rule), then all frames. An unusual clip is still
+  matched rather than silently skipped: a slightly worse measurement of it beats
+  leaving it as the one clip that still sounds different.
+- **Mean of powers, then log** — not mean of logs. The log of an average is
+  dominated by the loud frames, which is what a tone colour should be; a mean of
+  logs weights a near-silent frame's noise floor as heavily as a vowel.
+- **Fractional-octave smoothing with an absolute `minHz` floor (60 Hz).**
+  Constant-Q is the right shape (hearing resolves frequency logarithmically), but
+  at 100 Hz half an octave is only a couple of FFT bins — narrow enough to
+  resolve a voice's individual **F0 harmonics**. Two takes are never at the same
+  pitch, so a curve that fine would try to EQ one take's harmonic comb onto
+  another's: a violent, warbling correction with nothing to do with timbre. The
+  floor averages the low end across several harmonics, leaving only the envelope.
+  Smoothing is arithmetic in dB = geometric in power, so a +6 dB bump and a −6 dB
+  dip average to 0.
+- **The curve is forced to average 0 dB, weighted by the target's power.** A
+  broadband offset is *loudness*, not timbre; leaving it in would make this
+  quietly double as a normalizer and undo levels the user had already set. The
+  weighting matters: an unweighted mean over linearly-spaced bins is dominated by
+  the near-empty top half of the spectrum, where the correction is noise, and
+  would bias the whole curve to cancel it.
+- **Clamp after de-meaning**, so `maxCorrectionDb` limits the *shape* of the
+  curve rather than the shape plus an offset that is about to be removed.
+- **Zero-phase application.** The gain is real and mirrored onto the conjugate
+  bins (`k` and `kTMWin-k`) of each STFT frame, so phase is untouched and nothing
+  is smeared in time. Overlap-add uses the same lead-padded, `sum(w²)`-normalised
+  pattern as `denoiseChannelProfile`, which reconstructs exactly — pinned by the
+  selftest that matches a clip to its own profile and asserts the samples come
+  back unchanged.
+- **Measured on the mono mix**, but the correction is applied identically to
+  every channel: timbre is a property of the source, so the stereo image survives.
+- **Scale, don't clip**, if a boosted band pushes a peak past full scale. Trading
+  a subtle tone difference for audible distortion is a bad bargain.
+
+### Timbre matching in the app
+
+`App::tmOpts` + `App::tmReference` (session-persisted) → `matchTimbreTrack` /
+`matchTimbreAllClips` funnel into `matchTimbreClips(ids, scopeLabel)`. One
+options dialog (`dlg::timbreMatch`), then every target clip is filtered and
+committed through `Document::replaceClipBuffers` as **one undo step**. Menu ids
+`IDM_TIMBRE_ALL` (clip menu, top level) and `IDM_TRK_TIMBRE` (track header menu).
+
+Three ways this differs from the other two effects, all following from it being a
+**set** operation rather than a per-clip one:
+
+1. **No "this clip" scope and no selection-only variant.** There is nothing to
+   match a lone clip *to*, so both entries are greyed below two clips. A tone
+   colour is a property of a whole take, and EQ'ing half a clip differently from
+   the other half would create exactly the audible seam this exists to remove —
+   which is why `blendProcessedRange` is not used here.
+2. **The dialog also picks the reference**: the average of the set (default) or
+   one named clip ("Sound like 'take 2'"). The average is the geometric mean, so
+   it moves each clip as little as possible and favours none — the same reasoning
+   as `normalizeClips`' geometric-mean-of-loudness target.
+3. **`tmReference` is stored as a clip *name*, not an index.** The choice
+   outlives the dialog that made it and the set it was chosen from changes (a
+   different track, a clip renamed or deleted); an index into last time's list
+   would silently come to mean a different clip.
+
+All profiles are measured *before* anything is filtered, because the target may
+be their average and a clip that can't be measured must be left alone rather than
+filtered by a curve derived from nothing. Clips of a sample rate other than the
+first one's are skipped — spectra are only comparable bin-for-bin at one rate —
+and the summary box names the count, since a clip missing from the match is
+exactly the one that will still sound different. The box also reports the largest
+correction applied and says so explicitly when the clamp bit, so a partial match
+doesn't read as a broken one.
+
 ## Applying an effect to the selection only
 
 Both the voice cleaner and remove-non-voice can be limited to the current
-waveform selection instead of the whole clip.
+waveform selection instead of the whole clip. Timbre matching cannot — see above.
 
 **The range is chosen in the right-click menu, not in the dialog.** Each effect's
 submenu lists its scopes directly:
@@ -978,6 +1082,15 @@ pattern: a Sensitivity preset combo, numeric Attenuation / Hold / Fade edits
 radios, with the scope (`'clip name'`, `all clips (N clips)`, `track 'x'`) shown
 in the dialog so a project-wide run can't be triggered by accident.
 
+`dlg::timbreMatch(parent, TimbreMatchContext&)` adds one thing the other two
+don't need: a **reference combo** listing "The average of them all" followed by
+"Sound like '<clip>'" for each clip in the set. The context carries the names in
+and the chosen index (`-1` = average) back out. Clip names are clamped to
+`S(320)` when sizing the combo so a long name can't stretch the dialog off the
+screen. Otherwise it is the same shape as `voiceIsolate`: numeric Maximum-change
+and Smoothing edits through `vcReadDouble`, a Keep-loudness checkbox, and the
+scope line.
+
 ## Selftest
 
 `--selftest` (headless, logs to `bin/selftest.log`). Profile-NR coverage:
@@ -1063,11 +1176,25 @@ bump / shuffle / room tone each attenuated ≥ 20 dB (measured −60 dB, i.e. th
 full requested reduction), exactly one detected voice segment, and
 reduce + residue == original. It also logs the throughput (≈37× realtime).
 
+**Timbre matching** is tested end-to-end on two clips built from the *same*
+deterministic noise source, one passed through a known first-order tilt — noise
+rather than tones so the long-term average is smooth and the test measures the
+matching rather than where harmonics happened to land between bins. The two
+profiles start 2.62 dB rms apart (de-meaned, 100 Hz–10 kHz) and matching collapses
+that to **0.02 dB**; matching both clips to their *average* converges them on each
+other equally well, which is the actual workflow. Matching a clip to **its own**
+profile is asserted to be a sample-accurate no-op (worst error 1e-6), which pins
+the overlap-add reconstruction as well as the zero-mean logic. Also covered:
+loudness preserved to within 1.5 dB (it must not double as a normalizer),
+`averageTimbre` equalling the per-bin mean and ignoring a profile of a different
+rate, the `maxCorrectionDb` clamp holding exactly, and refusals for an unmeasured
+profile / a rate mismatch / a clip shorter than one analysis window.
+
 ## Undo / scopes
 
-Voice cleaning (any algorithm) and voice isolation replace clip buffers and
-commit **one snapshot per operation** — a track-wide or project-wide clean /
-isolation is a single undo step.
+Voice cleaning (any algorithm), voice isolation and timbre matching replace clip
+buffers and commit **one snapshot per operation** — a track-wide or project-wide
+clean / isolation / match is a single undo step.
 
 ## Unsaved-changes guard
 

@@ -734,6 +734,122 @@ bool voiceIsolate(HWND parent, VoiceIsolateContext& ctx) {
     return st.ok;
 }
 
+// ------------------------------------------------------------------ timbre matching
+struct TMState {
+    dsp::TimbreMatchOptions* opts = nullptr;
+    int* reference = nullptr;
+    HWND cbRef = 0, edDb = 0, edSmooth = 0, ckLoud = 0;
+    bool ok = false;
+};
+
+static LRESULT CALLBACK TMProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    auto* st = (TMState*)GetWindowLongPtrW(h, GWLP_USERDATA);
+    switch (m) {
+    case WM_COMMAND:
+        if (LOWORD(w) == IDCANCEL) { st->ok = false; DestroyWindow(h); return 0; }
+        if (LOWORD(w) == IDOK) {
+            dsp::TimbreMatchOptions& o = *st->opts;
+            o.maxCorrectionDb  = (float)vcReadDouble(st->edDb, 0.0, 24.0, 12.0);
+            o.smoothingOctaves = (float)vcReadDouble(st->edSmooth, 0.05, 2.0, 0.5);
+            o.preserveLoudness = SendMessageW(st->ckLoud, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            // Item 0 is "the average of them all"; the rest are the clips in order.
+            const int ri = (int)SendMessageW(st->cbRef, CB_GETCURSEL, 0, 0);
+            *st->reference = ri > 0 ? ri - 1 : -1;
+            st->ok = true; DestroyWindow(h); return 0;
+        }
+        break;
+    case WM_CLOSE: st->ok = false; DestroyWindow(h); return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+bool timbreMatch(HWND parent, TimbreMatchContext& ctx) {
+    static bool reg = false;
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    if (!reg) {
+        WNDCLASSW wc{}; wc.lpfnWndProc = TMProc; wc.hInstance = hInst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"ACE_TM"; RegisterClassW(&wc); reg = true;
+    }
+    dsp::TimbreMatchOptions& opts = *ctx.opts;
+    TMState st; st.opts = &opts; st.reference = &ctx.reference;
+    DlgUI ui(parent);
+
+    static const wchar_t* kInfo =
+        L"Evens out the tone differences between clips recorded separately \u2014 mic distance "
+        L"and angle, tone controls, a brighter or duller room. Each clip's average tone colour "
+        L"is measured over its speech and gently EQ'd toward a common one. It cannot fix "
+        L"differences in reverb, background noise or delivery.";
+    static const wchar_t* kLabels[] = { L"Match to:", L"Maximum change (dB):",
+                                        L"Smoothing (octaves):", L"Level:" };
+    static const wchar_t* kAvg = L"The average of them all";
+    static const wchar_t* kCheck = L"Keep each clip's loudness";
+
+    int labelW = 0;
+    for (auto* t : kLabels) labelW = std::max(labelW, ui.textW(t));
+    int ctlW = std::max(ui.S(190), ui.comboW(kAvg));
+    ctlW = std::max(ctlW, ui.checkW(kCheck));
+    // Long clip names shouldn't stretch the dialog off the screen; the combo
+    // scrolls and ellipsises, and the names are only there to be recognised.
+    for (const std::wstring& n : ctx.clipNames)
+        ctlW = std::max(ctlW, std::min(ui.comboW(n.c_str()), ui.S(320)));
+    int contentW = labelW + ui.gap + ctlW;
+    ScopeLine scope(ctx.scopeLabel);
+    scope.widen(ui, contentW);
+    const int ctlX = ui.margin + labelW + ui.gap;
+    const int editW = std::max(ui.S(80), ui.textW(L"000000") + ui.S(16));
+    const int rowH = ui.rowH(), step = rowH + ui.rowGap;
+    const int bw = ui.btnW(L"Cancel"), bh = ui.btnH();
+    const SIZE infoSz = ui.measure(kInfo, contentW);
+    scope.measure(ui, contentW);
+
+    // Rows: info paragraph, "Applies to", reference, two edits, level, buttons.
+    const int clientH = ui.margin + infoSz.cy + ui.S(10) + scope.step(ui)
+                      + 4 * step + ui.S(8) + bh + ui.margin;
+    HWND h = ui.create(L"ACE_TM", L"Match Timbre", parent, ui.margin * 2 + contentW, clientH);
+    SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
+
+    int y = ui.margin;
+    ui.label(kInfo, ui.margin, y, contentW, infoSz.cy);   y += infoSz.cy + ui.S(10);
+    scope.build(ui, y, contentW);
+
+    ui.rowLabel(kLabels[0], ui.margin, y, labelW, rowH);
+    st.cbRef = ui.combo(ctlX, y, ctlW, 8);
+    SendMessageW(st.cbRef, CB_ADDSTRING, 0, (LPARAM)kAvg);
+    for (const std::wstring& n : ctx.clipNames)
+        SendMessageW(st.cbRef, CB_ADDSTRING, 0, (LPARAM)(L"Sound like '" + n + L"'").c_str());
+    int ri = 0;
+    if (ctx.reference >= 0 && ctx.reference < (int)ctx.clipNames.size()) ri = ctx.reference + 1;
+    SendMessageW(st.cbRef, CB_SETCURSEL, ri, 0);
+    y += step;
+
+    wchar_t num[64];
+    auto editRow = [&](const wchar_t* t, const wchar_t* value) {
+        ui.rowLabel(t, ui.margin, y, labelW, ui.editH());
+        HWND c = ui.edit(value, ctlX, y, editW);
+        y += step;
+        return c;
+    };
+    swprintf(num, 64, L"%g", (double)opts.maxCorrectionDb);
+    st.edDb = editRow(kLabels[1], num);
+    swprintf(num, 64, L"%g", (double)opts.smoothingOctaves);
+    st.edSmooth = editRow(kLabels[2], num);
+
+    ui.rowLabel(kLabels[3], ui.margin, y, labelW, rowH);
+    st.ckLoud = ui.check(kCheck, ctlX, y, ctlW);
+    SendMessageW(st.ckLoud, BM_SETCHECK, opts.preserveLoudness ? BST_CHECKED : BST_UNCHECKED, 0);
+    y += step + ui.S(8);
+
+    const int right = ui.margin + contentW;
+    ui.button(L"Apply", right - bw * 2 - ui.S(8), y, bw, bh, IDOK, true);
+    ui.button(L"Cancel", right - bw, y, bw, bh, IDCANCEL);
+
+    SetFocus(st.cbRef);
+    runModal(h, parent);
+    return st.ok;
+}
+
 // ------------------------------------------------------------------ project files
 std::wstring openProject(HWND parent) {
     wchar_t buf[1024] = { 0 };

@@ -140,6 +140,22 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   switch the output to **Preview removed** to audition exactly what would be taken
   away. Same three scopes as the voice cleaner — this clip, every clip on one
   track (track-header right-click), or the whole project — each a single undo step.
+- **Match timbre across clips.** Sentences recorded in separate takes rarely sound
+  quite alike, even when nothing obvious changed: a few centimetres of mic
+  distance moves the low end, a few degrees off-axis rolls off the top, a
+  different spot in the room recolours the mids. Right-click a clip → **Match
+  timbre across all clips…**, or a track header → **Match timbre — this track…**,
+  and every clip is measured and gently EQ'd toward a common tone colour. Choose
+  what to match to: **the average of them all** (the default — it moves each clip
+  as little as possible and favours none) or one particular clip
+  (*Sound like 'take 2'*), when you know which take sounds right. **Maximum
+  change** caps how far any clip may be moved (default 12 dB), **Smoothing**
+  controls how broad the correction curve is, and *Keep each clip's loudness*
+  makes sure this changes only tone, never level. The result box tells you the
+  largest correction it applied — and says so when it hit your limit. One undo
+  step for the whole set. It can't fix differences in **reverb** (a room tail is a
+  difference in *time*, not tone — no EQ can add or remove one), in background
+  noise (use the voice cleaner) or in delivery.
 - **Clean / de-noise just part of a clip.** Drag a selection, then pick
   **This clip (selection)…** — the first entry in the *Voice cleaner* and
   *Remove non-voice* submenus, right above *This clip…* and *All clips*. The range
@@ -235,7 +251,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Close the full-window editor | `Esc` (when no drag is in progress) or the **Done** button |
 | Crop to a selection | **Crop** button on the card while a selection is active |
 | Make a new clip from a selection | **New clip** button on the card, or right-click the card → *New clip from selection* |
-| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, export clip / selection to a file, normalize, voice cleaner, remove non-voice, rename, delete, add to a track |
+| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, export clip / selection to a file, normalize, voice cleaner, remove non-voice, match timbre, rename, delete, add to a track |
 | Rename a clip | right-click → Rename |
 | Reorder clips | drag a card by its title bar to a new spot in the library (caret shows the drop point) |
 | Sort clips | right-click the empty library area → *Sort clips by name* / *by time* |
@@ -243,11 +259,12 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Normalize volume | right-click a card → *Normalize to match other clips* / *Normalize all clips* |
 | Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |
 | Remove bumps / shuffling (keep only voice) | right-click a card → *Remove non-voice → This clip / All clips*, or right-click a track header → *Remove non-voice — this track* |
+| Make separately-recorded clips sound alike | right-click a card → *Match timbre across all clips…*, or right-click a track header → *Match timbre — this track…* |
 | Clean / de-noise only part of a clip | drag a selection, then right-click a card → *Voice cleaner* / *Remove non-voice* → **This clip (selection)…** |
 | Get rid of a noise *Remove non-voice* won't touch | drag a selection over it, then right-click a card (or use the editor toolbar) → *Silence selection (keep timing)* / *Delete selection (close gap)* |
 | Capture a noise profile | select a noise-only stretch, then right-click → *Voice cleaner → Capture noise from selection* (or the **Get noise profile** button in the dialog); or *Capture noise from whole clip*; or the **Capture noise** button in the full-window editor |
 | Apply a saved noise capture | right-click a card → *Voice cleaner → Apply noise capture ▸* and pick a recent capture |
-| Track actions | **right-click a track header/lane**: voice-clean the track, rename, remove |
+| Track actions | **right-click a track header/lane**: voice-clean the track, remove non-voice, match timbre, rename, remove |
 | Add a track | **+ Add Track** |
 | Place a clip on a track | drag a clip card up into a track lane (drops at any time offset), or right-click → Add to timeline |
 | Move a placed clip | drag it along the track — a live ghost shows where it will land (drag vertically to change tracks) |
@@ -282,8 +299,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `undo.h` | Snapshot-based undo **tree** with branching redo |
 | `document.{h,cpp}` | Owns the project + undo tree; every edit commits a snapshot |
 | `waveform.{h,cpp}` | GDI oscilloscope rendering: min/max envelope zoomed out, sample line zoomed in |
-| `dsp.{h,cpp}` | FFT, speech-aware loudness, STFT noise reduction (spectral subtraction / Wiener / Audacity-style profile gate), voice isolation (non-speech removal) |
-| `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, remove-non-voice options, open/save file & project dialogs |
+| `dsp.{h,cpp}` | FFT, speech-aware loudness, STFT noise reduction (spectral subtraction / Wiener / Audacity-style profile gate), voice isolation (non-speech removal), LTAS timbre matching, manual silence/delete edits |
+| `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, remove-non-voice options, match-timbre options, open/save file & project dialogs |
 | `ui.cpp` | Main window: menu bar, layout, painting, hit-testing, all interaction |
 | `selftest.cpp` | `--selftest` backend round-trip checks (decode/encode/peaks/DSP) |
 

@@ -51,6 +51,20 @@ struct VoiceIsolateContext {
 };
 bool voiceIsolate(HWND parent, VoiceIsolateContext& ctx);
 
+// Timbre matching options modal. Unlike the two effects above this one is a
+// *set* operation -- it makes several clips sound alike -- so the dialog also
+// picks the reference every clip is matched to: the average of the set (which
+// moves each clip the least and favours none), or one named clip ("make
+// everything sound like this one"). `reference` is an index into `clipNames`,
+// or -1 for the average. Returns true on Apply.
+struct TimbreMatchContext {
+    dsp::TimbreMatchOptions* opts = nullptr;   // in/out (session-scoped)
+    std::vector<std::wstring> clipNames;       // the clips being matched, in order
+    int reference = -1;                        // in/out: -1 = average, else index
+    std::wstring scopeLabel;                   // what Apply will act on
+};
+bool timbreMatch(HWND parent, TimbreMatchContext& ctx);
+
 // Project open/save file dialogs (.acep). Return empty string on cancel.
 std::wstring openProject(HWND parent);
 std::wstring saveProject(HWND parent, const std::wstring& suggested);

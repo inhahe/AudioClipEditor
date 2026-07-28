@@ -677,6 +677,262 @@ AudioBufferPtr isolateVoice(const AudioBuffer& buf, const VoiceIsolateOptions& o
     return out;
 }
 
+// ---------------- timbre matching (long-term average spectrum) ----------------
+// Two takes of the same voice differ, spectrally, by one slowly-varying curve:
+// mic distance and angle, preamp tone, the colour of the room. Averaging a
+// clip's spectrum over all of its speech cancels the *content* -- which words
+// happened to be said -- and leaves that curve. The ratio between two clips'
+// long-term average spectra is therefore exactly the EQ that turns one clip's
+// tone colour into the other's, and applying it is the whole algorithm.
+
+static const int kTMWin  = 2048;            // same framing as the voice detector, so
+static const int kTMHop  = 512;             // its per-frame mask lines up frame for frame
+static const int kTMSpec = kTMWin / 2 + 1;  // bins 0..Nyquist
+
+static void tmMakeWindow(std::vector<float>& w) {
+    w.resize(kTMWin);
+    for (int i = 0; i < kTMWin; ++i)
+        w[i] = 0.5f * (1.0f - (float)std::cos(2.0 * PI * i / kTMWin));
+}
+
+TimbreProfile computeTimbreProfile(const AudioBuffer& buf) {
+    TimbreProfile p;
+    p.sampleRate = buf.sampleRate;
+    const int64_t nf = buf.frames();
+    if (buf.channels <= 0 || nf < kTMWin) return p;
+
+    // Measured on the mono mix: timbre is a property of the source, not of the
+    // stereo image, and the correction is later applied identically to every
+    // channel so the image survives untouched.
+    const std::vector<float> mono = viMonoMix(buf);
+    const size_t nFrames = (size_t)(1 + (nf - kTMWin) / kTMHop);
+
+    // Speech frames only. Room tone differs between takes as well, and a clip
+    // with longer pauses would otherwise be dragged toward its own noise floor
+    // -- "the same timbre" is a statement about the voice, not the silence.
+    std::vector<uint8_t> use = detectVoiceFrames(buf, VoiceIsolateOptions{});
+    if (use.size() != nFrames) use.assign(nFrames, 1);
+    size_t sel = 0;
+    for (uint8_t v : use) sel += v ? 1u : 0u;
+
+    // Too little detected speech to average over: fall back to the loudest
+    // frames (the same "within ~20 dB of peak" rule speechLoudness uses), and
+    // failing even that, to everything. An unusual clip should still be matched
+    // rather than silently skipped -- a slightly worse measurement of it is far
+    // better than leaving it as the one clip that still sounds different.
+    if (sel < 4) {
+        std::vector<double> rms(nFrames, 0.0);
+        double peak = 0.0;
+        for (size_t fr = 0; fr < nFrames; ++fr) {
+            const size_t s0 = fr * (size_t)kTMHop;
+            double acc = 0.0;
+            for (int i = 0; i < kTMWin; ++i) { const double v = mono[s0 + i]; acc += v * v; }
+            rms[fr] = std::sqrt(acc / kTMWin);
+            peak = std::max(peak, rms[fr]);
+        }
+        const double thr = std::max(peak * 0.1, 3e-4);
+        use.assign(nFrames, 0); sel = 0;
+        for (size_t fr = 0; fr < nFrames; ++fr)
+            if (rms[fr] >= thr) { use[fr] = 1; ++sel; }
+        if (sel == 0) { use.assign(nFrames, 1); sel = nFrames; }
+    }
+
+    std::vector<float> win; tmMakeWindow(win);
+    std::vector<double> sums((size_t)kTMSpec, 0.0);
+    std::vector<cf> fbuf(kTMWin);
+    for (size_t fr = 0; fr < nFrames; ++fr) {
+        if (!use[fr]) continue;
+        const size_t s0 = fr * (size_t)kTMHop;
+        for (int i = 0; i < kTMWin; ++i) fbuf[i] = cf(mono[s0 + i] * win[i], 0.0f);
+        fft(fbuf, false);
+        for (int k = 0; k < kTMSpec; ++k) {
+            const double re = fbuf[k].real(), im = fbuf[k].imag();
+            sums[k] += re * re + im * im;
+        }
+    }
+    // Mean *power* per bin, then its log -- not the mean of the logs. The log of
+    // an average is dominated by the loud frames, which is what a tone colour
+    // should be; a mean of logs would weight a near-silent frame's noise floor
+    // as heavily as a vowel.
+    p.logPower.resize(kTMSpec);
+    for (int k = 0; k < kTMSpec; ++k)
+        p.logPower[k] = (float)std::log(std::max(sums[k] / (double)sel, 1e-20));
+    p.count = (int)sel;
+    return p;
+}
+
+TimbreProfile averageTimbre(const std::vector<TimbreProfile>& profiles) {
+    TimbreProfile avg;
+    std::vector<double> acc;
+    int n = 0;
+    for (const TimbreProfile& p : profiles) {
+        if (!p.valid()) continue;
+        if (n == 0) {
+            avg.sampleRate = p.sampleRate;
+            acc.assign(p.logPower.size(), 0.0);
+        } else if (p.sampleRate != avg.sampleRate || p.logPower.size() != acc.size()) {
+            continue;   // a profile of a different rate isn't comparable bin-for-bin
+        }
+        for (size_t k = 0; k < acc.size(); ++k) acc[k] += p.logPower[k];
+        ++n;
+    }
+    if (n == 0) return avg;
+    // The mean of the log spectra, i.e. the geometric mean of the power. This is
+    // the target that moves every clip the least and favours none of them -- the
+    // same reasoning as normalizeClips using the geometric mean of loudness.
+    avg.logPower.resize(acc.size());
+    for (size_t k = 0; k < acc.size(); ++k) avg.logPower[k] = (float)(acc[k] / n);
+    avg.count = n;
+    return avg;
+}
+
+// Fractional-octave (constant-Q) smoothing of a dB curve, with an absolute
+// minimum window width. Constant-Q is the right shape for tone colour, since
+// hearing resolves frequency logarithmically -- but at 100 Hz half an octave is
+// only a couple of FFT bins, narrow enough to resolve a voice's individual F0
+// harmonics. Two takes are never at exactly the same pitch, so a curve that
+// fine would try to EQ one take's harmonic comb onto another's: a violent,
+// warbling correction that has nothing to do with timbre. The `minHz` floor
+// keeps the low end averaged across several harmonics, leaving only the
+// envelope -- which is the part that actually differs between takes.
+static void tmSmoothOctaves(std::vector<float>& db, double binHz,
+                            double octaves, double minHz = 60.0) {
+    const int n = (int)db.size();
+    if (n <= 0 || binHz <= 0.0) return;
+    std::vector<double> pre((size_t)n + 1, 0.0);
+    for (int k = 0; k < n; ++k) pre[k + 1] = pre[k] + db[k];
+    const double half = std::pow(2.0, std::max(0.0, octaves) * 0.5);
+    std::vector<float> out((size_t)n);
+    for (int k = 0; k < n; ++k) {
+        const double f = k * binHz;
+        const double lo = std::min(f / half, f - minHz);
+        const double hi = std::max(f * half, f + minHz);
+        int j0 = std::max(0, std::min(n - 1, (int)std::floor(lo / binHz)));
+        int j1 = std::max(j0, std::min(n - 1, (int)std::ceil(hi / binHz)));
+        // Arithmetic mean in dB == geometric mean of power, which is the correct
+        // average for a ratio: smoothing a +6 dB bump and a -6 dB dip gives 0.
+        out[k] = (float)((pre[j1 + 1] - pre[j0]) / (j1 - j0 + 1));
+    }
+    db.swap(out);
+}
+
+// Overlap-add a static, real, symmetric gain onto every STFT frame. Because the
+// gain is real and mirrored onto the conjugate bins, each frame's phase is
+// untouched: the filter is zero-phase and smears nothing in time.
+static std::vector<float> tmFilterChannel(const std::vector<float>& in,
+                                          const std::vector<float>& gain) {
+    const size_t len = in.size();
+    // Lead-padding, as in denoiseChannelProfile, so the first and last samples
+    // get the same overlap coverage as the middle instead of a fading window.
+    const size_t lead = kTMWin - kTMHop;
+    const size_t padded = lead + len + kTMWin;
+    const size_t nFr = 1 + (padded - kTMWin) / kTMHop;
+
+    std::vector<float> win; tmMakeWindow(win);
+    auto sampleAt = [&](size_t padIdx) -> float {
+        return (padIdx >= lead && padIdx - lead < len) ? in[padIdx - lead] : 0.0f;
+    };
+
+    std::vector<float> outPad(padded, 0.0f), norm(padded, 0.0f);
+    std::vector<cf> fbuf(kTMWin);
+    for (size_t fr = 0; fr < nFr; ++fr) {
+        const size_t s0 = fr * (size_t)kTMHop;
+        for (int i = 0; i < kTMWin; ++i) fbuf[i] = cf(sampleAt(s0 + i) * win[i], 0.0f);
+        fft(fbuf, false);
+        for (int k = 0; k < kTMSpec; ++k) {
+            fbuf[k] *= gain[k];
+            if (k > 0 && k < kTMWin / 2) fbuf[kTMWin - k] *= gain[k];   // conjugate mirror
+        }
+        fft(fbuf, true);
+        for (int i = 0; i < kTMWin; ++i) {
+            outPad[s0 + i] += fbuf[i].real() * win[i];
+            norm[s0 + i] += win[i] * win[i];
+        }
+    }
+    std::vector<float> out(len, 0.0f);
+    for (size_t i = 0; i < len; ++i) {
+        const float nn = norm[lead + i];
+        if (nn > 1e-6f) out[i] = outPad[lead + i] / nn;
+    }
+    return out;
+}
+
+AudioBufferPtr matchTimbre(const AudioBuffer& buf, const TimbreProfile& target,
+                           const TimbreMatchOptions& opts,
+                           std::vector<float>* curveDbOut) {
+    const int ch = buf.channels;
+    const int64_t nf = buf.frames();
+    if (!target.valid() || target.sampleRate != buf.sampleRate) return nullptr;
+    if (ch <= 0 || (int)target.logPower.size() != kTMSpec) return nullptr;
+    const TimbreProfile mine = computeTimbreProfile(buf);
+    if (!mine.valid()) return nullptr;   // too short to measure
+
+    // Power ratio in dB. (10*log10, not 20: these are powers, not amplitudes.)
+    const double toDb = 10.0 / std::log(10.0);
+    std::vector<float> db((size_t)kTMSpec);
+    for (int k = 0; k < kTMSpec; ++k)
+        db[k] = (float)((target.logPower[k] - mine.logPower[k]) * toDb);
+
+    const int rate = buf.sampleRate > 0 ? buf.sampleRate : 48000;
+    tmSmoothOctaves(db, (double)rate / kTMWin,
+                    std::max(0.05f, std::min(2.0f, opts.smoothingOctaves)));
+
+    // Force the curve to average 0 dB. A broadband offset is *loudness*, not
+    // timbre, and leaving it in would make this quietly double as a normalizer
+    // and undo levels the user had already set. The mean is weighted by the
+    // target's own power, because an unweighted mean over linearly-spaced bins
+    // is dominated by the near-empty top half of the spectrum -- where the
+    // correction is noise -- and would bias the whole curve to cancel it.
+    double wsum = 0.0, wacc = 0.0;
+    for (int k = 0; k < kTMSpec; ++k) {
+        const double w = std::exp((double)target.logPower[k]);
+        wsum += w; wacc += w * db[k];
+    }
+    const float mean = wsum > 0.0 ? (float)(wacc / wsum) : 0.0f;
+
+    // Clamp *after* de-meaning, so the limit applies to the shape of the curve
+    // rather than to the shape plus an offset that is about to be removed.
+    const float lim = std::max(0.0f, std::min(24.0f, opts.maxCorrectionDb));
+    std::vector<float> gain((size_t)kTMSpec);
+    for (int k = 0; k < kTMSpec; ++k) {
+        db[k] = std::max(-lim, std::min(lim, db[k] - mean));
+        gain[k] = (float)std::pow(10.0, db[k] / 20.0);   // amplitude gain from power dB
+    }
+    if (curveDbOut) *curveDbOut = db;
+
+    auto out = std::make_shared<AudioBuffer>();
+    out->sampleRate = buf.sampleRate;
+    out->channels = ch;
+    out->samples.resize(buf.samples.size());
+    if (nf <= 0) return out;
+
+    for (int c = 0; c < ch; ++c) {
+        std::vector<float> chan((size_t)nf);
+        for (int64_t i = 0; i < nf; ++i) chan[i] = buf.samples[i * ch + c];
+        const std::vector<float> filt = tmFilterChannel(chan, gain);
+        for (int64_t i = 0; i < nf; ++i) out->samples[i * ch + c] = filt[(size_t)i];
+    }
+
+    // Even a zero-mean curve moves the loudness a little, because the mean is
+    // over the *target's* spectrum and this clip's differs. Restoring the
+    // measured speech level keeps the effect purely about tone; the clamp stops
+    // a pathological ratio (a near-silent clip) from blowing anything up.
+    if (opts.preserveLoudness) {
+        const double before = speechLoudness(buf), after = speechLoudness(*out);
+        if (before > 1e-9 && after > 1e-9) {
+            const float k = (float)std::max(0.25, std::min(4.0, before / after));
+            if (k != 1.0f) for (float& v : out->samples) v *= k;
+        }
+    }
+    // Scale rather than clip if the filter pushed a peak over full scale: a
+    // boosted band can add a few percent, and hard-clipping it would trade a
+    // subtle tone difference for audible distortion -- a far worse bargain.
+    float peak = 0.0f;
+    for (float v : out->samples) peak = std::max(peak, std::fabs(v));
+    if (peak > 1.0f) { const float k = 1.0f / peak; for (float& v : out->samples) v *= k; }
+    return out;
+}
+
 // ---------------- manual region edits ----------------
 
 AudioBufferPtr silenceRange(const AudioBuffer& src, int64_t begin, int64_t end, float fadeMs) {

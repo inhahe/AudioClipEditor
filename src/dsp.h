@@ -102,6 +102,68 @@ AudioBufferPtr isolateVoice(const AudioBuffer& buf, const VoiceIsolateOptions& o
 std::vector<uint8_t> detectVoiceFrames(const AudioBuffer& buf, const VoiceIsolateOptions& opts,
                                        int* winOut = nullptr, int* hopOut = nullptr);
 
+// --- Timbre matching (making separately-recorded clips sound alike) ---
+// Sentences recorded in separate takes drift in tone even when nothing obvious
+// changed: a few centimetres of mic distance moves the low end (proximity
+// effect), a few degrees off-axis rolls off the top, a different position in the
+// room recolours the mids. All of that shows up as a difference in the clip's
+// **long-term average spectrum** (LTAS) -- its average tone colour over the whole
+// clip -- and one gentle, static EQ curve per clip is enough to bring them
+// together. That is the whole idea here: measure each clip's LTAS, decide on a
+// common target, and filter each clip by the difference.
+//
+// What it fixes: mic distance/angle, tone-control and preamp differences, dull
+// vs. bright rooms. What it cannot fix, because they are not spectral-average
+// differences: reverb and early reflections (a room tail is a *time* difference;
+// EQ cannot add or remove one), differing background noise (use the voice
+// cleaner), clipping or other distortion, and differences in delivery.
+
+struct TimbreProfile {
+    int sampleRate = 0;
+    int count = 0;                  // speech frames measured (or, for an averaged
+                                    // profile, how many profiles were pooled)
+    std::vector<float> logPower;    // per-bin mean ln(power), bins 0..Nyquist
+    bool valid() const { return count > 0 && !logPower.empty(); }
+};
+
+struct TimbreMatchOptions {
+    float maxCorrectionDb = 12.0f;   // clamp on the correction curve, 0 .. 24
+    float smoothingOctaves = 0.5f;   // fractional-octave smoothing width, 0.05 .. 2
+    bool  preserveLoudness = true;   // restore speech loudness after filtering
+};
+
+// Measure a clip's LTAS. Only **speech** frames count: room tone differs between
+// takes too, and a clip with longer pauses would otherwise be dragged toward its
+// own noise floor -- matching noise floors is not what "the same timbre" means.
+// Falls back to the loudest frames if the voice detector finds nothing, so an
+// unusual clip is still matched rather than silently skipped. Returns an invalid
+// profile for audio shorter than one 2048-frame analysis window.
+TimbreProfile computeTimbreProfile(const AudioBuffer& buf);
+
+// The consensus timbre of a set: the per-bin mean of their log spectra, i.e. the
+// geometric mean of their power. Matching everything to this moves each clip as
+// little as possible and favours none of them -- the same reasoning as
+// Document::normalizeClips using the geometric mean of loudness. Profiles that
+// are invalid, or of a different sample rate than the first valid one, are
+// ignored.
+TimbreProfile averageTimbre(const std::vector<TimbreProfile>& profiles);
+
+// Filter `buf` so its long-term spectrum matches `target`. The correction is
+// smoothed over `smoothingOctaves`, forced to average 0 dB, and then clamped to
+// +/- maxCorrectionDb. It is applied **zero-phase** (a real, symmetric gain on
+// each STFT frame), so nothing is smeared in time.
+//
+// Forcing the curve to average zero is deliberate: a broadband offset is
+// loudness, not timbre, and leaving it in would make this quietly double as a
+// normalizer and undo levels the user had already set.
+//
+// `curveDbOut`, if given, receives the correction actually applied, per bin, in
+// dB -- useful for reporting how far a clip had to move. Returns nullptr if the
+// target is invalid, its rate doesn't match, or `buf` is too short to measure.
+AudioBufferPtr matchTimbre(const AudioBuffer& buf, const TimbreProfile& target,
+                           const TimbreMatchOptions& opts,
+                           std::vector<float>* curveDbOut = nullptr);
+
 // --- Manual region edits ---
 // The detectors above are the automatic route, but they can only remove what
 // they can recognise. Some non-speech events -- a chair creak, a swallow, a
