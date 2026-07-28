@@ -1057,6 +1057,81 @@ int runSelfTest() {
                 L"transport: a preview press during timeline playback takes the engine over"); }
     }
 
+    // ---- scrollbars (the tracks pane can overflow both ways at once)
+    {
+        using layout::scrollBarsNeeded; using layout::scrollThumb; using layout::scrollFromThumb;
+        const int T = 12;   // bar thickness
+
+        // Nothing overflows -> no bars, and the pane keeps its full size.
+        { auto b = scrollBarsNeeded(500, 300, 800, 400, T);
+          check(!b.horz && !b.vert, L"scrollbars: content that fits needs no bars"); }
+
+        { auto b = scrollBarsNeeded(5000, 300, 800, 400, T);
+          check(b.horz && !b.vert, L"scrollbars: a long arrangement needs only a horizontal bar"); }
+        { auto b = scrollBarsNeeded(500, 5000, 800, 400, T);
+          check(!b.horz && b.vert, L"scrollbars: many tracks need only a vertical bar"); }
+        { auto b = scrollBarsNeeded(5000, 5000, 800, 400, T);
+          check(b.horz && b.vert, L"scrollbars: overflowing both ways needs both"); }
+
+        // The reason for the second pass: content that fits the bare pane but not
+        // once the *other* bar has taken its strip. One pass would report no bar
+        // and silently clip the last few pixels.
+        { auto b = scrollBarsNeeded(795, 5000, 800, 400, T);
+          check(b.vert, L"scrollbars: tall content still takes a vertical bar");
+          check(b.horz, L"scrollbars: a vertical bar narrowing the pane forces a horizontal one"); }
+        { auto b = scrollBarsNeeded(5000, 395, 800, 400, T);
+          check(b.horz && b.vert,
+                L"scrollbars: a horizontal bar shortening the pane forces a vertical one"); }
+        // ...which is exactly why computeLayout() grows the tracks pane by one
+        // bar thickness when the arrangement is too wide: the lanes then still
+        // fit underneath the horizontal bar, so no vertical one is summoned.
+        // Two bars where one would do looks like a bug to the user.
+        { const int lanes = 388;                       // content height for N tracks
+          auto b = scrollBarsNeeded(5000, lanes, 800, lanes + T, T);
+          check(b.horz && !b.vert,
+                L"scrollbars: a pane grown to fit its bar needs no vertical bar"); }
+
+        // Thumb geometry: proportional, and it reaches both ends exactly.
+        { auto t = scrollThumb(0, 2000, 500, 400, 28);
+          check(t.offset == 0, L"scrollbars: at scroll 0 the thumb sits at the gutter start");
+          check(t.length == 100, L"scrollbars: thumb length is the visible fraction of the gutter"); }
+        { auto t = scrollThumb(1500, 2000, 500, 400, 28);   // 1500 == maxScroll
+          check(t.offset + t.length == 400,
+                L"scrollbars: at full scroll the thumb ends exactly at the gutter end"); }
+        { auto t = scrollThumb(750, 2000, 500, 400, 28);
+          check(t.offset == 150, L"scrollbars: mid-scroll places the thumb proportionally"); }
+
+        // A hugely long arrangement must not shrink the thumb to nothing, or it
+        // becomes impossible to grab -- the exact case this feature is for.
+        { auto t = scrollThumb(0, 5000000, 500, 400, 28);
+          check(t.length == 28, L"scrollbars: a very long arrangement keeps a grabbable thumb"); }
+        { auto t = scrollThumb(5000000 - 500, 5000000, 500, 400, 28);
+          check(t.offset + t.length == 400,
+                L"scrollbars: ...and that thumb still reaches the end"); }
+
+        // Dragging the thumb must invert the mapping, or the view drifts away
+        // from the pointer over a drag.
+        { const int maxScroll = 1500;
+          for (int pos : { 0, 375, 750, 1125, 1500 }) {
+              auto t = scrollThumb(pos, 2000, 500, 400, 28);
+              const int back = scrollFromThumb(t.offset, 400, t.length, maxScroll);
+              check(std::llabs((long long)back - pos) <= 2,
+                    L"scrollbars: dragging the thumb round-trips to the same scroll",
+                    std::to_wstring(pos) + L" -> " + std::to_wstring(back)); } }
+
+        // The pointer can leave the gutter in either direction mid-drag.
+        { check(scrollFromThumb(-500, 400, 100, 1500) == 0,
+                L"scrollbars: dragging above the gutter clamps to the start");
+          check(scrollFromThumb(9999, 400, 100, 1500) == 1500,
+                L"scrollbars: dragging below the gutter clamps to the end"); }
+
+        // Degenerate cases that would otherwise divide by zero.
+        { auto t = scrollThumb(0, 0, 0, 0, 28);
+          check(t.length == 0 && t.offset == 0, L"scrollbars: an empty viewport yields no thumb");
+          check(scrollFromThumb(50, 100, 100, 0) == 0,
+                L"scrollbars: a full-length thumb cannot scroll"); }
+    }
+
     // ---- sticky snapping (dragging a clip along a lane)
     {
         using snapping::Sticky;

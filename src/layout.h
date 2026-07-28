@@ -82,4 +82,63 @@ inline FlowedRow flowButtons(const std::vector<int>& widths, int left, int top,
     return f;
 }
 
+// ---------------------------------------------------------------- scrollbars
+//
+// The tracks pane can overflow in both directions at once, and its two
+// scrollbars share all of this arithmetic, so it lives here once rather than
+// twice in ui.cpp -- and can be checked headlessly, which matters because the
+// failure mode (content quietly clipped under a bar, or a thumb that does not
+// reach the end) is invisible until someone happens to build a long enough
+// arrangement.
+
+// Which bars a viewport needs. Resolved over two passes because each bar steals
+// space from the other: a horizontal bar shortens the pane and can be exactly
+// what forces a vertical one, and vice versa. One pass would miss that and leave
+// a strip of content unreachable.
+struct ScrollBars { bool horz = false, vert = false; };
+
+inline ScrollBars scrollBarsNeeded(int contentW, int contentH,
+                                   int fullW, int fullH, int thickness) {
+    ScrollBars b;
+    for (int pass = 0; pass < 2; ++pass) {
+        const int visH = fullH - (b.horz ? thickness : 0);
+        const int visW = fullW - (b.vert ? thickness : 0);
+        b.horz = contentW > visW;
+        b.vert = visH > 0 && contentH > visH;
+    }
+    return b;
+}
+
+// Thumb offset and length along a gutter of `trackLen`. `minThumb` keeps a thumb
+// on a very long arrangement from shrinking to something unclickable -- which is
+// why the offset is scaled by the *remaining* travel rather than by trackLen.
+struct ScrollThumb { int offset = 0, length = 0; };
+
+inline ScrollThumb scrollThumb(int scrollPos, int contentLen, int visLen,
+                               int trackLen, int minThumb) {
+    ScrollThumb t;
+    if (contentLen <= 0 || trackLen <= 0) return t;
+    t.length = (int)((double)visLen / contentLen * trackLen);
+    if (t.length < minThumb) t.length = minThumb;
+    if (t.length > trackLen) t.length = trackLen;
+    const int maxScroll = contentLen - visLen > 0 ? contentLen - visLen : 1;
+    const int travel = trackLen - t.length;
+    t.offset = travel > 0 ? (int)((double)scrollPos / maxScroll * travel) : 0;
+    if (t.offset < 0) t.offset = 0;
+    if (t.offset > travel) t.offset = travel;
+    return t;
+}
+
+// Inverse of scrollThumb: a thumb dragged to `thumbOffset` means this much
+// scroll. Clamped, since the pointer can be dragged past either end of the
+// gutter and the caller has no reason to pre-clamp it.
+inline int scrollFromThumb(int thumbOffset, int trackLen, int thumbLen, int maxScroll) {
+    const int travel = trackLen - thumbLen;
+    if (travel <= 0 || maxScroll <= 0) return 0;
+    double frac = (double)thumbOffset / travel;
+    if (frac < 0.0) frac = 0.0;
+    if (frac > 1.0) frac = 1.0;
+    return (int)(frac * maxScroll);
+}
+
 }  // namespace layout
