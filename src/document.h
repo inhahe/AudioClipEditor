@@ -86,6 +86,12 @@ public:
     bool moveClip(int fromTrackId, int placedIndex, int toTrackId, int64_t newStart,
                   const std::wstring& desc);
     void removePlaced(int trackId, int placedIndex, const std::wstring& desc);
+    // Slide a placed clip and everything after it on the same track by `delta`
+    // frames, preserving the spacing between them (see Track::ripple). This is
+    // how the gap in front of a clip is changed without disturbing the timing of
+    // the arrangement downstream. Returns the delta actually applied, which is
+    // clamped when sliding left; commits an undo step only if anything moved.
+    int64_t rippleClips(int trackId, int placedIndex, int64_t delta, const std::wstring& desc);
 
     // --- Undo / redo ---
     bool canUndo() const { return undo_.canUndo(); }

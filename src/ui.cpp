@@ -58,7 +58,7 @@ enum {
     IDM_EXPORTCLIP, IDM_EXPORTSEL,
     IDM_SILENCESEL, IDM_DELETESEL,
     IDM_ADDTL_BASE = 200,   // + track index
-    IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK,
+    IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK, IDM_TL_GAP, IDM_TL_CLOSEGAP,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE, IDM_TRK_VOICEISO,
     IDM_SORT_NAME = 340, IDM_SORT_TIME,
     IDM_REDO_BASE = 400,
@@ -166,6 +166,9 @@ struct App {
     int volTrackId = -1;           // TrackVolume drag target
     int moveTrackId = -1, moveIndex = -1;
     int64_t moveGrabOffset = 0;    // frames from clip start to grab point
+    // Shift-drag: the grabbed clip carries every clip after it on the lane, so
+    // the gap in front of it changes and none of the gaps behind it do.
+    bool rippleDrag = false;
     // Where a clip being dragged along a lane would land, and the state machine
     // that decides it. Snapping is directional, so it depends on the path the
     // pointer took and not just on where it is now -- which is why the result is
@@ -1044,6 +1047,31 @@ struct App {
         SelectObject(h, ob); SelectObject(h, op); DeleteObject(b); DeleteObject(pen);
     }
 
+    // One clip block on a lane: rounded body, waveform, name. Shared by the clips
+    // actually sitting on a track and by the ghosts showing where a drag will drop
+    // them, so a ghost can never come to look like something the drop won't
+    // produce. `body`/`edge` are what distinguish the two.
+    void drawClipBlock(HDC h, const RECT& g, const Clip* c, COLORREF body, COLORREF edge) {
+        roundFill(h, g, body, edge, S(6));
+        RECT wv = { g.left + S(3), g.top + S(18), g.right - S(3), g.bottom - S(4) };
+        if (c && c->buffer && c->peaks && wv.right > wv.left) {
+            SaveDC(h); IntersectClipRect(h, wv.left, wv.top, wv.right, wv.bottom);
+            wf::draw(h, wv, *c->buffer, *c->peaks, 0, c->frames(), RGB(180, 210, 245));
+            // Deliberately *no* selection overlay here. It was drawn for a
+            // while, on the reasoning that a selection belongs to the clip and
+            // so belongs on every surface showing that clip -- but on a track
+            // lane a highlighted band reads as "this is the part that plays",
+            // and it isn't: timeline playback renders the whole placement
+            // (TimelineSegment has no trim, see engine.cpp). The selection is
+            // an editing cursor scoped to the library, not an in/out point. To
+            // put part of a clip on a track, "New clip from selection" and
+            // drag that; that clip's length is then the honest arrangement.
+            RestoreDC(h, -1);
+        }
+        RECT nm = { g.left + S(6), g.top + S(2), g.right - S(4), g.top + S(18) };
+        textOut(h, nm, c ? c->name : L"", col::text, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+
     void paintTimeline(HDC h) {
         fill(h, rcTimeline, col::bg);
         // ruler
@@ -1089,31 +1117,11 @@ struct App {
         // placed clips
         for (const auto& pl : placed) {
             const Clip* c = doc.project().findClip(pl.clipId);
-            bool moving = (mode == Mode::ClipMove && moveTrackId == pl.trackId && moveIndex == pl.index);
-            // While actively dragging, the moved clip is drawn as a floating ghost
-            // (below); leave just a faint outline in its home slot.
-            if (moving && dragged) {
-                roundFill(h, pl.rc, col::panel, col::cardEdge, S(6));
-                continue;
-            }
-            roundFill(h, pl.rc, moving ? col::clipBlkSel : col::clipBlk, col::cardEdge, S(6));
-            RECT wv = { pl.rc.left + S(3), pl.rc.top + S(18), pl.rc.right - S(3), pl.rc.bottom - S(4) };
-            if (c && c->buffer && c->peaks && wv.right > wv.left) {
-                SaveDC(h); IntersectClipRect(h, wv.left, wv.top, wv.right, wv.bottom);
-                wf::draw(h, wv, *c->buffer, *c->peaks, 0, c->frames(), RGB(180, 210, 245));
-                // Deliberately *no* selection overlay here. It was drawn for a
-                // while, on the reasoning that a selection belongs to the clip and
-                // so belongs on every surface showing that clip -- but on a track
-                // lane a highlighted band reads as "this is the part that plays",
-                // and it isn't: timeline playback renders the whole placement
-                // (TimelineSegment has no trim, see engine.cpp). The selection is
-                // an editing cursor scoped to the library, not an in/out point. To
-                // put part of a clip on a track, "New clip from selection" and
-                // drag that; that clip's length is then the honest arrangement.
-                RestoreDC(h, -1);
-            }
-            RECT nm = { pl.rc.left + S(6), pl.rc.top + S(2), pl.rc.right - S(4), pl.rc.top + S(18) };
-            textOut(h, nm, c ? c->name : L"", col::text, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            const bool moving = dragCarries(pl.trackId, pl.index);
+            // While actively dragging, a clip the drag is carrying is drawn as a
+            // floating ghost (below); leave just a faint outline in its home slot.
+            if (moving && dragged) { roundFill(h, pl.rc, col::panel, col::cardEdge, S(6)); continue; }
+            drawClipBlock(h, pl.rc, c, moving ? col::clipBlkSel : col::clipBlk, col::cardEdge);
         }
         // drag ghost when dropping a library clip
         if (mode == Mode::CardDrag && dragged) {
@@ -1135,26 +1143,31 @@ struct App {
         // drag ghost when sliding a placed clip around (shows where it will land)
         if (mode == Mode::ClipMove && dragged) {
             POINT p; GetCursorPos(&p); ScreenToClient(hwnd, &p);
-            int tid = moveTrackId; trackAtPoint(p, tid);
-            const Clip* c = doc.project().findClip(dragClipId);
-            if (c) {
-                int ignore = (tid == moveTrackId) ? moveIndex : -1;
-                const int64_t start = dragSnapStart;
+            int tid = moveTrackId; if (!rippleDrag) trackAtPoint(p, tid);
+            const Track* home = doc.project().findTrack(moveTrackId);
+            if (home && moveIndex >= 0 && moveIndex < (int)home->clips.size()) {
+                // Every carried clip shifts by the same amount, which is how far
+                // the grabbed one has travelled from where it started.
+                const int64_t delta = dragSnapStart - home->clips[moveIndex].startFrame;
+                // A ripple carries the whole tail of the lane, and the ghost shows
+                // all of it: seeing only the grabbed clip move would hide the fact
+                // that everything downstream is going with it.
+                const int last = rippleDrag ? (int)home->clips.size() - 1 : moveIndex;
+                const int ignore = (tid == moveTrackId) ? moveIndex : -1;
+                const Track* tk = doc.project().findTrack(tid);
                 for (auto& tl : trackLays) if (tl.trackId == tid) {
-                    int x0 = frameToX(start), x1 = frameToX(start + c->frames());
-                    RECT g = { x0, tl.lane.top + S(4), x1, tl.lane.bottom - S(4) };
-                    const Track* tk = doc.project().findTrack(tid);
-                    bool ok = tk && !tk->overlaps(start, c->frames(), ignore);
-                    roundFill(h, g, ok ? col::clipBlkSel : col::stop, col::text, S(6));
-                    // waveform + name so the ghost reads as the actual clip
-                    RECT wv = { g.left + S(3), g.top + S(18), g.right - S(3), g.bottom - S(4) };
-                    if (c->buffer && c->peaks && wv.right > wv.left) {
-                        SaveDC(h); IntersectClipRect(h, wv.left, wv.top, wv.right, wv.bottom);
-                        wf::draw(h, wv, *c->buffer, *c->peaks, 0, c->frames(), RGB(180, 210, 245));
-                        RestoreDC(h, -1);
+                    for (int i = moveIndex; i <= last; ++i) {
+                        const PlacedClip& pc = home->clips[i];
+                        const int64_t start = pc.startFrame + delta;
+                        RECT g = { frameToX(start), tl.lane.top + S(4),
+                                   frameToX(start + pc.lengthFrames), tl.lane.bottom - S(4) };
+                        // A ripple can't collide -- it is clamped flush against the
+                        // clip in front and takes its followers with it -- so only a
+                        // plain move can go red.
+                        const bool ok = rippleDrag || (tk && !tk->overlaps(start, pc.lengthFrames, ignore));
+                        drawClipBlock(h, g, doc.project().findClip(pc.clipId),
+                                      ok ? col::clipBlkSel : col::stop, col::text);
                     }
-                    RECT nm = { g.left + S(6), g.top + S(2), g.right - S(4), g.top + S(18) };
-                    textOut(h, nm, c->name, col::text, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                 }
             }
         }
@@ -1245,14 +1258,16 @@ struct App {
     // The frames a dragged clip of length `len` is worth landing exactly on in
     // this track: flush after each neighbour, flush before each neighbour, and
     // the start of the timeline. `ignoreIndex` is the clip being dragged, which
-    // must not snap to itself.
-    std::vector<int64_t> snapTargets(int trackId, int64_t len, int ignoreIndex) const {
+    // must not snap to itself; with `ignoreAfter` the clips behind it are skipped
+    // too, because a ripple carries them along and a moving clip is not a fixed
+    // point to land on.
+    std::vector<int64_t> snapTargets(int trackId, int64_t len, int ignoreIndex, bool ignoreAfter) const {
         std::vector<int64_t> out{ 0 };
         const Track* t = nullptr;
         for (auto& tt : doc.project().tracks) if (tt.id == trackId) t = &tt;
         if (!t) return out;
         for (int i = 0; i < (int)t->clips.size(); ++i) {
-            if (i == ignoreIndex) continue;
+            if (i == ignoreIndex || (ignoreAfter && ignoreIndex >= 0 && i > ignoreIndex)) continue;
             out.push_back(t->clips[i].endFrame());          // butt up after a clip
             const int64_t before = t->clips[i].startFrame - len;
             if (before > 0) out.push_back(before);          // butt up before a clip
@@ -1266,15 +1281,43 @@ struct App {
     // remember where the clip would land. Called once per pointer update; the
     // ghost and the drop both read `dragSnapStart`, because re-deriving it would
     // step the state machine again (see snap.h).
-    void updateDragSnap(POINT p) {
+    //
+    // The drag's kind is passed in rather than read from `mode`, because onLUp
+    // clears `mode` before it lands the drop -- a message box during the drop
+    // would otherwise pump a repaint and draw a ghost for a drag that is over.
+    // Reading `mode` here meant the final update ran as if it were not a clip
+    // move at all, so the clip could snap to the edges of its own old position.
+    void updateDragSnap(POINT p, Mode m) {
         const Clip* c = doc.project().findClip(dragClipId);
         const int64_t len = c ? c->frames() : 0;
-        int tid = (mode == Mode::ClipMove) ? moveTrackId : -1;
-        trackAtPoint(p, tid);
+        int tid = (m == Mode::ClipMove) ? moveTrackId : -1;
+        // A ripple is defined by one lane's ordering -- "this clip and the ones
+        // behind it" -- so it stays on its own lane however far the pointer roams.
+        if (!rippleDrag) trackAtPoint(p, tid);
         dragSnapTrackId = tid;
-        const int ignore = (mode == Mode::ClipMove && tid == moveTrackId) ? moveIndex : -1;
+        const int ignore = (m == Mode::ClipMove && tid == moveTrackId) ? moveIndex : -1;
         const int64_t raw = xToFrame(p.x) - moveGrabOffset;
-        dragSnapStart = std::max<int64_t>(0, dragSnap.update(raw, snapTargets(tid, len, ignore), snapTol()));
+        dragSnapStart = std::max(dragMinStart(),
+            dragSnap.update(raw, snapTargets(tid, len, ignore, rippleDrag), snapTol()));
+    }
+
+    // The furthest left the grabbed clip may go. Normally the start of the
+    // timeline: an ordinary move that runs into a neighbour is simply refused,
+    // with a red ghost to say so. A ripple can't be refused that way -- it is a
+    // continuous adjustment of one gap, and the gap bottoms out at zero -- so it
+    // is clamped to sit flush against the clip in front instead.
+    int64_t dragMinStart() const {
+        if (!rippleDrag) return 0;
+        const Track* t = doc.project().findTrack(moveTrackId);
+        if (!t || moveIndex <= 0 || moveIndex >= (int)t->clips.size()) return 0;
+        return t->clips[moveIndex - 1].endFrame();
+    }
+
+    // Which placed clips the drag is carrying: just the grabbed one, or -- during
+    // a ripple -- it and everything after it on the same lane.
+    bool dragCarries(int trackId, int index) const {
+        if (mode != Mode::ClipMove || trackId != moveTrackId) return false;
+        return rippleDrag ? index >= moveIndex : index == moveIndex;
     }
 
     // --------------------------------------------------------- actions
@@ -1933,6 +1976,10 @@ struct App {
             L"  \u2022 Drag placed clips to move them\n"
             L"  \u2022 Nudge one just past a neighbour to snap it flush; approach\n"
             L"    without crossing to leave a gap of any size\n"
+            L"  \u2022 Shift+drag a clip to also carry every clip after it on that\n"
+            L"    track, so you change one gap and the rest keep their spacing\n"
+            L"  \u2022 Right-click a placed clip to set the space before it exactly,\n"
+            L"    or to close it \u2014 later clips move to match, either way\n"
             L"  \u2022 Drag a track's volume slider to change the track level\n"
             L"  \u2022 Right-click a track header to clean/isolate voice, rename or remove the track\n"
             L"  \u2022 Click a lane or the ruler to move the playhead\n"
@@ -2248,6 +2295,10 @@ struct App {
             const PlacedLayout* pl = placedAt(p);
             if (pl) {
                 mode = Mode::ClipMove; moveTrackId = pl->trackId; moveIndex = pl->index; dragClipId = pl->clipId;
+                // Shift turns the move into a ripple: the gap in front of this
+                // clip is what you're editing, and everything behind it keeps
+                // its spacing and comes along.
+                rippleDrag = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
                 const Track* t=nullptr; for(auto&tt:doc.project().tracks) if(tt.id==pl->trackId)t=&tt;
                 int64_t clipStart = t->clips[pl->index].startFrame;
                 moveGrabOffset = xToFrame(p.x) - clipStart;
@@ -2303,7 +2354,7 @@ struct App {
                 mode = Mode::CardDrag; moveGrabOffset = 0;
                 selClipId = -1; selStart = selEnd = 0;
                 dragSnap.begin(xToFrame(p.x));   // the drag only becomes a placement here
-                updateDragSnap(p);
+                updateDragSnap(p, Mode::CardDrag);
                 refresh();
                 return;
             }
@@ -2332,7 +2383,7 @@ struct App {
             setHScrollFromThumbLeft(p.x - hscrollGrab); refresh();
         } else if (mode == Mode::CardDrag || mode == Mode::ClipMove || mode == Mode::TimelineSeek) {
             if (mode == Mode::TimelineSeek) { playheadFrame = xToFrame(p.x); if (timelinePlaying) engine.seek(playheadFrame); }
-            else updateDragSnap(p);      // the one place the snap state advances
+            else updateDragSnap(p, mode);   // the one place the snap state advances
             refresh();
         }
     }
@@ -2365,7 +2416,7 @@ struct App {
                     if (c) {
                         // Drop where the ghost was, not where a fresh calculation
                         // would put it: with directional snapping those can differ.
-                        updateDragSnap(p);
+                        updateDragSnap(p, Mode::CardDrag);
                         int64_t start = dragSnapStart;
                         if (!doc.placeClip(tid, dragClipId, start, L"Add '" + c->name + L"' to timeline"))
                             MessageBoxW(hwnd, L"Clips can't overlap on a track.", L"Can't place", MB_ICONINFORMATION);
@@ -2379,12 +2430,24 @@ struct App {
             }
         } else if (m == Mode::ClipMove) {
             if (dragged) {
-                int tid = moveTrackId; trackAtPoint(p, tid);
-                updateDragSnap(p);      // land where the ghost was (see CardDrag above)
-                int64_t newStart = dragSnapStart;
-                doc.moveClip(moveTrackId, moveIndex, tid, newStart, L"Move clip");
+                updateDragSnap(p, Mode::ClipMove);   // land where the ghost was (see CardDrag above)
+                const int64_t newStart = dragSnapStart;
+                if (rippleDrag) {
+                    // The drag set where the grabbed clip lands; the ripple is
+                    // expressed as how far that is from where it started, since
+                    // that same shift is what every clip behind it takes.
+                    const Track* t = doc.project().findTrack(moveTrackId);
+                    if (t && moveIndex >= 0 && moveIndex < (int)t->clips.size()) {
+                        const int64_t delta = newStart - t->clips[moveIndex].startFrame;
+                        doc.rippleClips(moveTrackId, moveIndex, delta, L"Move clip and the ones after it");
+                    }
+                } else {
+                    int tid = moveTrackId; trackAtPoint(p, tid);
+                    doc.moveClip(moveTrackId, moveIndex, tid, newStart, L"Move clip");
+                }
                 afterPlaceRefresh();
             }
+            rippleDrag = false;
         } else if (m == Mode::ClipVolume) {
             doc.commitEdit(L"Set clip volume"); refresh();
         } else if (m == Mode::TrackVolume) {
@@ -2406,12 +2469,21 @@ struct App {
         if (PtInRect(&rcTimeline, p)) {
             const PlacedLayout* pl = placedAt(p);
             if (pl) {
+                // Read the identity out now: the menu is modal, and acting on it
+                // mutates the track, so the layout entry `pl` points into is not
+                // safe to touch afterwards.
+                const int gTrack = pl->trackId, gIndex = pl->index;
                 HMENU m = CreatePopupMenu();
+                AppendMenuW(m, MF_STRING, IDM_TL_GAP, L"Space before this clip\u2026");
+                AppendMenuW(m, MF_STRING, IDM_TL_CLOSEGAP, L"Close the space before this clip");
+                AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
                 AppendMenuW(m, MF_STRING, IDM_TL_REMOVE, L"Remove from timeline");
                 POINT sp = p; ClientToScreen(hwnd, &sp);
                 int cmd = TrackPopupMenu(m, TPM_RETURNCMD, sp.x, sp.y, 0, hwnd, nullptr);
                 DestroyMenu(m);
-                if (cmd == IDM_TL_REMOVE) { doc.removePlaced(pl->trackId, pl->index, L"Remove clip from track"); afterHistory(); }
+                if (cmd == IDM_TL_REMOVE) { doc.removePlaced(gTrack, gIndex, L"Remove clip from track"); afterHistory(); }
+                else if (cmd == IDM_TL_GAP) editGapBefore(gTrack, gIndex);
+                else if (cmd == IDM_TL_CLOSEGAP) setGapBefore(gTrack, gIndex, 0, L"Close space before clip");
                 return;
             }
             // right-click a track header or empty lane -> track menu
@@ -2421,6 +2493,50 @@ struct App {
                 if (onHeader || onLane) { trackContextMenu(tl.trackId, p); return; }
             }
         }
+    }
+
+    // Set the space in front of a placed clip to exactly `frames`, rippling
+    // everything after it by the difference so the arrangement downstream keeps
+    // its timing. Shrinking past zero isn't possible -- Track::ripple clamps the
+    // block flush against the clip in front.
+    void setGapBefore(int trackId, int index, int64_t frames, const std::wstring& desc) {
+        const Track* t = doc.project().findTrack(trackId);
+        if (!t || index < 0 || index >= (int)t->clips.size()) return;
+        const int64_t delta = frames - t->gapBefore(index);
+        doc.rippleClips(trackId, index, delta, desc);
+        afterHistory();
+    }
+
+    // Type the gap in exactly. Seconds, because that's the unit the gap is
+    // thought about in ("two seconds between takes"); frames would be precise
+    // and unreadable.
+    void editGapBefore(int trackId, int index) {
+        std::wstring shown;
+        {   // Scoped so no Track* is held across the modal prompt below.
+            const Track* t = doc.project().findTrack(trackId);
+            if (!t || index < 0 || index >= (int)t->clips.size()) return;
+            wchar_t buf[64]; swprintf(buf, 64, L"%.3f", (double)t->gapBefore(index) / rate);
+            shown = buf;
+        }
+        std::wstring s = shown;
+        if (!dlg::promptText(hwnd, L"Space before clip",
+                             L"Seconds of space before this clip (later clips move to match):", s))
+            return;
+        // The box shows the gap to the millisecond, so a gap finer than that
+        // reads back as a different number. Leaving the text alone must mean
+        // "no change", not "round me" -- otherwise opening the dialog and
+        // pressing OK would silently nudge the arrangement.
+        if (s == shown) return;
+        wchar_t* end = nullptr;
+        const double secs = wcstod(s.c_str(), &end);
+        // wcstod returns 0 for text it can't read at all, which is a legal gap --
+        // so check that it consumed something rather than trusting the value.
+        if (end == s.c_str() || secs < 0.0) {
+            MessageBoxW(hwnd, L"Enter the space as a number of seconds, e.g. 1.5",
+                        L"Space before clip", MB_ICONINFORMATION);
+            return;
+        }
+        setGapBefore(trackId, index, (int64_t)(secs * rate + 0.5), L"Set space before clip");
     }
 
     void trackContextMenu(int trackId, POINT p) {
@@ -2665,7 +2781,7 @@ struct App {
             // cancelling has to undo that too, not just skip the drop.
             if (mode != Mode::WaveSelect && mode != Mode::CardDrag && mode != Mode::ClipMove)
                 return false;
-            mode = Mode::None; waveEdgeDrag = false;
+            mode = Mode::None; waveEdgeDrag = false; rippleDrag = false;
         }
         selClipId = selSaveClipId; selStart = selSaveStart; selEnd = selSaveEnd;
         if (GetCapture() == hwnd) ReleaseCapture();

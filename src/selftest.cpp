@@ -1206,6 +1206,87 @@ int runSelfTest() {
           check(s.update(3010, tg, tol) == 3010, L"snap: a new drag is free of the old target"); }
     }
 
+    // ---- ripple (changing one gap without disturbing the ones behind it)
+    {
+        // Three clips, 100 frames each, with gaps of 50 and 200 in front of the
+        // second and third. The point of a ripple is that editing the first gap
+        // leaves the second exactly as it was.
+        auto lane = []() {
+            Track t; t.id = 1;
+            const int64_t st[3] = { 0, 150, 450 };
+            for (int i = 0; i < 3; ++i) {
+                PlacedClip pc; pc.clipId = i + 1; pc.startFrame = st[i]; pc.lengthFrames = 100;
+                t.clips.push_back(pc);
+            }
+            return t;
+        };
+
+        { Track t = lane();
+          check(t.gapBefore(0) == 0, L"ripple: the first clip starts flush with the timeline");
+          check(t.gapBefore(1) == 50, L"ripple: the gap before a clip is measured from the one before it",
+                std::to_wstring(t.gapBefore(1)));
+          check(t.gapBefore(2) == 200, L"ripple: ...and again for the next", std::to_wstring(t.gapBefore(2))); }
+
+        // Widening the first gap.
+        { Track t = lane();
+          check(t.ripple(1, 70) == 70, L"ripple: sliding right is unrestricted");
+          check(t.gapBefore(1) == 120, L"ripple: the edited gap grew by the delta", std::to_wstring(t.gapBefore(1)));
+          check(t.gapBefore(2) == 200, L"ripple: the gap behind it is untouched", std::to_wstring(t.gapBefore(2)));
+          check(t.clips[2].startFrame == 520, L"ripple: the last clip moved by the same delta");
+          check(t.clips[0].startFrame == 0, L"ripple: clips before the edit don't move"); }
+
+        // Narrowing it, and the clamp when it runs out of room.
+        { Track t = lane();
+          check(t.ripple(1, -50) == -50, L"ripple: closing a gap exactly is allowed");
+          check(t.gapBefore(1) == 0, L"ripple: the clip ends up flush against its neighbour");
+          check(t.gapBefore(2) == 200, L"ripple: ...still without disturbing the next gap"); }
+        { Track t = lane();
+          check(t.ripple(1, -900) == -50,
+                L"ripple: sliding left stops flush against the clip in front");
+          check(t.gapBefore(1) == 0, L"ripple: the clamped slide leaves no overlap");
+          check(t.clips[0].endFrame() == t.clips[1].startFrame,
+                L"ripple: ...they meet exactly, edge to edge"); }
+
+        // The first clip has the start of the timeline in front of it, not a clip.
+        { Track t = lane(); t.clips[0].startFrame = 30;
+          check(t.gapBefore(0) == 30, L"ripple: the first clip's gap is its distance from zero");
+          check(t.ripple(0, -500) == -30, L"ripple: the whole lane stops at the start of the timeline");
+          check(t.clips[0].startFrame == 0, L"ripple: ...landing exactly on frame 0");
+          // Every clip moves by the clamped -30, so no start frame survives --
+          // the *gaps* are what survive, which is the property that matters.
+          check(t.clips[1].startFrame == 120 && t.clips[2].startFrame == 420,
+                L"ripple: sliding the whole lane carries every clip along");
+          check(t.gapBefore(1) == 20 && t.gapBefore(2) == 200,
+                L"ripple: ...and every gap between them is unchanged"); }
+
+        // Degenerate asks are no-ops rather than corruption.
+        { Track t = lane();
+          check(t.ripple(1, 0) == 0, L"ripple: a zero delta reports that nothing moved");
+          check(t.ripple(9, 100) == 0, L"ripple: an out-of-range index does nothing");
+          check(t.ripple(-1, 100) == 0, L"ripple: ...and so does a negative one");
+          check(t.clips[1].startFrame == 150, L"ripple: no-ops really leave the lane alone");
+          check(t.gapBefore(9) == 0 && t.gapBefore(-1) == 0,
+                L"ripple: an out-of-range gap reads as zero"); }
+
+        // Rippling the last clip is just moving it; nothing follows.
+        { Track t = lane();
+          check(t.ripple(2, 25) == 25, L"ripple: the last clip can still be rippled");
+          check(t.clips[2].startFrame == 475 && t.clips[1].startFrame == 150,
+                L"ripple: ...and moves alone, since nothing is behind it"); }
+
+        // A ripple can never reorder or overlap the lane, whatever it is asked for.
+        { for (int64_t d : { -10000LL, -201LL, -200LL, -1LL, 0LL, 1LL, 5000LL }) {
+            Track t = lane(); t.ripple(2, d);
+            bool sorted = true, clear = true;
+            for (int i = 1; i < 3; ++i) {
+                if (t.clips[i].startFrame < t.clips[i - 1].startFrame) sorted = false;
+                if (t.clips[i].startFrame < t.clips[i - 1].endFrame()) clear = false;
+            }
+            check(sorted && clear, L"ripple: any delta leaves the lane sorted and non-overlapping",
+                  L"delta " + std::to_wstring(d));
+          } }
+    }
+
     // ---- selection history (Ctrl+Z stepping back through selections)
     {
         using selhist::History; using selhist::Sel; using selhist::same;

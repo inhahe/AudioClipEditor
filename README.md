@@ -85,6 +85,15 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   so you can leave a gap as small as you like; nudge *past* it and the clip lands
   exactly flush and stays there until you drag properly clear. So flush placement
   needs no aim, and every other position is still reachable.
+- **Change the space between two clips without disturbing the rest.** Moving a
+  clip normally eats into one gap and opens up the next, which wrecks the timing
+  of everything downstream. **Shift+drag** a placed clip instead and it carries
+  every clip after it on that track along with it: exactly one gap changes and
+  all the later spacing is preserved. To set a gap exactly rather than by eye,
+  right-click a placed clip → **Space before this clip…** and type it in seconds
+  (or **Close the space before this clip** to butt it up against its
+  predecessor) — the clips after it move to match either way. Sliding left stops
+  when the clip is flush against the one in front; sliding right is unlimited.
 - **The view follows the playhead** while the timeline plays, so a long
   arrangement doesn't just run off the right-hand edge. It pages ahead when the
   playhead nears the edge rather than scrolling continuously, which keeps the
@@ -244,6 +253,9 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Move a placed clip | drag it along the track — a live ghost shows where it will land (drag vertically to change tracks) |
 | Butt a clip flush against a neighbour | drag it slightly *past* the neighbour's edge — it snaps flush and holds |
 | Leave a tiny gap instead | approach the neighbour without crossing it (no pull that way), or pull clear of a snap and come back |
+| Change one gap and keep the spacing after it | **`Shift`+drag** a placed clip — every clip after it on that track moves with it |
+| Set the space before a clip exactly | right-click it → **Space before this clip…**, type it in seconds |
+| Butt a clip against the one before it | right-click it → **Close the space before this clip** |
 | Remove a placed clip | right-click it → Remove |
 | Set the playhead | click a track lane or the ruler |
 | Play all tracks | **▶ Play All** (`Space` when nothing is being previewed) |

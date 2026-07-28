@@ -42,6 +42,35 @@ struct Track {
         std::sort(clips.begin(), clips.end(),
             [](const PlacedClip& a, const PlacedClip& b) { return a.startFrame < b.startFrame; });
     }
+    // The space in front of clip `index`: from the end of the clip before it, or
+    // from the start of the timeline if it is the first. Never negative, since
+    // clips on a track never overlap.
+    int64_t gapBefore(int index) const {
+        if (index < 0 || index >= (int)clips.size()) return 0;
+        return clips[index].startFrame - (index > 0 ? clips[index - 1].endFrame() : 0);
+    }
+
+    // Slide clip `index` and every clip after it by `delta` frames, keeping the
+    // distances *between* them exactly as they are -- a "ripple". Changing one
+    // gap therefore leaves every later gap alone, which is the whole point:
+    // moving one clip normally would eat into or open up the next gap too.
+    //
+    // Returns the delta actually applied. Sliding left stops once the block is
+    // flush against the clip in front (or the start of the timeline), because
+    // there is nowhere further to go without overlapping; sliding right is
+    // unbounded, as the timeline has no end.
+    //
+    // Translating a whole suffix rigidly, with that clamp keeping it behind the
+    // prefix, cannot reorder or overlap anything -- so unlike moveClip this needs
+    // no collision test and no re-sort.
+    int64_t ripple(int index, int64_t delta) {
+        if (index < 0 || index >= (int)clips.size()) return 0;
+        delta = std::max(delta, -gapBefore(index));
+        if (delta == 0) return 0;
+        for (int i = index; i < (int)clips.size(); ++i) clips[i].startFrame += delta;
+        return delta;
+    }
+
     // Would placing [start,start+len) collide with an existing clip (ignoring index `ignore`)?
     bool overlaps(int64_t start, int64_t len, int ignore = -1) const {
         int64_t end = start + len;
@@ -70,6 +99,10 @@ struct Project {
         return nullptr;
     }
     Track* findTrack(int id) {
+        for (auto& t : tracks) if (t.id == id) return &t;
+        return nullptr;
+    }
+    const Track* findTrack(int id) const {
         for (auto& t : tracks) if (t.id == id) return &t;
         return nullptr;
     }

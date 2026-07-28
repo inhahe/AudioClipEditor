@@ -220,6 +220,16 @@ void Document::removePlaced(int trackId, int placedIndex, const std::wstring& de
     commit(desc);
 }
 
+int64_t Document::rippleClips(int trackId, int placedIndex, int64_t delta, const std::wstring& desc) {
+    Track* t = project_.findTrack(trackId);
+    if (!t) return 0;
+    const int64_t applied = t->ripple(placedIndex, delta);
+    // A drag that ends up putting everything back where it started, or a gap
+    // already at the requested length, shouldn't leave a do-nothing undo step.
+    if (applied != 0) commit(desc);
+    return applied;
+}
+
 void Document::setClipGain(int id, float g, const std::wstring& desc) {
     Clip* c = project_.findClip(id);
     if (!c) return;

@@ -11,7 +11,7 @@ sync with behavior changes.
 | File | Role |
 |---|---|
 | `audio_buffer.h` | `AudioBuffer` (interleaved float PCM, `sampleRate`/`channels`/`samples`), `AudioBufferPtr` (`shared_ptr`), `PeakCache` min/max bucket envelope for waveform drawing |
-| `model.h` | `Clip` (id, name, buffer, peaks, gain, **timestamp**), `Track` (id, name, gain, placed clips), `PlacedClip` (clipId + start frame), `Project` (library order = display order) |
+| `model.h` | `Clip` (id, name, buffer, peaks, gain, **timestamp**), `Track` (id, name, gain, placed clips, plus the pure lane arithmetic `gapBefore`/`ripple`/`overlaps`), `PlacedClip` (clipId + start frame), `Project` (library order = display order) |
 | `decoder.{h,cpp}` | MF Source Reader → stereo float at the project rate |
 | `encoder.{h,cpp}` | WAV writer (manual RIFF; 16/24-bit PCM, 32-bit float) + MF Sink Writer (MP3/AAC/WMA); output-rate resampling |
 | `engine.{h,cpp}` | WASAPI shared-mode render thread; `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
@@ -450,6 +450,66 @@ and dropping "flush before" candidates that land below 0 since those are not
 reachable positions. `dragSnap.begin()` seeds the state at the drag's start with
 the clip's **current** position, which is what makes an already-flush clip resist
 the first nudge.
+
+`updateDragSnap` takes the drag's `Mode` as an argument instead of reading the
+member. `onLUp` clears `mode` *before* landing the drop (a message box during the
+drop pumps messages, and a repaint then would draw a ghost for a drag that is
+over), so reading the member made the final, drop-deciding update behave as if it
+were not a clip move — the clip could snap to the edges of its own old position,
+and a ripple lost its lane.
+
+## Timeline: changing the space between clips (ripple)
+
+Moving a clip normally changes **two** gaps: the one in front of it opens or
+closes, and the one behind it does the opposite. That is wrong whenever the
+arrangement downstream has timing worth keeping — a row of takes, say, where you
+only want to widen the pause before take 3 and leave the rest as recorded.
+
+A **ripple** is the fix, and it is deliberately a tiny idea: *rigidly translate
+the suffix of a track's clip list starting at index `i`*. Distances inside the
+suffix are preserved by construction, so exactly one gap changes — the one in
+front of clip `i`. The only free parameter is the delta.
+
+`Track::ripple(index, delta)` (`model.h`) is the whole operation, and
+`Track::gapBefore(index)` is how a gap is named (distance from the previous
+clip's end, or from frame 0 for the first clip). The delta is clamped to
+`-gapBefore(index)`: sliding left stops flush against the clip in front, since
+there is nowhere further to go without overlapping. Sliding right is unbounded —
+the timeline has no end. Because this translates a whole suffix and the clamp
+keeps it behind the prefix, **it cannot reorder or overlap anything**, so unlike
+`moveClip` it needs no collision test and no `sortClips()`. `ripple` returns the
+delta actually applied; `Document::rippleClips` commits an undo step only when
+that is non-zero, so a drag that lands back where it started leaves no history.
+
+Three ways in, all funnelling into `rippleClips`:
+
+| Gesture | Delta |
+|---|---|
+| **Shift+drag** a placed clip | wherever the drag ends up, minus where the clip started |
+| Right-click → **Space before this clip…** | requested gap (typed in seconds) minus the current one |
+| Right-click → **Close the space before this clip** | `-gapBefore(index)` (the clamp does the work) |
+
+Shift+drag reuses the whole `Mode::ClipMove` machinery, with three differences,
+all following from what a ripple *is*:
+
+- **It stays on its lane.** A ripple is defined by one track's ordering ("this
+  clip and the ones behind it"), so `updateDragSnap` skips `trackAtPoint` and the
+  drop never calls `moveClip`. Dragging to another lane while rippling would mean
+  "move this clip elsewhere *and* close the gap here" — a different, compound
+  operation.
+- **The clips it carries are not snap targets.** `snapTargets` takes an
+  `ignoreAfter` flag that drops every index past the grabbed one; a clip that is
+  moving with you is not a fixed point to land on.
+- **It cannot be refused.** An ordinary move that collides is rejected with a red
+  ghost; a ripple is a continuous adjustment of one gap that bottoms out at zero,
+  so `dragMinStart()` clamps the ghost flush against the clip in front instead,
+  matching `Track::ripple`'s own clamp.
+
+The ghost shows **every** carried clip, not just the grabbed one, since the point
+of the gesture is that the tail moves too — `dragCarries(trackId, index)` decides
+membership for both the ghosts and the faint home-slot outlines, so the two can't
+disagree. `drawClipBlock` draws a clip block for both the real lane and the
+ghosts, so a ghost cannot come to look like something the drop won't produce.
 
 ## Library ordering (reorder + sort)
 
