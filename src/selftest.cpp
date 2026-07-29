@@ -511,6 +511,65 @@ int runSelfTest() {
         DeleteFileW(proj.c_str());
     }
 
+    // Gaps between clips on a track are pure arrangement -- no audio changes --
+    // which makes them the easiest kind of edit to lose: if rippleClips forgot to
+    // commit, the project would look edited but never ask to be saved, and the
+    // spacing would be gone on the next load with no warning at any point. So
+    // pin the whole chain: the gap opens, it counts as a change, it is written to
+    // the file, it comes back, and undo takes it away again.
+    {
+        Document d; d.init(rate);
+        std::wstring proj = dir + L"\\_selftest_gaps.acep";
+        int a = d.addClip(L"a", makeSine(rate, 0.5, 300.0), L"", L"add a");
+        int b = d.addClip(L"b", makeSine(rate, 0.5, 400.0), L"", L"add b");
+        int c = d.addClip(L"c", makeSine(rate, 0.5, 500.0), L"", L"add c");
+        int tid = d.project().tracks.empty() ? d.addTrack() : d.project().tracks[0].id;
+        const int64_t len = rate / 2;   // makeSine(0.5 s)
+        d.placeClip(tid, a, 0, L"place a");
+        d.placeClip(tid, b, len, L"place b");
+        d.placeClip(tid, c, len * 2, L"place c");
+        d.saveProject(proj);
+        check(!d.isModified(), L"gaps: clean after saving the packed arrangement");
+
+        // Open a gap in front of the middle clip. Everything after it must move
+        // by the same amount -- that is what makes it a ripple rather than a move.
+        const int64_t gap = rate / 4;
+        const int64_t applied = d.rippleClips(tid, 1, gap, L"space before");
+        check(applied == gap, L"gaps: the requested space is applied in full",
+              std::to_wstring(applied));
+        check(d.isModified(), L"gaps: opening a gap marks the project modified");
+        check(d.canUndo() && d.undoDesc() == L"space before",
+              L"gaps: opening a gap is one named undo step");
+        const Track* t1 = d.project().findTrack(tid);
+        check(t1 && t1->clips.size() == 3 && t1->gapBefore(1) == gap && t1->gapBefore(2) == 0 &&
+              t1->clips[2].startFrame == len * 2 + gap,
+              L"gaps: the later clips ride along and their own spacing is untouched");
+
+        // The bit that actually bites: does it reach the file?
+        check(d.saveProject(proj), L"gaps: the project saves");
+        check(!d.isModified(), L"gaps: clean again after saving the gap");
+        Document d2; d2.init(rate);
+        const bool loaded = d2.loadProject(proj);
+        const Track* t2 = loaded ? d2.project().findTrack(tid) : nullptr;
+        check(t2 && t2->clips.size() == 3 && t2->gapBefore(1) == gap &&
+              t2->clips[1].startFrame == len + gap && t2->clips[2].startFrame == len * 2 + gap,
+              L"gaps: spacing survives save + load");
+
+        // A ripple left is clamped by the gap in front, so it can never reorder
+        // or overlap; asking for more than exists closes the gap exactly.
+        const int64_t back = d.rippleClips(tid, 1, -(gap * 10), L"close space");
+        check(back == -gap, L"gaps: sliding left is clamped to the gap that exists",
+              std::to_wstring(back));
+        const Track* t3 = d.project().findTrack(tid);
+        check(t3 && t3->gapBefore(1) == 0 && t3->clips[2].startFrame == len * 2,
+              L"gaps: closing the space puts the arrangement back exactly");
+        // A no-op ripple must not leave a do-nothing undo step behind.
+        d.saveProject(proj);
+        check(d.rippleClips(tid, 1, -100, L"nothing") == 0 && !d.isModified(),
+              L"gaps: a ripple with nowhere to go commits nothing");
+        DeleteFileW(proj.c_str());
+    }
+
     // Sub-range preview source: the UI arms a BufferSource over [begin,end) and
     // maps clip frames to source frames with (frame - begin), so position() must
     // stay relative to begin and rendering must stop at end.
@@ -1713,6 +1772,48 @@ int runSelfTest() {
                       L"timbre distance: matching collapses the measured distance",
                       std::to_wstring(resBefore) + L" -> " + std::to_wstring(resAfter) + L" dB");
             }
+        }
+
+        // --- the correction must not chase the noise floor at the edges of the
+        //     spectrum. Two takes identical in the speech band but differing
+        //     wildly below it -- one with a fan or a DC offset, which is the
+        //     common case -- must produce essentially no correction at all. Left
+        //     unweighted this asked for 20+ dB at 30 Hz and reported that as the
+        //     "largest correction applied", which is both useless and alarming.
+        {
+            auto rumbly = std::make_shared<AudioBuffer>(*clipA);
+            const double w = 2.0 * 3.14159265358979323846 * 30.0 / RATE;
+            for (int64_t i = 0; i < N; ++i)
+                rumbly->samples[(size_t)i] += (float)(0.3 * std::sin(w * (double)i));
+            dsp::TimbreProfile pr = dsp::computeTimbreProfile(*rumbly);
+            std::vector<float> curve;
+            dsp::TimbreMatchOptions o; o.maxCorrectionDb = 24.0f;
+            auto fixedRumble = dsp::matchTimbre(*clipA, pr, o, &curve);
+            check(fixedRumble != nullptr, L"timbre band: matched against a rumbly reference");
+            if (fixedRumble) {
+                const double binHz = dsp::timbreBinHz(RATE);
+                double worst = 0.0, worstAt = 0.0;
+                for (size_t k = 0; k < curve.size(); ++k)
+                    if (std::fabs(curve[k]) > worst) { worst = std::fabs(curve[k]); worstAt = k * binHz; }
+                check(worst < 3.0,
+                      L"timbre band: 30 Hz rumble does not drive the correction",
+                      std::to_wstring(worst) + L" dB at " + std::to_wstring((int)worstAt) + L" Hz");
+                // Whatever correction there is must be inside the speech band.
+                check(worst < 0.01 || (worstAt > 60.0 && worstAt < 14000.0),
+                      L"timbre band: the largest correction lands in the speech band",
+                      std::to_wstring((int)worstAt) + L" Hz");
+            }
+            const double binHz = dsp::timbreBinHz(RATE);
+            check(std::fabs(binHz - (double)RATE / TWIN) < 1e-9,
+                  L"timbre band: bin spacing is reported for naming frequencies",
+                  std::to_wstring(binHz));
+            // The fade itself: DC and the very top must come out untouched.
+            check(curve.size() > 2 && std::fabs(curve[0]) < 1e-6,
+                  L"timbre band: DC is never corrected",
+                  std::to_wstring(curve.empty() ? 0.0f : curve[0]));
+            check(!curve.empty() && std::fabs(curve.back()) < 1e-6,
+                  L"timbre band: Nyquist is never corrected",
+                  std::to_wstring(curve.empty() ? 0.0f : curve.back()));
         }
 
         // --- properties the residual number has to have to mean anything.

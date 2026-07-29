@@ -157,6 +157,13 @@ TimbreProfile averageTimbre(const std::vector<TimbreProfile>& profiles);
 // loudness, not timbre, and leaving it in would make this quietly double as a
 // normalizer and undo levels the user had already set.
 //
+// The curve is also faded to 0 dB outside roughly 90 Hz -- 11 kHz. Outside that
+// band a speech recording is mostly its own noise floor, so the ratio between
+// two clips there compares one clip's rumble and hiss to another's -- which is
+// the one thing this effect is explicitly not for. Unweighted, those bins run
+// away with the curve: a trace of DC offset or a fan in one room is a 20 dB
+// difference at 30 Hz, far larger than any real difference in tone.
+//
 // `curveDbOut`, if given, receives the correction actually applied, per bin, in
 // dB -- useful for reporting how far a clip had to move. Returns nullptr if the
 // target is invalid, its rate doesn't match, or `buf` is too short to measure.
@@ -180,6 +187,11 @@ AudioBufferPtr matchTimbre(const AudioBuffer& buf, const TimbreProfile& target,
 // 3 kHz, so an unweighted figure would be almost entirely a statement about the
 // top octave. Returns -1 if the profiles aren't comparable.
 double timbreDistanceDb(const TimbreProfile& a, const TimbreProfile& b);
+
+// Hz per bin of a TimbreProfile / of the curve `matchTimbre` reports, so a
+// caller can say *where* the largest correction landed. "8 dB at 250 Hz" and
+// "8 dB at 40 Hz" mean completely different things.
+double timbreBinHz(int sampleRate);
 
 // --- Manual region edits ---
 // The detectors above are the automatic route, but they can only remove what

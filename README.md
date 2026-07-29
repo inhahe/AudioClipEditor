@@ -160,10 +160,17 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   controls how broad the correction curve is, and *Keep each clip's loudness*
   makes sure this changes only tone, never level. One undo step for the whole set.
 
+  The correction only covers the range speech actually occupies (about
+  90 Hz – 11 kHz). Below and above that a recording is mostly its own rumble and
+  hiss, and matching one clip's rumble to another's is both pointless and, if a
+  room has a fan in it, capable of swamping the real correction entirely.
+
   **The result box tells you whether it worked**, not just what it did: it names
   the two clips that were furthest apart in tone and how far apart they were, then
   the two that are furthest apart *afterwards* — say *7.2 dB apart before, 0.9 dB
-  after*. That second number is the one to read. If it's still a few dB, the EQ
+  after*. That second number is the one to read. It also says at what frequency
+  the largest correction landed, because *8 dB at 250 Hz* is a mic-distance
+  difference and *8 dB at 40 Hz* is a fan. If it's still a few dB, the EQ
   was held back: raise **Maximum change**, or lower **Smoothing** so the
   correction can follow finer detail. If it's near zero, the clips now measure
   alike, and anything you can still hear is not a tone-colour difference at all —

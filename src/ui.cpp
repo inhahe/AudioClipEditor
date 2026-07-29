@@ -1867,14 +1867,21 @@ struct App {
 
         std::vector<std::pair<int, AudioBufferPtr>> updates;
         std::vector<size_t> updIndex;   // updates[u] came from targets/profiles[updIndex[u]]
-        double worstDb = 0.0;
+        double worstDb = 0.0, worstHz = 0.0;
+        const double binHz = dsp::timbreBinHz(rate);
         for (size_t i = 0; i < targets.size(); ++i) {
             const Clip* c = doc.project().findClip(targets[i]);
             if (!c || !c->buffer || !profiles[i].valid()) continue;
             std::vector<float> curve;
             auto matched = dsp::matchTimbre(*c->buffer, target, tmOpts, &curve);
             if (!matched) continue;
-            for (float d : curve) worstDb = std::max(worstDb, (double)std::fabs(d));
+            // Where the biggest move landed, not just how big it was: 8 dB at
+            // 250 Hz is a mic-distance difference, 8 dB at 40 Hz is a fan.
+            for (size_t k = 0; k < curve.size(); ++k)
+                if (std::fabs(curve[k]) > worstDb) {
+                    worstDb = std::fabs(curve[k]);
+                    worstHz = (double)k * binHz;
+                }
             updates.push_back({ targets[i], matched });
             updIndex.push_back(i);
         }
@@ -1903,9 +1910,12 @@ struct App {
         doc.replaceClipBuffers(updates, L"Match timbre of " + scopeLabel + L" to " + ref);
         refresh();
 
+        wchar_t whereBuf[64];
+        swprintf(whereBuf, 64, worstHz >= 1000.0 ? L" (at %.1f kHz)" : L" (at %.0f Hz)",
+                 worstHz >= 1000.0 ? worstHz / 1000.0 : worstHz);
         std::wstring msg = L"Matched " + std::to_wstring(updates.size())
                          + L" clips to " + ref + L".\n\nThe largest correction applied was "
-                         + std::to_wstring((int)(worstDb + 0.5)) + L" dB";
+                         + std::to_wstring((int)(worstDb + 0.5)) + L" dB" + whereBuf;
         // The clamp having bitten means the clips genuinely are far apart, and a
         // partial match is the honest result -- but the user should know the
         // effect stopped short rather than wonder why they still differ.

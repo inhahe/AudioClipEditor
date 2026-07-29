@@ -827,12 +827,24 @@ double timbreDistanceDb(const TimbreProfile& a, const TimbreProfile& b) {
 // warbling correction that has nothing to do with timbre. The `minHz` floor
 // keeps the low end averaged across several harmonics, leaving only the
 // envelope -- which is the part that actually differs between takes.
-static void tmSmoothOctaves(std::vector<float>& db, double binHz,
-                            double octaves, double minHz = 60.0) {
+// `w` is the per-bin band weight (see tmBandWeights). The average is weighted by
+// it, which matters more than it looks: fading the curve out of band *after*
+// smoothing is not enough, because the smoothing window itself would first drag
+// the out-of-band garbage inwards. The 60 Hz floor means the window at 70 Hz
+// spans roughly 10-130 Hz, so a fan at 30 Hz would still be setting the
+// correction at 70 and 100 Hz -- inside the band, where the fade can no longer
+// remove it. Weighting the average means those bins never enter it at all, and
+// bins in the transition contribute in proportion to how much they are trusted.
+static void tmSmoothOctaves(std::vector<float>& db, double binHz, double octaves,
+                            const std::vector<float>& w, double minHz = 60.0) {
     const int n = (int)db.size();
     if (n <= 0 || binHz <= 0.0) return;
-    std::vector<double> pre((size_t)n + 1, 0.0);
-    for (int k = 0; k < n; ++k) pre[k + 1] = pre[k] + db[k];
+    std::vector<double> pw((size_t)n + 1, 0.0), pv((size_t)n + 1, 0.0);
+    for (int k = 0; k < n; ++k) {
+        const double wk = k < (int)w.size() ? (double)w[k] : 1.0;
+        pw[k + 1] = pw[k] + wk;
+        pv[k + 1] = pv[k] + wk * (double)db[k];
+    }
     const double half = std::pow(2.0, std::max(0.0, octaves) * 0.5);
     std::vector<float> out((size_t)n);
     for (int k = 0; k < n; ++k) {
@@ -843,9 +855,62 @@ static void tmSmoothOctaves(std::vector<float>& db, double binHz,
         int j1 = std::max(j0, std::min(n - 1, (int)std::ceil(hi / binHz)));
         // Arithmetic mean in dB == geometric mean of power, which is the correct
         // average for a ratio: smoothing a +6 dB bump and a -6 dB dip gives 0.
-        out[k] = (float)((pre[j1 + 1] - pre[j0]) / (j1 - j0 + 1));
+        const double sw = pw[j1 + 1] - pw[j0];
+        // A window entirely outside the band has nothing to average; those bins
+        // are faded to zero anyway.
+        out[k] = sw > 1e-9 ? (float)((pv[j1 + 1] - pv[j0]) / sw) : 0.0f;
     }
     db.swap(out);
+}
+
+// Per-bin 0..1 weight fading the correction out where speech has no energy.
+//
+// A ratio between two spectra is only a statement about tone colour where both
+// clips actually have signal. Below ~90 Hz and above ~11 kHz a speech recording
+// is mostly its own noise floor -- rumble, HVAC, handling and desk thump at the
+// bottom, mic and preamp hiss at the top -- so the ratio there compares one
+// clip's noise to another's. That is precisely what this effect exists not to
+// do; measuring on speech frames only already refuses to match the silence
+// *between* words, and this refuses to match the parts of a speech frame that
+// are not speech.
+//
+// Left unweighted those bins routinely run away with the whole curve. A trace of
+// DC offset, or a fan in one room and not the other, is a 20 dB difference at
+// 30 Hz -- vastly larger than any real difference in tone -- and the filter
+// would dutifully apply it, boosting one clip's rumble to match another's while
+// changing nothing anyone can hear. It also poisoned the reported "largest
+// correction", which is a maximum over the curve.
+//
+// Raised-cosine ramps in *log* frequency, so the fade is as gradual in the ear's
+// terms as the constant-Q smoothing that produced the curve, and no edge appears
+// in the filter. The top of the band follows Nyquist so that a 22.05 kHz or
+// 16 kHz recording isn't corrected right up to the edge of its own bandwidth.
+static std::vector<float> tmBandWeights(int sampleRate) {
+    const double binHz = (double)sampleRate / kTMWin;
+    const double nyq = sampleRate * 0.5;
+    const double loZero = 35.0,  loFull = 90.0;
+    const double hiFull = std::min(11000.0, nyq * 0.88);
+    const double hiZero = std::min(16000.0, nyq * 0.98);
+    std::vector<float> w((size_t)kTMSpec, 1.0f);
+    // A rate so low that the band inverts leaves everything alone rather than
+    // producing a nonsense window.
+    if (!(hiFull > loFull) || !(hiZero > hiFull)) return w;
+    auto ramp = [](double x) { return 0.5 - 0.5 * std::cos(PI * std::max(0.0, std::min(1.0, x))); };
+    for (int k = 0; k < kTMSpec; ++k) {
+        const double f = k * binHz;
+        double g;
+        if (f <= loZero)      g = 0.0;
+        else if (f < loFull)  g = ramp(std::log(f / loZero) / std::log(loFull / loZero));
+        else if (f <= hiFull) g = 1.0;
+        else if (f < hiZero)  g = ramp(std::log(hiZero / f) / std::log(hiZero / hiFull));
+        else                  g = 0.0;
+        w[(size_t)k] = (float)g;
+    }
+    return w;
+}
+
+double timbreBinHz(int sampleRate) {
+    return sampleRate > 0 ? (double)sampleRate / kTMWin : 0.0;
 }
 
 // Overlap-add a static, real, symmetric gain onto every STFT frame. Because the
@@ -906,28 +971,37 @@ AudioBufferPtr matchTimbre(const AudioBuffer& buf, const TimbreProfile& target,
         db[k] = (float)((target.logPower[k] - mine.logPower[k]) * toDb);
 
     const int rate = buf.sampleRate > 0 ? buf.sampleRate : 48000;
+    const std::vector<float> band = tmBandWeights(rate);
     tmSmoothOctaves(db, (double)rate / kTMWin,
-                    std::max(0.05f, std::min(2.0f, opts.smoothingOctaves)));
+                    std::max(0.05f, std::min(2.0f, opts.smoothingOctaves)), band);
 
     // Force the curve to average 0 dB. A broadband offset is *loudness*, not
     // timbre, and leaving it in would make this quietly double as a normalizer
     // and undo levels the user had already set. The mean is weighted by the
     // target's own power, because an unweighted mean over linearly-spaced bins
     // is dominated by the near-empty top half of the spectrum -- where the
-    // correction is noise -- and would bias the whole curve to cancel it.
+    // correction is noise -- and would bias the whole curve to cancel it. The
+    // band weight goes into the same product, so bins the correction is about to
+    // discard get no say in the offset either.
     double wsum = 0.0, wacc = 0.0;
     for (int k = 0; k < kTMSpec; ++k) {
-        const double w = std::exp((double)target.logPower[k]);
+        const double w = std::exp((double)target.logPower[k]) * band[k];
         wsum += w; wacc += w * db[k];
     }
     const float mean = wsum > 0.0 ? (float)(wacc / wsum) : 0.0f;
 
-    // Clamp *after* de-meaning, so the limit applies to the shape of the curve
-    // rather than to the shape plus an offset that is about to be removed.
+    // De-mean, fade out of band, then clamp. Clamping last means the limit
+    // applies to the curve that is actually applied -- not to a shape plus an
+    // offset about to be removed, and not to a value at 30 Hz that is about to
+    // be faded to nothing anyway. That last point is why the "largest correction
+    // applied" figure only became meaningful once the band weight existed: it
+    // used to be a maximum over bins nobody can hear, and would report 23 dB for
+    // a match that moved the audible spectrum by 3.
     const float lim = std::max(0.0f, std::min(24.0f, opts.maxCorrectionDb));
     std::vector<float> gain((size_t)kTMSpec);
     for (int k = 0; k < kTMSpec; ++k) {
-        db[k] = std::max(-lim, std::min(lim, db[k] - mean));
+        db[k] = (db[k] - mean) * band[k];
+        db[k] = std::max(-lim, std::min(lim, db[k]));
         gain[k] = (float)std::pow(10.0, db[k] / 20.0);   // amplitude gain from power dB
     }
     if (curveDbOut) *curveDbOut = db;

@@ -301,6 +301,7 @@ clipping, and differences in delivery. The dialog says so.
 | `averageTimbre(profiles)` | per-bin mean of the log spectra = **geometric mean of power** |
 | `matchTimbre(buf, target, opts, curveDbOut)` | filter a clip onto `target`; reports the applied dB curve |
 | `timbreDistanceDb(a, b)` | how far apart two tone colours **measure**, in dB; `-1` if not comparable |
+| `timbreBinHz(rate)` | Hz per bin, so a caller can say *where* the biggest correction landed |
 
 Framing is 2048/512 — deliberately identical to the voice detector's, so
 `detectVoiceFrames`' per-frame mask lines up frame for frame with the analysis.
@@ -317,6 +318,31 @@ Framing is 2048/512 — deliberately identical to the voice detector's, so
 - **Mean of powers, then log** — not mean of logs. The log of an average is
   dominated by the loud frames, which is what a tone colour should be; a mean of
   logs weights a near-silent frame's noise floor as heavily as a vowel.
+- **The correction is band-limited to roughly 90 Hz – 11 kHz** (`tmBandWeights`),
+  raised-cosine ramps in *log* frequency, upper edge following Nyquist so a
+  22.05 kHz or 16 kHz source isn't corrected to the edge of its own bandwidth.
+  Outside that band a speech recording is mostly its own noise floor — rumble,
+  HVAC, handling and desk thump below, mic/preamp hiss above — so the ratio there
+  compares one clip's *noise* to another's, which is the one thing this effect
+  exists not to do. (Measuring on speech frames only already refuses to match the
+  silence *between* words; this refuses to match the parts of a speech frame that
+  are not speech.) Unweighted, those bins run away with the whole curve: a trace
+  of DC offset, or a fan in one room and not the other, is a 20 dB difference at
+  30 Hz — vastly larger than any real difference in tone — and the filter would
+  dutifully apply it, boosting one clip's rumble to match another's while
+  changing nothing audible. It also poisoned the reported "largest correction",
+  which is a maximum over the curve: a real match that moved the audible spectrum
+  by 3 dB would report **23 dB**.
+- **The band weight is applied to the smoothing average, not just afterwards.**
+  Fading the curve out of band after smoothing is not enough, because the
+  smoothing window drags the out-of-band garbage inwards first: with the 60 Hz
+  floor, the window at 70 Hz spans about 10–130 Hz, so a fan at 30 Hz still sets
+  the correction at 70 and 100 Hz — *inside* the band, where the fade can no
+  longer remove it. `tmSmoothOctaves` therefore takes the weights and computes a
+  weighted mean, so untrusted bins never enter the average and transition bins
+  contribute in proportion to how much they're trusted. Measured on the selftest's
+  rumble case: after-the-fact fading alone left **6.2 dB** at 70 Hz; weighting the
+  average leaves **1.4 dB**.
 - **Fractional-octave smoothing with an absolute `minHz` floor (60 Hz).**
   Constant-Q is the right shape (hearing resolves frequency logarithmically), but
   at 100 Hz half an octave is only a couple of FFT bins — narrow enough to
@@ -332,8 +358,11 @@ Framing is 2048/512 — deliberately identical to the voice detector's, so
   weighting matters: an unweighted mean over linearly-spaced bins is dominated by
   the near-empty top half of the spectrum, where the correction is noise, and
   would bias the whole curve to cancel it.
-- **Clamp after de-meaning**, so `maxCorrectionDb` limits the *shape* of the
-  curve rather than the shape plus an offset that is about to be removed.
+- **De-mean, fade, then clamp — in that order.** Clamping last means the limit
+  applies to the curve actually applied: not to a shape plus an offset about to
+  be removed, and not to a value at 30 Hz about to be faded to nothing. The band
+  weight also goes into the de-meaning weight (alongside the target's power), so
+  bins the correction is about to discard get no say in the offset either.
 - **Zero-phase application.** The gain is real and mirrored onto the conjugate
   bins (`k` and `kTMWin-k`) of each STFT frame, so phase is untouched and nothing
   is smeared in time. Overlap-add uses the same lead-padded, `sum(w²)`-normalised
@@ -388,8 +417,9 @@ filtered by a curve derived from nothing. Clips of a sample rate other than the
 first one's are skipped — spectra are only comparable bin-for-bin at one rate —
 and the summary box names the count, since a clip missing from the match is
 exactly the one that will still sound different. The box also reports the largest
-correction applied and says so explicitly when the clamp bit, so a partial match
-doesn't read as a broken one.
+correction applied — **and at what frequency**, since "8 dB at 250 Hz" is a mic
+distance and "8 dB at 40 Hz" is a fan — and says so explicitly when the clamp
+bit, so a partial match doesn't read as a broken one.
 
 **The summary reports the residual, not just the correction.** After filtering,
 every result buffer is profiled a second time and `worstTimbrePair` picks the two
@@ -1286,6 +1316,14 @@ mismatch, and — the one that matters — **immunity to a broadband level chang
 Scaling a clip by 0.25 must leave the distance at 0, or the report would call two
 identically-coloured takes different merely because one is quieter, which is
 exactly the confusion the number exists to remove.
+
+The **band limit** is pinned by a case built to break the old behaviour: `clipA`
+against a copy of itself with a loud 30 Hz tone added, i.e. two takes identical
+where speech lives and wildly different below it. That must produce essentially
+no correction — the assertion is under 3 dB anywhere, and that the largest
+correction lands between 60 Hz and 14 kHz. It measured **1.4 dB at 70 Hz**;
+before the weights, over 20 dB at 30 Hz. DC and Nyquist are separately asserted
+to come out at exactly 0 dB.
 
 ## Undo / scopes
 
