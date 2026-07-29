@@ -300,6 +300,7 @@ clipping, and differences in delivery. The dialog says so.
 | `computeTimbreProfile(buf)` | measure one clip's LTAS → `TimbreProfile` (per-bin mean `ln(power)`) |
 | `averageTimbre(profiles)` | per-bin mean of the log spectra = **geometric mean of power** |
 | `matchTimbre(buf, target, opts, curveDbOut)` | filter a clip onto `target`; reports the applied dB curve |
+| `timbreDistanceDb(a, b)` | how far apart two tone colours **measure**, in dB; `-1` if not comparable |
 
 Framing is 2048/512 — deliberately identical to the voice detector's, so
 `detectVoiceFrames`' per-frame mask lines up frame for frame with the analysis.
@@ -343,6 +344,18 @@ Framing is 2048/512 — deliberately identical to the voice detector's, so
   every channel: timbre is a property of the source, so the stereo image survives.
 - **Scale, don't clip**, if a boosted band pushes a peak past full scale. Trading
   a subtle tone difference for audible distortion is a bad bargain.
+- **The residual is a separate measurement from the correction.** How far a clip
+  was *moved* and how close it *ended up* are different questions, and only the
+  second one answers "did this work" — a large correction that landed is a
+  success, a small one that was clamped is a failure, and the applied curve
+  cannot tell them apart. `timbreDistanceDb` is that second number: the RMS of
+  the dB difference between two profiles over 100 Hz – 10 kHz, de-meaned (a
+  broadband offset is loudness) and weighted **1/f so every octave counts
+  equally**. The weighting is the same argument as the de-meaning weight, from
+  the other side: linearly-spaced bins put four fifths of their number above
+  3 kHz, so an unweighted figure would be almost entirely a statement about the
+  top octave. Returns `-1` for profiles that aren't comparable, which lets the
+  caller feed it a whole array including invalid entries without filtering first.
 
 ### Timbre matching in the app
 
@@ -377,6 +390,26 @@ and the summary box names the count, since a clip missing from the match is
 exactly the one that will still sound different. The box also reports the largest
 correction applied and says so explicitly when the clamp bit, so a partial match
 doesn't read as a broken one.
+
+**The summary reports the residual, not just the correction.** After filtering,
+every result buffer is profiled a second time and `worstTimbrePair` picks the two
+clips furthest apart by `timbreDistanceDb`, before and after — *"‘take3’ and
+‘take5’ were 7.2 dB apart; afterwards the furthest apart are ‘take1’ and ‘take4’,
+0.9 dB."* The worst pair rather than an average, because an average hides one
+stubborn clip among five that agree and that clip is exactly the one the ear
+picks out; both ends are **named** so the number can be checked by ear against
+the clips it describes.
+
+This exists because "I matched the timbre and they still sound different" has two
+completely different causes and the user cannot tell which they have. A residual
+still above 2 dB means the EQ was held back (the box says: raise the clamp, or
+lower Smoothing to let the curve follow finer detail). A residual near 0 means
+the clips now *measure* alike, so whatever is still audible is not a
+spectral-average difference at all — reverb, compression on some clips but not
+others, or background noise — and the box says that instead, because re-running
+the same match with the same settings is otherwise the obvious next thing to try
+and it cannot possibly help. The cost is one extra profiling pass over the audio,
+which is worth it: without the number, distinguishing the two cases is guesswork.
 
 ## Applying an effect to the selection only
 
@@ -1244,6 +1277,15 @@ loudness preserved to within 1.5 dB (it must not double as a normalizer),
 `averageTimbre` equalling the per-bin mean and ignoring a profile of a different
 rate, the `maxCorrectionDb` clamp holding exactly, and refusals for an unmeasured
 profile / a rate mismatch / a clip shorter than one analysis window.
+
+`timbreDistanceDb` — the residual the summary box reports — is checked to agree
+with that convergence (2.19 dB → 0.03 dB on the same pair) and then for the
+properties that make the number mean anything: zero distance from a profile to
+itself, symmetry in its arguments, `-1` for an unmeasured profile or a rate
+mismatch, and — the one that matters — **immunity to a broadband level change**.
+Scaling a clip by 0.25 must leave the distance at 0, or the report would call two
+identically-coloured takes different merely because one is quieter, which is
+exactly the confusion the number exists to remove.
 
 ## Undo / scopes
 

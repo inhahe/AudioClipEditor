@@ -786,6 +786,38 @@ TimbreProfile averageTimbre(const std::vector<TimbreProfile>& profiles) {
     return avg;
 }
 
+double timbreDistanceDb(const TimbreProfile& a, const TimbreProfile& b) {
+    if (!a.valid() || !b.valid()) return -1.0;
+    if (a.sampleRate != b.sampleRate || a.logPower.size() != b.logPower.size()) return -1.0;
+    const int n = (int)a.logPower.size();
+    const double binHz = (double)a.sampleRate / kTMWin;
+    if (binHz <= 0.0) return -1.0;
+    // Bin 0 is DC and carries no tone colour; the top of the band is capped at
+    // Nyquist for the sake of rates below 20 kHz.
+    const int k0 = std::max(1, (int)std::ceil(100.0 / binHz));
+    const int k1 = std::min(n - 1, (int)std::floor(10000.0 / binHz));
+    if (k1 <= k0) return -1.0;
+
+    const double toDb = 10.0 / std::log(10.0);
+    // w = 1/k is 1/f up to the constant binHz, which cancels in every ratio
+    // below: equal weight per octave.
+    double wsum = 0.0, acc = 0.0;
+    for (int k = k0; k <= k1; ++k) {
+        const double w = 1.0 / k;
+        wsum += w;
+        acc += w * ((double)b.logPower[k] - (double)a.logPower[k]) * toDb;
+    }
+    if (wsum <= 0.0) return -1.0;
+    const double mean = acc / wsum;
+    double q = 0.0;
+    for (int k = k0; k <= k1; ++k) {
+        const double w = 1.0 / k;
+        const double d = ((double)b.logPower[k] - (double)a.logPower[k]) * toDb - mean;
+        q += w * d * d;
+    }
+    return std::sqrt(q / wsum);
+}
+
 // Fractional-octave (constant-Q) smoothing of a dB curve, with an absolute
 // minimum window width. Constant-Q is the right shape for tone colour, since
 // hearing resolves frequency logarithmically -- but at 100 Hz half an octave is

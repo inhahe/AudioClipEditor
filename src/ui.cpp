@@ -1776,6 +1776,27 @@ struct App {
         matchTimbreClips(ids, L"track '" + t->name + L"'");
     }
 
+    // The two clips in a set whose tone colours are furthest apart. The worst
+    // pair, not the average distance: an average hides one stubborn clip among
+    // five that agree, and that one clip is exactly the one the ear picks out.
+    // Naming both ends makes the report actionable -- "these two still differ"
+    // is something you can go and listen to.
+    struct TimbrePair { double db = -1.0; int a = -1, b = -1; };
+    static TimbrePair worstTimbrePair(const std::vector<dsp::TimbreProfile>& ps) {
+        TimbrePair w;
+        for (size_t i = 0; i < ps.size(); ++i)
+            for (size_t j = i + 1; j < ps.size(); ++j) {
+                // Invalid profiles (clips skipped as too short or the wrong
+                // rate) return -1 and so can never win.
+                const double d = dsp::timbreDistanceDb(ps[i], ps[j]);
+                if (d > w.db) { w.db = d; w.a = (int)i; w.b = (int)j; }
+            }
+        return w;
+    }
+    static std::wstring db1(double v) {
+        wchar_t b[32]; swprintf(b, 32, L"%.1f", v); return b;
+    }
+
     void matchTimbreClips(const std::vector<int>& ids, const std::wstring& scopeLabel) {
         std::vector<int> targets;
         std::vector<std::wstring> names;
@@ -1845,6 +1866,7 @@ struct App {
         }
 
         std::vector<std::pair<int, AudioBufferPtr>> updates;
+        std::vector<size_t> updIndex;   // updates[u] came from targets/profiles[updIndex[u]]
         double worstDb = 0.0;
         for (size_t i = 0; i < targets.size(); ++i) {
             const Clip* c = doc.project().findClip(targets[i]);
@@ -1854,12 +1876,27 @@ struct App {
             if (!matched) continue;
             for (float d : curve) worstDb = std::max(worstDb, (double)std::fabs(d));
             updates.push_back({ targets[i], matched });
+            updIndex.push_back(i);
         }
-        SetCursor(old);
         if (updates.empty()) {
+            SetCursor(old);
             MessageBoxW(hwnd, L"Nothing could be matched.", L"Match timbre", MB_ICONWARNING);
             return;
         }
+
+        // Re-measure the results. The size of the correction says how far the
+        // clips were moved, which is not the same question as how close they
+        // ended up: a big correction that landed is a success and a small one
+        // that was clamped is a failure. Costs one more profiling pass over the
+        // audio, which is worth it -- without this number the only way to tell
+        // "the EQ stopped short" from "the difference isn't spectral at all" is
+        // to guess.
+        const TimbrePair before = worstTimbrePair(profiles);
+        std::vector<dsp::TimbreProfile> after(profiles.size());
+        for (size_t u = 0; u < updates.size(); ++u)
+            after[updIndex[u]] = dsp::computeTimbreProfile(*updates[u].second);
+        const TimbrePair residual = worstTimbrePair(after);
+        SetCursor(old);
         stopAll();   // buffers are changing under any active playback
         const std::wstring ref = tmReference.empty() ? L"their average"
                                                      : L"'" + tmReference + L"'";
@@ -1875,7 +1912,32 @@ struct App {
         if (worstDb >= tmOpts.maxCorrectionDb - 0.01)
             msg += L", which is the limit you set \u2014 raise \u201CMaximum change\u201D "
                    L"to move them closer";
-        msg += L".\n\nUndo (Ctrl+Z) to go back.";
+        msg += L".";
+
+        // How close they actually ended up, which is the question the user is
+        // really asking. Both ends of the worst pair are named so the number can
+        // be checked by ear against the clips it describes.
+        if (before.db >= 0.0 && residual.db >= 0.0) {
+            msg += L"\n\nThe two clips furthest apart in tone were \u2018" + names[before.a]
+                 + L"\u2019 and \u2018" + names[before.b] + L"\u2019, " + db1(before.db)
+                 + L" dB apart. Afterwards the furthest apart are \u2018" + names[residual.a]
+                 + L"\u2019 and \u2018" + names[residual.b] + L"\u2019, " + db1(residual.db)
+                 + L" dB.";
+            // Two different failures, and the residual is what tells them apart:
+            // still far apart means the EQ was held back, already close means
+            // the clips now *measure* alike and anything still audible is not a
+            // spectral-average difference at all. Saying so beats letting the
+            // user re-run the same match with the same settings.
+            if (residual.db > 2.0)
+                msg += L" They are still some way apart: raise \u201CMaximum change\u201D, "
+                       L"or lower \u201CSmoothing\u201D so the correction can follow finer "
+                       L"detail.";
+            else
+                msg += L" They now measure alike, so anything you can still hear is not a "
+                       L"tone-colour difference \u2014 reverb, compression on some clips but "
+                       L"not others, or background noise, none of which EQ can reach.";
+        }
+        msg += L"\n\nUndo (Ctrl+Z) to go back.";
         if (unmeasured || mismatched) {
             msg += L"\n\nSkipped ";
             if (unmeasured) msg += std::to_wstring(unmeasured) + L" clip(s) too short to measure";

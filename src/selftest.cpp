@@ -1700,7 +1700,43 @@ int runSelfTest() {
                 check(conv < diffBefore * 0.25,
                       L"timbre: clips matched to the average converge on each other",
                       std::to_wstring(diffBefore) + L" -> " + std::to_wstring(conv) + L" dB rms");
+
+                // --- the residual measure the result dialog reports. It has to
+                //     agree with the convergence above, or the number shown to
+                //     the user is not a measure of the thing that was done.
+                const double resBefore = dsp::timbreDistanceDb(pa, pb);
+                const double resAfter = dsp::timbreDistanceDb(dsp::computeTimbreProfile(*ma),
+                                                              dsp::computeTimbreProfile(*mb));
+                check(resBefore > 2.0, L"timbre distance: the unmatched takes measure far apart",
+                      std::to_wstring(resBefore) + L" dB");
+                check(resAfter >= 0.0 && resAfter < resBefore * 0.25,
+                      L"timbre distance: matching collapses the measured distance",
+                      std::to_wstring(resBefore) + L" -> " + std::to_wstring(resAfter) + L" dB");
             }
+        }
+
+        // --- properties the residual number has to have to mean anything.
+        check(dsp::timbreDistanceDb(pa, pa) < 1e-4,
+              L"timbre distance: a profile is zero distance from itself",
+              std::to_wstring(dsp::timbreDistanceDb(pa, pa)));
+        check(std::fabs(dsp::timbreDistanceDb(pa, pb) - dsp::timbreDistanceDb(pb, pa)) < 1e-6,
+              L"timbre distance: symmetric in its two arguments");
+        {
+            // A pure level change is loudness, not timbre: the distance must not
+            // see it, or the report would call two identically-coloured takes
+            // different merely because one is quieter.
+            auto quiet = std::make_shared<AudioBuffer>(*clipA);
+            for (float& v : quiet->samples) v *= 0.25f;
+            const double d = dsp::timbreDistanceDb(pa, dsp::computeTimbreProfile(*quiet));
+            check(d >= 0.0 && d < 0.2, L"timbre distance: ignores a broadband level change",
+                  std::to_wstring(d) + L" dB");
+        }
+        check(dsp::timbreDistanceDb(pa, dsp::TimbreProfile{}) < 0.0,
+              L"timbre distance: an unmeasured profile has no distance");
+        {
+            dsp::TimbreProfile mismatch = pb; mismatch.sampleRate = 44100;
+            check(dsp::timbreDistanceDb(pa, mismatch) < 0.0,
+                  L"timbre distance: profiles of different rates aren't comparable");
         }
         // A profile of another sample rate isn't comparable bin-for-bin, so it
         // must be ignored rather than averaged into nonsense.

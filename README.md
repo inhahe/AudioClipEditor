@@ -158,11 +158,19 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   (*Sound like 'take 2'*), when you know which take sounds right. **Maximum
   change** caps how far any clip may be moved (default 12 dB), **Smoothing**
   controls how broad the correction curve is, and *Keep each clip's loudness*
-  makes sure this changes only tone, never level. The result box tells you the
-  largest correction it applied — and says so when it hit your limit. One undo
-  step for the whole set. It can't fix differences in **reverb** (a room tail is a
-  difference in *time*, not tone — no EQ can add or remove one), in background
-  noise (use the voice cleaner) or in delivery.
+  makes sure this changes only tone, never level. One undo step for the whole set.
+
+  **The result box tells you whether it worked**, not just what it did: it names
+  the two clips that were furthest apart in tone and how far apart they were, then
+  the two that are furthest apart *afterwards* — say *7.2 dB apart before, 0.9 dB
+  after*. That second number is the one to read. If it's still a few dB, the EQ
+  was held back: raise **Maximum change**, or lower **Smoothing** so the
+  correction can follow finer detail. If it's near zero, the clips now measure
+  alike, and anything you can still hear is not a tone-colour difference at all —
+  it can't fix **reverb** (a room tail is a difference in *time*, not tone, and no
+  EQ can add or remove one), **compression** on some clips but not others,
+  differing **background noise** (use the voice cleaner), or delivery. Knowing
+  which of the two you have saves re-running the same match and hoping.
 - **Clean / de-noise just part of a clip.** Drag a selection, then pick
   **This clip (selection)…** — the first entry in the *Voice cleaner* and
   *Remove non-voice* submenus, right above *This clip…* and *All clips*. The range

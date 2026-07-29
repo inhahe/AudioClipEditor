@@ -164,6 +164,23 @@ AudioBufferPtr matchTimbre(const AudioBuffer& buf, const TimbreProfile& target,
                            const TimbreMatchOptions& opts,
                            std::vector<float>* curveDbOut = nullptr);
 
+// How far apart two tone colours measure, in dB -- the number that says whether
+// matching actually worked. Reporting the size of the *correction* is not the
+// same thing: a large correction that landed is a success and a small one that
+// fell short is a failure, and only the residual distinguishes them. It also
+// separates the two reasons clips still sound different after a match: a few dB
+// left over means the EQ stopped short (raise the clamp), while ~0 dB left over
+// means the clips now measure alike and what remains is something spectral
+// averages cannot see -- reverb, compression, or background noise.
+//
+// Defined as the RMS of the dB difference between the two profiles over
+// 100 Hz -- 10 kHz, after removing its mean (a broadband offset is loudness, not
+// timbre) and weighting each bin by 1/f so every octave counts equally. The
+// weighting matters: linearly-spaced bins put four fifths of their number above
+// 3 kHz, so an unweighted figure would be almost entirely a statement about the
+// top octave. Returns -1 if the profiles aren't comparable.
+double timbreDistanceDb(const TimbreProfile& a, const TimbreProfile& b);
+
 // --- Manual region edits ---
 // The detectors above are the automatic route, but they can only remove what
 // they can recognise. Some non-speech events -- a chair creak, a swallow, a
