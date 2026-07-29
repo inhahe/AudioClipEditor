@@ -1868,6 +1868,7 @@ struct App {
         std::vector<std::pair<int, AudioBufferPtr>> updates;
         std::vector<size_t> updIndex;   // updates[u] came from targets/profiles[updIndex[u]]
         double worstDb = 0.0, worstHz = 0.0;
+        int worstClip = -1;
         const double binHz = dsp::timbreBinHz(rate);
         for (size_t i = 0; i < targets.size(); ++i) {
             const Clip* c = doc.project().findClip(targets[i]);
@@ -1881,6 +1882,7 @@ struct App {
                 if (std::fabs(curve[k]) > worstDb) {
                     worstDb = std::fabs(curve[k]);
                     worstHz = (double)k * binHz;
+                    worstClip = (int)i;   // and which clip needed it
                 }
             updates.push_back({ targets[i], matched });
             updIndex.push_back(i);
@@ -1913,14 +1915,25 @@ struct App {
         wchar_t whereBuf[64];
         swprintf(whereBuf, 64, worstHz >= 1000.0 ? L" (at %.1f kHz)" : L" (at %.0f Hz)",
                  worstHz >= 1000.0 ? worstHz / 1000.0 : worstHz);
+        // Naming the clip matters most when there are a lot of them: across two
+        // dozen takes the figure is set by a single outlier, and "which one" is
+        // the only question the user can actually act on.
+        const std::wstring worstWho =
+            (worstClip >= 0 && worstClip < (int)names.size())
+                ? L", to \u2018" + names[worstClip] + L"\u2019" : std::wstring();
         std::wstring msg = L"Matched " + std::to_wstring(updates.size())
                          + L" clips to " + ref + L".\n\nThe largest correction applied was "
-                         + std::to_wstring((int)(worstDb + 0.5)) + L" dB" + whereBuf;
+                         + std::to_wstring((int)(worstDb + 0.5)) + L" dB" + whereBuf + worstWho;
         // The clamp having bitten means the clips genuinely are far apart, and a
         // partial match is the honest result -- but the user should know the
-        // effect stopped short rather than wonder why they still differ.
+        // effect stopped short rather than wonder why they still differ. 24 dB is
+        // the ceiling the effect allows, so say that rather than send them back
+        // to a field that cannot go any higher.
         if (worstDb >= tmOpts.maxCorrectionDb - 0.01)
-            msg += L", which is the limit you set \u2014 raise \u201CMaximum change\u201D "
+            msg += tmOpts.maxCorrectionDb >= 23.99f
+                 ? L" \u2014 the most this effect will apply. A clip needing that much is "
+                   L"not just differently EQ'd; check whether it belongs with the others"
+                 : L", which is the limit you set \u2014 raise \u201CMaximum change\u201D "
                    L"to move them closer";
         msg += L".";
 

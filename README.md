@@ -156,8 +156,10 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   what to match to: **the average of them all** (the default — it moves each clip
   as little as possible and favours none) or one particular clip
   (*Sound like 'take 2'*), when you know which take sounds right. **Maximum
-  change** caps how far any clip may be moved (default 12 dB), **Smoothing**
-  controls how broad the correction curve is, and *Keep each clip's loudness*
+  change** caps how far any clip may be moved (default 12 dB, ceiling 24 — past
+  that an EQ isn't matching tone any more, it's lifting a clip's noise floor into
+  audibility), **Smoothing** controls how broad the correction curve is, and
+  *Keep each clip's loudness*
   makes sure this changes only tone, never level. One undo step for the whole set.
 
   The correction only covers the range speech actually occupies (about
@@ -169,8 +171,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   the two clips that were furthest apart in tone and how far apart they were, then
   the two that are furthest apart *afterwards* — say *7.2 dB apart before, 0.9 dB
   after*. That second number is the one to read. It also says at what frequency
-  the largest correction landed, because *8 dB at 250 Hz* is a mic-distance
-  difference and *8 dB at 40 Hz* is a fan. If it's still a few dB, the EQ
+  the largest correction landed **and which clip needed it** — because *8 dB at
+  250 Hz* is a mic-distance difference and *8 dB at 40 Hz* is a fan, and across
+  two dozen takes that figure is usually one outlier worth going to look at. If it's still a few dB, the EQ
   was held back: raise **Maximum change**, or lower **Smoothing** so the
   correction can follow finer detail. If it's near zero, the clips now measure
   alike, and anything you can still hear is not a tone-colour difference at all —

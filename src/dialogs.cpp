@@ -411,6 +411,23 @@ static double vcReadDouble(HWND edit, double lo, double hi, double fallback) {
     return std::max(lo, std::min(hi, v));
 }
 
+// Read a numeric edit, clamp it, and *put the clamped value back in the box*.
+// Wired to EN_KILLFOCUS so an out-of-range entry visibly corrects itself the
+// moment you leave the field, rather than being silently swallowed on OK.
+//
+// Silent clamping is worse than it sounds: a user who types 100 into a field
+// capped at 24 gets a result reporting "24 dB, which is the limit you set",
+// which is not the limit they set, and no amount of raising the number changes
+// anything. The value they typed is gone and nothing ever said so. Snapping the
+// box is the whole fix -- the range is then visible in the one place they are
+// already looking, and every message about "the limit you set" becomes true.
+static void vcSnapEdit(HWND edit, double lo, double hi, double fallback) {
+    const double v = vcReadDouble(edit, lo, hi, fallback);
+    wchar_t out[64]; swprintf(out, 64, L"%g", v);
+    wchar_t cur[64]{}; GetWindowTextW(edit, cur, 64);
+    if (wcscmp(cur, out) != 0) SetWindowTextW(edit, out);
+}
+
 static void vcUpdateStatus(VCState* st) {
     std::wstring s;
     if (st->ctx->profile && st->ctx->profile->valid())
@@ -746,6 +763,14 @@ static LRESULT CALLBACK TMProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     auto* st = (TMState*)GetWindowLongPtrW(h, GWLP_USERDATA);
     switch (m) {
     case WM_COMMAND:
+        // Snap an out-of-range entry as soon as the field loses focus, so the
+        // limits are discovered by using the dialog rather than by wondering why
+        // the result ignored what was typed. Ranges must match the reads below.
+        if (HIWORD(w) == EN_KILLFOCUS && st) {
+            if ((HWND)l == st->edDb)     vcSnapEdit(st->edDb, 0.0, 24.0, 12.0);
+            if ((HWND)l == st->edSmooth) vcSnapEdit(st->edSmooth, 0.05, 2.0, 0.5);
+            return 0;
+        }
         if (LOWORD(w) == IDCANCEL) { st->ok = false; DestroyWindow(h); return 0; }
         if (LOWORD(w) == IDOK) {
             dsp::TimbreMatchOptions& o = *st->opts;
@@ -781,8 +806,12 @@ bool timbreMatch(HWND parent, TimbreMatchContext& ctx) {
         L"and angle, tone controls, a brighter or duller room. Each clip's average tone colour "
         L"is measured over its speech and gently EQ'd toward a common one. It cannot fix "
         L"differences in reverb, background noise or delivery.";
-    static const wchar_t* kLabels[] = { L"Match to:", L"Maximum change (dB):",
-                                        L"Smoothing (octaves):", L"Level:" };
+    // The ranges are in the labels because these are the two fields people reach
+    // for when a match doesn't sound right, and a cap you can't see is a cap you
+    // fight. 24 dB is the ceiling on purpose: past that a static EQ is no longer
+    // matching a tone colour, it is lifting one clip's noise floor into audibility.
+    static const wchar_t* kLabels[] = { L"Match to:", L"Maximum change (0\u201324 dB):",
+                                        L"Smoothing (0.05\u20132 octaves):", L"Level:" };
     static const wchar_t* kAvg = L"The average of them all";
     static const wchar_t* kCheck = L"Keep each clip's loudness";
 

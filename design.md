@@ -417,9 +417,23 @@ filtered by a curve derived from nothing. Clips of a sample rate other than the
 first one's are skipped — spectra are only comparable bin-for-bin at one rate —
 and the summary box names the count, since a clip missing from the match is
 exactly the one that will still sound different. The box also reports the largest
-correction applied — **and at what frequency**, since "8 dB at 250 Hz" is a mic
-distance and "8 dB at 40 Hz" is a fan — and says so explicitly when the clamp
-bit, so a partial match doesn't read as a broken one.
+correction applied — **at what frequency and to which clip**, since "8 dB at
+250 Hz" is a mic distance and "8 dB at 40 Hz" is a fan, and since across two
+dozen takes the figure is set by a single outlier that the user can go and look
+at — and says so explicitly when the clamp bit, so a partial match doesn't read
+as a broken one. When the clamp that bit is the effect's own 24 dB ceiling rather
+than a lower value the user chose, the message says *that* instead of sending
+them back to a field that cannot go any higher.
+
+**Numeric fields snap to their range on `EN_KILLFOCUS`** (`vcSnapEdit`), and the
+range is written into the label — *"Maximum change (0–24 dB)"*. This came from a
+real report: a user set the limit to 50, then to 100, and got "24 dB, which is
+the limit you set" both times. `vcReadDouble` clamps silently, so the typed value
+vanished with nothing on screen ever mentioning a ceiling, and raising the number
+could not possibly help. Snapping the box makes the cap discoverable by using the
+dialog, and makes every "the limit you set" message true. The ceiling itself
+stays at 24 dB on purpose: beyond that a static EQ is no longer matching a tone
+colour, it is lifting one clip's noise floor into audibility.
 
 **The summary reports the residual, not just the correction.** After filtering,
 every result buffer is profiled a second time and `worstTimbrePair` picks the two
