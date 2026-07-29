@@ -94,9 +94,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   (or **Close the space before this clip** to butt it up against its
   predecessor) — the clips after it move to match either way. Sliding left stops
   when the clip is flush against the one in front; sliding right is unlimited.
-  Shift is live for the whole drag, so you can also press it after you've already
-  started dragging (or let go of it) to switch between a plain move and a ripple;
-  the preview updates as soon as you do.
+  You can press Shift after you've already started dragging and the drag turns
+  into a ripple there and then — and once it has, letting go of Shift won't undo
+  it (press Esc if you want to abandon the drag). The clip you're dragging shows
+  what it's about to do: `move • +0.42 s`, or `ripple • gap 1.35 s • carrying 4
+  clips`.
 - **The view follows the playhead** while the timeline plays, so a long
   arrangement doesn't just run off the right-hand edge. It pages ahead when the
   playhead nears the edge rather than scrolling continuously, which keeps the

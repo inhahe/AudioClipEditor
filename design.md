@@ -618,13 +618,31 @@ up, and the gesture silently degrades into an ordinary move that the next clip
 blocks with a red ghost. The message's flag is captured by the OS when the click
 happened and is always right.
 
-The modifier is also **live for the whole gesture**, not sampled once at the
-press: `onMouseMove` re-reads `MK_SHIFT`, and `setRippleModifier` is called on
-Shift's own `WM_KEYDOWN`/`WM_KEYUP` so it works when the modifier changes while
-the pointer is still. Pressing Shift part-way through a drag turns it into a
-ripple and the ghost re-colours and re-snaps immediately; releasing it turns it
-back. Switching *to* ripple mid-drag pulls the ghost back to the home lane,
-which is the correct and visible consequence of a ripple being lane-locked.
+`shiftHeld(msgFlag)` ORs that flag with `GetAsyncKeyState(VK_SHIFT)`, which reads
+the physical key *now* irrespective of focus or queue state. The two sources fail
+in opposite directions — the message flag is exact for the instant of that click
+or move but blind to a Shift pressed between messages; the async state is blind to
+a Shift that was down at click time but released before the read — so either one
+alone can miss the gesture and the pair does not.
+
+**The flag latches.** Shift at any moment of the drag — the click, any pointer
+move, or Shift's own `WM_KEYDOWN` (which matters when the modifier arrives after
+the drag started and the pointer then stops moving) — calls `latchRippleDrag()`,
+and nothing turns it off again until the drag ends. Releasing Shift does *not*
+revert to a plain move. That asymmetry is deliberate: a ripple is chosen on
+purpose and always succeeds, while the plain move it would fall back to can be
+refused by the next clip on the lane, so a momentary "Shift looks up" — a
+screenshot hotkey, a focus change, a swallowed key event, or simply letting go
+early — would silently turn a working gesture into a blocked one, which is the
+one failure the user cannot see coming. Esc still cancels the whole drag.
+Latching mid-drag pulls the ghost back to the home lane, the visible consequence
+of a ripple being lane-locked.
+
+**The ghost says which gesture it is.** A ripple and a move look alike until they
+land, so the grabbed clip's ghost carries a one-line badge: `move • +0.42 s`, or
+`ripple • gap 1.35 s • carrying 4 clips`. Besides being the readout you want while
+setting a gap by eye, it is the only direct evidence that the modifier was
+received — the previous bug was invisible except as a colour nobody could explain.
 
 The ghost shows **every** carried clip, not just the grabbed one, since the point
 of the gesture is that the tail moves too — `dragCarries(trackId, index)` decides

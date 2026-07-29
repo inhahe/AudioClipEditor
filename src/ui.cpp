@@ -178,6 +178,16 @@ struct App {
     int64_t moveGrabOffset = 0;    // frames from clip start to grab point
     // Shift-drag: the grabbed clip carries every clip after it on the lane, so
     // the gap in front of it changes and none of the gaps behind it do.
+    //
+    // The flag *latches*: any moment of Shift during the gesture -- at the click,
+    // at any pointer move, or at Shift's own key-down -- turns the drag into a
+    // ripple and it stays one until the drag ends. Releasing Shift does not take
+    // it back. A ripple is chosen deliberately and always succeeds, whereas the
+    // plain move it would fall back to can be refused by the next clip on the
+    // lane, so silently un-choosing it on a stray key-up (or on any moment where
+    // the OS reports the key as up -- a screenshot hotkey, a focus change, a
+    // dropped key event) is the one failure the user can't see coming. Esc still
+    // cancels the whole drag if the ripple wasn't wanted.
     bool rippleDrag = false;
     // Where a clip being dragged along a lane would land, and the state machine
     // that decides it. Snapping is directional, so it depends on the path the
@@ -1166,6 +1176,7 @@ struct App {
                 const int ignore = (tid == moveTrackId) ? moveIndex : -1;
                 const Track* tk = doc.project().findTrack(tid);
                 for (auto& tl : trackLays) if (tl.trackId == tid) {
+                    RECT grabbed{};
                     for (int i = moveIndex; i <= last; ++i) {
                         const PlacedClip& pc = home->clips[i];
                         const int64_t start = pc.startFrame + delta;
@@ -1177,7 +1188,27 @@ struct App {
                         const bool ok = rippleDrag || (tk && !tk->overlaps(start, pc.lengthFrames, ignore));
                         drawClipBlock(h, g, doc.project().findClip(pc.clipId),
                                       ok ? col::clipBlkSel : col::stop, col::text);
+                        if (i == moveIndex) grabbed = g;
                     }
+                    // Say what the gesture currently is and what it is doing. A
+                    // ripple and a move look alike until they land, and the whole
+                    // point of the modifier is invisible otherwise -- this is also
+                    // the only feedback that says the Shift was actually received.
+                    const double sec = (double)delta / (rate > 0 ? rate : 48000);
+                    wchar_t buf[128];
+                    if (rippleDrag) {
+                        const double gap = (double)(home->gapBefore(moveIndex) + delta)
+                                         / (rate > 0 ? rate : 48000);
+                        swprintf(buf, 128, L"ripple \u2022 gap %.2f s \u2022 carrying %d clip%s",
+                                 std::max(0.0, gap), last - moveIndex + 1,
+                                 (last - moveIndex + 1) == 1 ? L"" : L"s");
+                    } else {
+                        swprintf(buf, 128, L"move \u2022 %+.2f s", sec);
+                    }
+                    RECT br = { grabbed.left + S(6), grabbed.bottom - S(17),
+                                std::max(grabbed.right, (LONG)(grabbed.left + S(240))) - S(4),
+                                grabbed.bottom - S(3) };
+                    textOut(h, br, buf, col::text, fSmall, DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
                 }
             }
         }
@@ -2119,7 +2150,8 @@ struct App {
             L"    without crossing to leave a gap of any size\n"
             L"  \u2022 Shift+drag a clip to also carry every clip after it on that\n"
             L"    track, so you change one gap and the rest keep their spacing\n"
-            L"    (Shift works mid-drag too \u2014 press or release it as you go)\n"
+            L"    (press Shift after starting the drag and it still counts; the\n"
+            L"    dragged clip says whether it will move or ripple)\n"
             L"  \u2022 Right-click a placed clip to set the space before it exactly,\n"
             L"    or to close it \u2014 later clips move to match, either way\n"
             L"  \u2022 Drag a track's volume slider to change the track level\n"
@@ -2331,6 +2363,19 @@ struct App {
 
     void refresh() { InvalidateRect(hwnd, nullptr, FALSE); }
 
+    // Is Shift down for the purposes of a drag? Two independent sources, because
+    // each can miss on its own: `msgFlag` is the mouse message's own MK_SHIFT
+    // bit, which is exact for the instant that click or move happened but says
+    // nothing about a Shift pressed between messages; GetAsyncKeyState reads the
+    // physical key right now, regardless of focus or of what this thread has
+    // dequeued. GetKeyState is deliberately not used -- it only reflects the
+    // messages already pulled off this thread's queue, so a Shift pressed while
+    // the window wasn't focused reads as up, which is exactly how the gesture
+    // used to fail.
+    static bool shiftHeld(bool msgFlag) {
+        return msgFlag || (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    }
+
     // --------------------------------------------------------- mouse
     void onLDown(POINT p, bool dbl, bool shift) {
         selSaveClipId = selClipId; selSaveStart = selStart; selSaveEnd = selEnd;
@@ -2439,11 +2484,10 @@ struct App {
                 mode = Mode::ClipMove; moveTrackId = pl->trackId; moveIndex = pl->index; dragClipId = pl->clipId;
                 // Shift turns the move into a ripple: the gap in front of this
                 // clip is what you're editing, and everything behind it keeps
-                // its spacing and comes along. The flag comes from the mouse
-                // message's own modifier bits rather than GetKeyState, which
-                // only reports what this thread has already dequeued -- a Shift
-                // pressed while the window was unfocused would be missed.
-                rippleDrag = shift;
+                // its spacing and comes along. See shiftHeld() for why the
+                // modifier is read the way it is, and rippleDrag for why later
+                // moments can still turn this on but nothing turns it off.
+                rippleDrag = shiftHeld(shift);
                 const Track* t=nullptr; for(auto&tt:doc.project().tracks) if(tt.id==pl->trackId)t=&tt;
                 int64_t clipStart = t->clips[pl->index].startFrame;
                 moveGrabOffset = xToFrame(p.x) - clipStart;
@@ -2472,14 +2516,13 @@ struct App {
         return (int64_t)(t * nf);
     }
 
-    // Shift is live for the whole clip-move gesture, not just sampled at the
-    // press: you can decide part-way through that the clips behind should come
-    // along (or that they shouldn't), and the ghost re-colours immediately.
-    // Called from mouse moves and from Shift's own key transitions, so it also
-    // works when the modifier changes while the pointer is still.
-    void setRippleModifier(bool shift) {
-        if (mode != Mode::ClipMove || rippleDrag == shift) return;
-        rippleDrag = shift;
+    // Turn an in-flight clip move into a ripple. Called from the click, from
+    // every pointer move, and from Shift's own key-down, so it catches the
+    // modifier however late it arrives -- including a Shift pressed after the
+    // drag was already under way, when no mouse message may follow.
+    void latchRippleDrag() {
+        if (mode != Mode::ClipMove || rippleDrag) return;
+        rippleDrag = true;
         POINT cp; GetCursorPos(&cp); ScreenToClient(hwnd, &cp);
         updateDragSnap(cp, mode);   // a ripple is lane-locked; re-resolve the ghost
         refresh();
@@ -2487,7 +2530,7 @@ struct App {
 
     void onMouseMove(POINT p, bool shift) {
         if (editorActive()) { edMove(p); return; }
-        if (mode == Mode::ClipMove) rippleDrag = shift;
+        if (mode == Mode::ClipMove && shiftHeld(shift)) latchRippleDrag();
         int oldHot = hotTB;
         hotTB = PtInRect(&rcTransport, p) ? tbAt(p) : -1;
         if (hotTB != oldHot) refresh();
@@ -3129,11 +3172,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                    (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT) != 0);
         return 0;
     case WM_KEYDOWN:
-        if (wp == VK_SHIFT) { a->setRippleModifier(true); return 0; }
+        // Shift pressed after the drag started still turns it into a ripple,
+        // even if the pointer never moves again.
+        if (wp == VK_SHIFT) { a->latchRippleDrag(); return 0; }
         a->onKey(wp); return 0;
-    case WM_KEYUP:
-        if (wp == VK_SHIFT) { a->setRippleModifier(false); return 0; }
-        break;
     case WM_COMMAND: if (HIWORD(wp) == 0 && lp == 0) { a->onCommand(LOWORD(wp)); return 0; } break;
     case WM_TIMER: a->onTimer(); return 0;
     case WM_APP_PLAYEND: a->onPlayEnd(); return 0;
