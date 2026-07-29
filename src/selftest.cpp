@@ -439,6 +439,78 @@ int runSelfTest() {
         DeleteFileW(proj.c_str());
     }
 
+    // What happens to the rest of the project when an effect rewrites a clip's
+    // audio (timbre matching, voice cleaner, remove non-voice -- they all land in
+    // replaceClipBuffers). A clip already placed on a track must follow along: the
+    // placement addresses the clip by id and resolves the buffer when it is used,
+    // so the timeline, the mix and the export all pick up the new audio without
+    // being touched. And the samples themselves have to survive a save, because
+    // the .acep stores audio rather than a recipe for recreating it.
+    {
+        Document d; d.init(rate);
+        std::wstring proj = dir + L"\\_selftest_effect.acep";
+        int id = d.addClip(L"take", makeSine(rate, 0.5, 300.0), L"", L"add");
+        int tid = d.project().tracks.empty() ? d.addTrack() : d.project().tracks[0].id;
+        d.placeClip(tid, id, 1000, L"place");
+        d.saveProject(proj);
+        check(!d.isModified(), L"effect round-trip: clean before the effect");
+
+        // Stand in for an effect: halve the amplitude and shorten the clip, so both
+        // the samples and the length have something to propagate.
+        const Clip* c0 = d.project().findClip(id);
+        double origPeak = 0.0;
+        for (float v : c0->buffer->samples) origPeak = std::max(origPeak, (double)std::fabs(v));
+        auto edited = std::make_shared<AudioBuffer>();
+        edited->sampleRate = c0->buffer->sampleRate;
+        edited->channels = c0->buffer->channels;
+        edited->samples.assign(c0->buffer->samples.begin(),
+                               c0->buffer->samples.begin() + c0->buffer->samples.size() / 2);
+        for (float& v : edited->samples) v *= 0.5f;
+        const int64_t newFrames = edited->frames();
+        d.replaceClipBuffers({ { id, edited } }, L"effect");
+
+        check(d.isModified(), L"effect round-trip: rewriting a clip marks the project dirty");
+        check(d.canUndo() && d.undoDesc() == L"effect",
+              L"effect round-trip: one undo step, named");
+        const Track* t = d.project().findTrack(tid);
+        check(t && t->clips.size() == 1 && t->clips[0].lengthFrames == newFrames,
+              L"effect round-trip: the placement's length follows the new buffer",
+              L"len=" + std::to_wstring(t && !t->clips.empty() ? t->clips[0].lengthFrames : -1));
+        const Clip* c1 = d.project().findClip(id);
+        check(c1 && c1->peaks, L"effect round-trip: the waveform cache is rebuilt");
+        // The mix reads the clip through the placement, so it must be the new audio.
+        AudioBufferPtr mix = d.renderMix();
+        double mixPeak = 0.0;
+        for (int64_t i = 1000; i < 1000 + newFrames; ++i)
+            mixPeak = std::max(mixPeak, (double)std::fabs(mix->samples[(size_t)i * 2]));
+        check(std::fabs(mixPeak - origPeak * 0.5) < origPeak * 0.02,
+              L"effect round-trip: the timeline mix uses the new audio",
+              L"peak=" + std::to_wstring(mixPeak) + L" was=" + std::to_wstring(origPeak));
+        check(mix->frames() == 1000 + newFrames,
+              L"effect round-trip: the arrangement shortens with the clip",
+              L"frames=" + std::to_wstring(mix->frames()));
+
+        check(d.saveProject(proj) && !d.isModified(), L"effect round-trip: clean after saving");
+        Document d2; d2.init(rate);
+        bool ok = d2.loadProject(proj);
+        const Clip* c2 = ok ? d2.project().findClip(id) : nullptr;
+        check(c2 && c2->buffer && c2->buffer->samples == edited->samples,
+              L"effect round-trip: the edited audio survives save + load");
+        const Track* t2 = ok ? d2.project().findTrack(tid) : nullptr;
+        check(t2 && t2->clips.size() == 1 && t2->clips[0].lengthFrames == newFrames &&
+              t2->clips[0].startFrame == 1000,
+              L"effect round-trip: the placement survives save + load");
+
+        // Undo puts the original audio back everywhere, placement included.
+        d.undo();
+        const Clip* c3 = d.project().findClip(id);
+        const Track* t3 = d.project().findTrack(tid);
+        check(c3 && c3->frames() == newFrames * 2 &&
+              t3 && t3->clips[0].lengthFrames == newFrames * 2,
+              L"effect round-trip: undo restores the clip and its placement");
+        DeleteFileW(proj.c_str());
+    }
+
     // Sub-range preview source: the UI arms a BufferSource over [begin,end) and
     // maps clip frames to source frames with (frame - begin), so position() must
     // stay relative to begin and rendering must stop at end.
