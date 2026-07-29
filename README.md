@@ -98,10 +98,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   into a ripple there and then — and once it has, letting go of Shift won't undo
   it (press Esc if you want to abandon the drag). The clip you're dragging shows
   what it's about to do: `move • +0.42 s`, or `ripple • gap 1.35 s • carrying 4
-  clips`. If you're doing a lot of this — or if Shift doesn't reach the app,
-  which happens when a keyboard remapper or macro tool intercepts it — tick
-  **Timeline ▸ Ripple drag** and every clip drag carries the later clips with no
-  modifier at all; Shift then means "just this one clip".
+  clips` — and an ordinary drag reminds you the other gesture is there. If you're
+  doing a lot of this, tick **Timeline ▸ Ripple drag** and every clip drag carries
+  the later clips with no modifier at all; Shift then means "just this one clip".
 - **The view follows the playhead** while the timeline plays, so a long
   arrangement doesn't just run off the right-hand edge. It pages ahead when the
   playhead nears the edge rather than scrolling continuously, which keeps the

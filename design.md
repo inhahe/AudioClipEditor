@@ -638,18 +638,25 @@ working gesture into a blocked one, which is the one failure the user cannot see
 coming. Esc still cancels the whole drag. Latching mid-drag pulls the ghost back
 to the home lane, the visible consequence of a ripple being lane-locked.
 
-**`Timeline ▸ Ripple drag` is the modifier-free way in.** `rippleMode` is a
-standing, session-scoped preference and `rippleDrag == rippleMode != rippleShift`
-— so Shift *inverts* the mode rather than forcing ripple on, and is an escape
-hatch in both directions. Two reasons this exists rather than Shift alone. It is
-what you want when a whole session is spacing work, and — the reason it was
-added — a gesture that can only be reached through a modifier has no fallback at
-all when the modifier never arrives. Shift can be swallowed before any process
-sees it (a low-level keyboard hook from a remapper or macro tool, an
-accessibility setting, a dead key), and then neither `MK_SHIFT` nor
-`GetAsyncKeyState` reports it and there is nothing the app can do. A gesture
-whose only trigger is a modifier is one hook away from being unreachable; a menu
-item never is.
+**Discoverability is the hard part of this feature, not the arithmetic.** The
+ripple was reported as broken twice, and both reports turned out to be the same
+thing: a modifier is invisible. Nothing on screen said the gesture existed, so
+the drag did what a drag does, hit the next clip, and went red — behaviour that
+looks exactly like a bug when you don't know the other mode is there. The
+arithmetic had been right the whole time. Two answers, both of which put the
+gesture somewhere it can be *seen*:
+
+- **`Timeline ▸ Ripple drag`** — `rippleMode`, a standing, session-scoped
+  preference, with `rippleDrag == rippleMode != rippleShift`, so Shift *inverts*
+  the mode rather than forcing ripple on and stays an escape hatch in both
+  directions. A menu item is a feature you can find by looking; it is also what
+  you want when a whole session is spacing work, and it gives the gesture a route
+  that does not depend on the keyboard at all.
+- **The plain-move badge names the other gesture**: `move • +0.42 s • Shift:
+  carry the later clips too`, dropped once Shift has been used in that drag,
+  since by then it is known. A hint costs nothing at the one instant the reader
+  is certainly looking at the clip and thinking about where it goes — which is
+  worth more than any amount of it being written in the Controls dialog.
 
 **The ghost says which gesture it is.** A ripple and a move look alike until they
 land, so the grabbed clip's ghost carries a one-line badge: `move • +0.42 s`, or

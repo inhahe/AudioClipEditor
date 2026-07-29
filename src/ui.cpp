@@ -1211,10 +1211,18 @@ struct App {
                                  std::max(0.0, gap), last - moveIndex + 1,
                                  (last - moveIndex + 1) == 1 ? L"" : L"s");
                     } else {
-                        swprintf(buf, 128, L"move \u2022 %+.2f s", sec);
+                        // The plain move says what the *other* gesture is, because
+                        // a modifier nobody mentions is a feature nobody finds --
+                        // and this is the one instant the reader is certain to be
+                        // looking at the clip and thinking about where it goes.
+                        // Dropped once Shift has been used: by then it's known.
+                        swprintf(buf, 128, L"move \u2022 %+.2f s%s", sec,
+                                 rippleShift ? L"" : L"   \u2022   Shift: carry the later clips too");
                     }
+                    // Wide enough for the longest badge even when the clip is a
+                    // sliver: the hint is worth more than staying inside the block.
                     RECT br = { grabbed.left + S(6), grabbed.bottom - S(17),
-                                std::max(grabbed.right, (LONG)(grabbed.left + S(240))) - S(4),
+                                std::max(grabbed.right, (LONG)(grabbed.left + S(400))) - S(4),
                                 grabbed.bottom - S(3) };
                     textOut(h, br, buf, col::text, fSmall, DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
                 }
