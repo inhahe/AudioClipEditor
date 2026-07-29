@@ -609,6 +609,23 @@ all following from what a ripple *is*:
   so `dragMinStart()` clamps the ghost flush against the clip in front instead,
   matching `Track::ripple`'s own clamp.
 
+**Where the Shift comes from, and when it is read.** `rippleDrag` is set from the
+mouse message's own `MK_SHIFT` bit (`GET_KEYSTATE_WPARAM(wp)`), never from
+`GetKeyState`. `GetKeyState` reports only the key state *this thread has already
+dequeued*, so a Shift that went down while the window did not have focus — the
+common case, since you reach for the modifier on the way to clicking — reads as
+up, and the gesture silently degrades into an ordinary move that the next clip
+blocks with a red ghost. The message's flag is captured by the OS when the click
+happened and is always right.
+
+The modifier is also **live for the whole gesture**, not sampled once at the
+press: `onMouseMove` re-reads `MK_SHIFT`, and `setRippleModifier` is called on
+Shift's own `WM_KEYDOWN`/`WM_KEYUP` so it works when the modifier changes while
+the pointer is still. Pressing Shift part-way through a drag turns it into a
+ripple and the ghost re-colours and re-snaps immediately; releasing it turns it
+back. Switching *to* ripple mid-drag pulls the ghost back to the home lane,
+which is the correct and visible consequence of a ripple being lane-locked.
+
 The ghost shows **every** carried clip, not just the grabbed one, since the point
 of the gesture is that the tail moves too — `dragCarries(trackId, index)` decides
 membership for both the ghosts and the faint home-slot outlines, so the two can't

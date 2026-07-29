@@ -2119,6 +2119,7 @@ struct App {
             L"    without crossing to leave a gap of any size\n"
             L"  \u2022 Shift+drag a clip to also carry every clip after it on that\n"
             L"    track, so you change one gap and the rest keep their spacing\n"
+            L"    (Shift works mid-drag too \u2014 press or release it as you go)\n"
             L"  \u2022 Right-click a placed clip to set the space before it exactly,\n"
             L"    or to close it \u2014 later clips move to match, either way\n"
             L"  \u2022 Drag a track's volume slider to change the track level\n"
@@ -2331,7 +2332,7 @@ struct App {
     void refresh() { InvalidateRect(hwnd, nullptr, FALSE); }
 
     // --------------------------------------------------------- mouse
-    void onLDown(POINT p, bool dbl) {
+    void onLDown(POINT p, bool dbl, bool shift) {
         selSaveClipId = selClipId; selSaveStart = selStart; selSaveEnd = selEnd;
         if (editorActive()) { edDown(p, dbl); return; }
         SetFocus(hwnd);
@@ -2438,8 +2439,11 @@ struct App {
                 mode = Mode::ClipMove; moveTrackId = pl->trackId; moveIndex = pl->index; dragClipId = pl->clipId;
                 // Shift turns the move into a ripple: the gap in front of this
                 // clip is what you're editing, and everything behind it keeps
-                // its spacing and comes along.
-                rippleDrag = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                // its spacing and comes along. The flag comes from the mouse
+                // message's own modifier bits rather than GetKeyState, which
+                // only reports what this thread has already dequeued -- a Shift
+                // pressed while the window was unfocused would be missed.
+                rippleDrag = shift;
                 const Track* t=nullptr; for(auto&tt:doc.project().tracks) if(tt.id==pl->trackId)t=&tt;
                 int64_t clipStart = t->clips[pl->index].startFrame;
                 moveGrabOffset = xToFrame(p.x) - clipStart;
@@ -2468,8 +2472,22 @@ struct App {
         return (int64_t)(t * nf);
     }
 
-    void onMouseMove(POINT p) {
+    // Shift is live for the whole clip-move gesture, not just sampled at the
+    // press: you can decide part-way through that the clips behind should come
+    // along (or that they shouldn't), and the ghost re-colours immediately.
+    // Called from mouse moves and from Shift's own key transitions, so it also
+    // works when the modifier changes while the pointer is still.
+    void setRippleModifier(bool shift) {
+        if (mode != Mode::ClipMove || rippleDrag == shift) return;
+        rippleDrag = shift;
+        POINT cp; GetCursorPos(&cp); ScreenToClient(hwnd, &cp);
+        updateDragSnap(cp, mode);   // a ripple is lane-locked; re-resolve the ghost
+        refresh();
+    }
+
+    void onMouseMove(POINT p, bool shift) {
         if (editorActive()) { edMove(p); return; }
+        if (mode == Mode::ClipMove) rippleDrag = shift;
         int oldHot = hotTB;
         hotTB = PtInRect(&rcTransport, p) ? tbAt(p) : -1;
         if (hotTB != oldHot) refresh();
@@ -3093,9 +3111,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (a->overCardDragHandle(cp)) { SetCursor(LoadCursor(nullptr, IDC_SIZEALL)); return TRUE; }
         }
         break;
-    case WM_LBUTTONDOWN: a->onLDown({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }, false); return 0;
-    case WM_LBUTTONDBLCLK: a->onLDown({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }, true); return 0;
-    case WM_MOUSEMOVE: a->onMouseMove({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }); return 0;
+    // The modifier state comes from the message itself (MK_SHIFT), not from
+    // GetKeyState: the latter is only synchronised with the messages this
+    // thread has already pulled off its queue, so a Shift held down before the
+    // window had focus can read as up.
+    case WM_LBUTTONDOWN: a->onLDown({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }, false,
+                                    (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT) != 0); return 0;
+    case WM_LBUTTONDBLCLK: a->onLDown({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }, true,
+                                      (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT) != 0); return 0;
+    case WM_MOUSEMOVE: a->onMouseMove({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) },
+                                      (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT) != 0); return 0;
     case WM_LBUTTONUP: a->onLUp({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }); return 0;
     case WM_RBUTTONDOWN: a->onRDown({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }); return 0;
     case WM_MOUSEWHEEL:
@@ -3103,7 +3128,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                    (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) != 0,
                    (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT) != 0);
         return 0;
-    case WM_KEYDOWN: a->onKey(wp); return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_SHIFT) { a->setRippleModifier(true); return 0; }
+        a->onKey(wp); return 0;
+    case WM_KEYUP:
+        if (wp == VK_SHIFT) { a->setRippleModifier(false); return 0; }
+        break;
     case WM_COMMAND: if (HIWORD(wp) == 0 && lp == 0) { a->onCommand(LOWORD(wp)); return 0; } break;
     case WM_TIMER: a->onTimer(); return 0;
     case WM_APP_PLAYEND: a->onPlayEnd(); return 0;
