@@ -71,7 +71,7 @@ enum {
 enum {
     IDC_ADDFILES = 1000, IDC_OPENPROJ, IDC_SAVEPROJ, IDC_SAVEPROJAS,
     IDC_EXPORTMIX, IDC_EXIT,
-    IDC_UNDO, IDC_REDO, IDC_ADDTRACK, IDC_CONTROLS
+    IDC_UNDO, IDC_REDO, IDC_ADDTRACK, IDC_CONTROLS, IDC_RIPPLEMODE
 };
 
 struct CardLayout { int clipId; RECT card, top, play, del, wave, vol, crop, savesel; };
@@ -176,19 +176,27 @@ struct App {
     int volTrackId = -1;           // TrackVolume drag target
     int moveTrackId = -1, moveIndex = -1;
     int64_t moveGrabOffset = 0;    // frames from clip start to grab point
-    // Shift-drag: the grabbed clip carries every clip after it on the lane, so
-    // the gap in front of it changes and none of the gaps behind it do.
+    // Ripple: the grabbed clip carries every clip after it on the lane, so the
+    // gap in front of it changes and none of the gaps behind it do.
     //
-    // The flag *latches*: any moment of Shift during the gesture -- at the click,
-    // at any pointer move, or at Shift's own key-down -- turns the drag into a
-    // ripple and it stays one until the drag ends. Releasing Shift does not take
-    // it back. A ripple is chosen deliberately and always succeeds, whereas the
-    // plain move it would fall back to can be refused by the next clip on the
-    // lane, so silently un-choosing it on a stray key-up (or on any moment where
-    // the OS reports the key as up -- a screenshot hotkey, a focus change, a
-    // dropped key event) is the one failure the user can't see coming. Esc still
-    // cancels the whole drag if the ripple wasn't wanted.
-    bool rippleDrag = false;
+    // Two ways to ask for it. `rippleMode` (Timeline menu) is the standing
+    // choice — every clip drag ripples until you turn it off — and exists
+    // because a gesture that depends on a modifier is unusable if the modifier
+    // never arrives: a keyboard remapper or low-level hook that swallows Shift,
+    // or an accessibility setting, leaves the user with no way in at all. It is
+    // also simply what you want when a whole editing session is spacing work.
+    // Shift is the per-drag override, and it *inverts* the mode rather than
+    // forcing ripple on, so it is the escape hatch in both directions.
+    //
+    // Whichever Shift asks for *latches*: seen at the click, at any pointer
+    // move, or at Shift's own key-down, it applies for the rest of the gesture
+    // and a later "Shift looks up" never takes it back. A momentary dropped key
+    // — a screenshot hotkey, a focus change, letting go early — would otherwise
+    // silently turn a ripple, which always succeeds, into a plain move, which
+    // the next clip on the lane can refuse. Esc still cancels the whole drag.
+    bool rippleMode = false;      // standing preference (session-scoped)
+    bool rippleShift = false;     // Shift seen during this drag (latched)
+    bool rippleDrag = false;      // == rippleMode != rippleShift, for this drag
     // Where a clip being dragged along a lane would land, and the state machine
     // that decides it. Snapping is directional, so it depends on the path the
     // pointer took and not just on where it is now -- which is why the result is
@@ -2152,6 +2160,8 @@ struct App {
             L"    track, so you change one gap and the rest keep their spacing\n"
             L"    (press Shift after starting the drag and it still counts; the\n"
             L"    dragged clip says whether it will move or ripple)\n"
+            L"  \u2022 Timeline \u25B8 Ripple drag makes that the standing behaviour, so\n"
+            L"    no modifier is needed \u2014 Shift then means \"just this clip\"\n"
             L"  \u2022 Right-click a placed clip to set the space before it exactly,\n"
             L"    or to close it \u2014 later clips move to match, either way\n"
             L"  \u2022 Drag a track's volume slider to change the track level\n"
@@ -2482,12 +2492,10 @@ struct App {
             const PlacedLayout* pl = placedAt(p);
             if (pl) {
                 mode = Mode::ClipMove; moveTrackId = pl->trackId; moveIndex = pl->index; dragClipId = pl->clipId;
-                // Shift turns the move into a ripple: the gap in front of this
-                // clip is what you're editing, and everything behind it keeps
-                // its spacing and comes along. See shiftHeld() for why the
-                // modifier is read the way it is, and rippleDrag for why later
-                // moments can still turn this on but nothing turns it off.
-                rippleDrag = shiftHeld(shift);
+                // Ripple or plain move? See the rippleDrag declaration for the
+                // mode/modifier rule and shiftHeld() for how Shift is read.
+                rippleShift = shiftHeld(shift);
+                rippleDrag = rippleMode != rippleShift;
                 const Track* t=nullptr; for(auto&tt:doc.project().tracks) if(tt.id==pl->trackId)t=&tt;
                 int64_t clipStart = t->clips[pl->index].startFrame;
                 moveGrabOffset = xToFrame(p.x) - clipStart;
@@ -2516,13 +2524,14 @@ struct App {
         return (int64_t)(t * nf);
     }
 
-    // Turn an in-flight clip move into a ripple. Called from the click, from
-    // every pointer move, and from Shift's own key-down, so it catches the
-    // modifier however late it arrives -- including a Shift pressed after the
-    // drag was already under way, when no mouse message may follow.
-    void latchRippleDrag() {
-        if (mode != Mode::ClipMove || rippleDrag) return;
-        rippleDrag = true;
+    // Apply Shift to the clip move already in flight. Called from every pointer
+    // move and from Shift's own key-down, so it catches the modifier however
+    // late it arrives -- including a Shift pressed after the drag was under way,
+    // when no mouse message may follow.
+    void latchRippleShift() {
+        if (mode != Mode::ClipMove || rippleShift) return;
+        rippleShift = true;
+        rippleDrag = !rippleMode;
         POINT cp; GetCursorPos(&cp); ScreenToClient(hwnd, &cp);
         updateDragSnap(cp, mode);   // a ripple is lane-locked; re-resolve the ghost
         refresh();
@@ -2530,7 +2539,7 @@ struct App {
 
     void onMouseMove(POINT p, bool shift) {
         if (editorActive()) { edMove(p); return; }
-        if (mode == Mode::ClipMove && shiftHeld(shift)) latchRippleDrag();
+        if (mode == Mode::ClipMove && shiftHeld(shift)) latchRippleShift();
         int oldHot = hotTB;
         hotTB = PtInRect(&rcTransport, p) ? tbAt(p) : -1;
         if (hotTB != oldHot) refresh();
@@ -2649,7 +2658,7 @@ struct App {
                 }
                 afterPlaceRefresh();
             }
-            rippleDrag = false;
+            rippleDrag = rippleShift = false;
         } else if (m == Mode::ClipVolume) {
             doc.commitEdit(L"Set clip volume"); refresh();
         } else if (m == Mode::TrackVolume) {
@@ -2951,6 +2960,11 @@ struct App {
         AppendMenuW(track, MF_STRING, IDC_ADDTRACK, L"Add Track");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)track, L"Track");
 
+        HMENU timeline = CreatePopupMenu();
+        AppendMenuW(timeline, MF_STRING | (rippleMode ? MF_CHECKED : 0), IDC_RIPPLEMODE,
+                    L"Ripple drag: a clip carries the later ones\tShift");
+        AppendMenuW(bar, MF_POPUP, (UINT_PTR)timeline, L"Timeline");
+
         HMENU help = CreatePopupMenu();
         AppendMenuW(help, MF_STRING, IDC_CONTROLS, L"Controls\u2026");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)help, L"Help");
@@ -2970,6 +2984,12 @@ struct App {
         case IDC_REDO: doRedo(); break;
         case IDC_ADDTRACK: addTrackAndReveal(); break;
         case IDC_CONTROLS: showControls(); break;
+        case IDC_RIPPLEMODE:
+            rippleMode = !rippleMode;
+            CheckMenuItem(GetMenu(hwnd), IDC_RIPPLEMODE,
+                          MF_BYCOMMAND | (rippleMode ? MF_CHECKED : MF_UNCHECKED));
+            refresh();
+            break;
         }
     }
 
@@ -2992,7 +3012,7 @@ struct App {
             // cancelling has to undo that too, not just skip the drop.
             if (mode != Mode::WaveSelect && mode != Mode::CardDrag && mode != Mode::ClipMove)
                 return false;
-            mode = Mode::None; waveEdgeDrag = false; rippleDrag = false;
+            mode = Mode::None; waveEdgeDrag = false; rippleDrag = rippleShift = false;
         }
         selClipId = selSaveClipId; selStart = selSaveStart; selEnd = selSaveEnd;
         if (GetCapture() == hwnd) ReleaseCapture();
@@ -3172,9 +3192,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                    (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT) != 0);
         return 0;
     case WM_KEYDOWN:
-        // Shift pressed after the drag started still turns it into a ripple,
-        // even if the pointer never moves again.
-        if (wp == VK_SHIFT) { a->latchRippleDrag(); return 0; }
+        // Shift pressed after the drag started still counts, even if the
+        // pointer never moves again.
+        if (wp == VK_SHIFT) { a->latchRippleShift(); return 0; }
         a->onKey(wp); return 0;
     case WM_COMMAND: if (HIWORD(wp) == 0 && lp == 0) { a->onCommand(LOWORD(wp)); return 0; } break;
     case WM_TIMER: a->onTimer(); return 0;

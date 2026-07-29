@@ -585,15 +585,16 @@ keeps it behind the prefix, **it cannot reorder or overlap anything**, so unlike
 delta actually applied; `Document::rippleClips` commits an undo step only when
 that is non-zero, so a drag that lands back where it started leaves no history.
 
-Three ways in, all funnelling into `rippleClips`:
+Four ways in, all funnelling into `rippleClips`:
 
 | Gesture | Delta |
 |---|---|
 | **Shift+drag** a placed clip | wherever the drag ends up, minus where the clip started |
+| Drag a placed clip with **Timeline ▸ Ripple drag** ticked | same, no modifier needed |
 | Right-click → **Space before this clip…** | requested gap (typed in seconds) minus the current one |
 | Right-click → **Close the space before this clip** | `-gapBefore(index)` (the clamp does the work) |
 
-Shift+drag reuses the whole `Mode::ClipMove` machinery, with three differences,
+A ripple drag reuses the whole `Mode::ClipMove` machinery, with three differences,
 all following from what a ripple *is*:
 
 - **It stays on its lane.** A ripple is defined by one track's ordering ("this
@@ -625,18 +626,30 @@ or move but blind to a Shift pressed between messages; the async state is blind 
 a Shift that was down at click time but released before the read — so either one
 alone can miss the gesture and the pair does not.
 
-**The flag latches.** Shift at any moment of the drag — the click, any pointer
-move, or Shift's own `WM_KEYDOWN` (which matters when the modifier arrives after
-the drag started and the pointer then stops moving) — calls `latchRippleDrag()`,
-and nothing turns it off again until the drag ends. Releasing Shift does *not*
-revert to a plain move. That asymmetry is deliberate: a ripple is chosen on
-purpose and always succeeds, while the plain move it would fall back to can be
-refused by the next clip on the lane, so a momentary "Shift looks up" — a
-screenshot hotkey, a focus change, a swallowed key event, or simply letting go
-early — would silently turn a working gesture into a blocked one, which is the
-one failure the user cannot see coming. Esc still cancels the whole drag.
-Latching mid-drag pulls the ghost back to the home lane, the visible consequence
-of a ripple being lane-locked.
+**Shift latches.** Shift at any moment of the drag — the click, any pointer move,
+or Shift's own `WM_KEYDOWN` (which matters when the modifier arrives after the
+drag started and the pointer then stops moving) — calls `latchRippleShift()`, and
+nothing turns it off again until the drag ends. Releasing Shift does *not* revert
+the drag. That asymmetry is deliberate: a ripple is chosen on purpose and always
+succeeds, while the plain move it would fall back to can be refused by the next
+clip on the lane, so a momentary "Shift looks up" — a screenshot hotkey, a focus
+change, a swallowed key event, or simply letting go early — would silently turn a
+working gesture into a blocked one, which is the one failure the user cannot see
+coming. Esc still cancels the whole drag. Latching mid-drag pulls the ghost back
+to the home lane, the visible consequence of a ripple being lane-locked.
+
+**`Timeline ▸ Ripple drag` is the modifier-free way in.** `rippleMode` is a
+standing, session-scoped preference and `rippleDrag == rippleMode != rippleShift`
+— so Shift *inverts* the mode rather than forcing ripple on, and is an escape
+hatch in both directions. Two reasons this exists rather than Shift alone. It is
+what you want when a whole session is spacing work, and — the reason it was
+added — a gesture that can only be reached through a modifier has no fallback at
+all when the modifier never arrives. Shift can be swallowed before any process
+sees it (a low-level keyboard hook from a remapper or macro tool, an
+accessibility setting, a dead key), and then neither `MK_SHIFT` nor
+`GetAsyncKeyState` reports it and there is nothing the app can do. A gesture
+whose only trigger is a modifier is one hook away from being unreachable; a menu
+item never is.
 
 **The ghost says which gesture it is.** A ripple and a move look alike until they
 land, so the grabbed clip's ghost carries a one-line badge: `move • +0.42 s`, or
