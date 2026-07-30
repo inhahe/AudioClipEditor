@@ -69,7 +69,7 @@ enum {
 
 // Menu bar command ids
 enum {
-    IDC_ADDFILES = 1000, IDC_OPENPROJ, IDC_SAVEPROJ, IDC_SAVEPROJAS,
+    IDC_ADDFILES = 1000, IDC_NEWPROJ, IDC_OPENPROJ, IDC_SAVEPROJ, IDC_SAVEPROJAS,
     IDC_EXPORTMIX, IDC_EXIT,
     IDC_UNDO, IDC_REDO, IDC_ADDTRACK, IDC_CONTROLS, IDC_RIPPLEMODE
 };
@@ -91,6 +91,10 @@ struct App {
     Document doc;
     PlaybackEngine engine;
     int rate = 48000;
+    // The rate the project would run at with nothing loaded (device rate, floored
+    // at 48 kHz). `rate` follows whatever project is open, so New Project needs
+    // this to get back to where startup would have put it.
+    int nativeRate = 48000;
     float sc = 1.0f;               // dpi scale
     HFONT fNorm=0, fSmall=0, fBold=0, fBig=0;
 
@@ -2107,6 +2111,45 @@ struct App {
         if (projectModified()) t += L" *";
         SetWindowTextW(hwnd, t.c_str());
     }
+    // Start over with an empty project. There is no separate "close project"
+    // because this app has no documentless state -- the library and timeline are
+    // the window, and closing a project can only ever mean being left in front of
+    // an empty one, which is exactly what this does.
+    void newProject() {
+        if (!confirmDiscardChanges()) return;
+        stopAll();
+        closeClipEditor();
+        cancelDrag();
+        // Back to the device's rate. A project loaded earlier may have pulled the
+        // engine to a rate of its own, and an empty project has no reason to keep
+        // it -- the next file added should be decoded at the native rate, as it
+        // would have been at startup.
+        rate = nativeRate;
+        engine.setSourceRate(rate);
+        doc.init(rate);
+        projectPath.clear();
+        // Every one of these referred to a clip in the project that just went
+        // away, so they have to go with it or they name something that no longer
+        // exists. Session *preferences* (effect options, ripple mode) deliberately
+        // survive: they are about how the user works, not about this project.
+        previewClipId = -1; previewIsSel = false; previewSeekPending = false;
+        previewCursor = previewBegin = previewEnd = 0;
+        timelinePlaying = false; playheadFrame = 0;
+        selClipId = -1; selStart = selEnd = 0;
+        selSaveClipId = -1; selSaveStart = selSaveEnd = 0;
+        hotSelClip = -1; hotSelBtn = 0;
+        libScroll = tlScrollX = tlScrollY = 0;
+        followPlayhead = true;
+        // The reference clip and the noise captures are named after clips from the
+        // old project; keeping them would offer the user a menu of things that are
+        // no longer there.
+        tmReference.clear();
+        noiseProfile = dsp::NoiseProfile{};
+        noiseProfileDesc.clear();
+        noiseCaptures.clear();
+        resetSelHistory();
+        setTitle(); clampScroll(); refresh();
+    }
     void openProjectFile() {
         if (!confirmDiscardChanges()) return;
         std::wstring path = dlg::openProject(hwnd);
@@ -3033,6 +3076,8 @@ struct App {
     void buildMenu() {
         HMENU bar = CreateMenu();
         HMENU file = CreatePopupMenu();
+        AppendMenuW(file, MF_STRING, IDC_NEWPROJ, L"New Project\tCtrl+N");
+        AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(file, MF_STRING, IDC_ADDFILES, L"Add Files\u2026\tCtrl+O");
         AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(file, MF_STRING, IDC_OPENPROJ, L"Open Project\u2026");
@@ -3068,6 +3113,7 @@ struct App {
     void onCommand(int id) {
         switch (id) {
         case IDC_ADDFILES: addFiles(); break;
+        case IDC_NEWPROJ: newProject(); break;
         case IDC_OPENPROJ: openProjectFile(); break;
         case IDC_SAVEPROJ: saveProjectFile(); break;
         case IDC_SAVEPROJAS: saveProjectAs(); break;
@@ -3137,6 +3183,7 @@ struct App {
         if (ctrl && (k == 'Y')) { doRedo(); return; }
         if (ctrl && (k == 'S')) { saveProjectFile(); return; }
         if (ctrl && (k == 'O')) { addFiles(); return; }
+        if (ctrl && (k == 'N')) { newProject(); return; }
         if (k == VK_SPACE) {
             if (previewClipId >= 0 && !timelinePlaying) togglePlayClip(previewClipId);
             else playAll();
@@ -3342,6 +3389,7 @@ int runApp(HINSTANCE hInst, int nCmdShow) {
     // rate on load, so clips of any rate/bit depth are unified into the project.
     int devRate = app.engine.sampleRate() > 0 ? app.engine.sampleRate() : 48000;
     app.rate = std::max(48000, devRate);
+    app.nativeRate = app.rate;
     app.engine.setSourceRate(app.rate);
     app.doc.init(app.rate);
 

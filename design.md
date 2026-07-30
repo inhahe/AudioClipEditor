@@ -1357,5 +1357,29 @@ redoing away re-sets it — no separate dirty bit to keep in sync with the histo
 in the title bar while
 modified (refreshed from `onTimer` when the flag flips) and calls
 `App::confirmDiscardChanges()` — a Yes/No/Cancel *"Save changes…?"* box — before
-any project-discarding action (`WM_CLOSE`/exit, opening another project). Cancel
-aborts the action; Yes proceeds only if the save actually succeeds.
+any project-discarding action (`WM_CLOSE`/exit, `newProject`, opening another
+project). Cancel aborts the action; Yes proceeds only if the save actually
+succeeds.
+
+### New Project (`App::newProject`, `IDC_NEWPROJ`, Ctrl+N)
+
+`Document::init` does the document half — fresh `Project` with one empty track,
+`undo_.init` so the old history is unreachable (undoing into the discarded project
+would resurrect clips the user just threw away), and `markSaved` so a new project
+doesn't start dirty. The UI half is everything in `App` that *pointed into* the
+old project and would otherwise name something that no longer exists: preview and
+playback state, both selections and the selection-save, the hover ids, scroll
+offsets, the clip-editor overlay, any drag in progress, `tmReference`, and the
+noise captures. Session **preferences** deliberately survive — effect options,
+ripple mode — because they describe how the user works rather than this project.
+
+`rate` is restored from `App::nativeRate` (the device rate, floored at 48 kHz,
+captured at startup). `rate` follows whatever project is open, so without that a
+new project would silently inherit the sample rate of a 44.1 kHz project loaded
+earlier and decode every subsequent import at it.
+
+**There is deliberately no separate "Close Project".** The app has no
+documentless state — the library and timeline *are* the window — so closing a
+project could only ever mean being left in front of an empty one, which is what
+New Project already does. A second menu item doing the same thing would suggest a
+difference that doesn't exist.

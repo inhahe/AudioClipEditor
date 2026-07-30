@@ -219,10 +219,17 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   changing one counts as an unsaved change — you get the `*` and the usual save
   prompt on exit, and never lose a carefully-placed selection by accident. (The
   playhead is saved but doesn't flag the project, since it moves on its own
-  during playback.) `Ctrl+S` saves; the File menu has Open / Save / Save As. The
-  title bar shows a `*` while there are unsaved changes, and the app **prompts you
-  to save** (Save / Don't Save / Cancel) before closing or opening another project
-  if the current one has unsaved edits — so you never lose work by accident.
+  during playback.) `Ctrl+S` saves; the File menu has New / Open / Save / Save As.
+  The title bar shows a `*` while there are unsaved changes, and the app **prompts
+  you to save** (Save / Don't Save / Cancel) before closing or opening another
+  project if the current one has unsaved edits — so you never lose work by accident.
+- **Start over — `Ctrl+N` or File ▸ New Project.** Empties the library and the
+  timeline back to a single empty track, forgets the current filename, and asks to
+  save first if there's anything unsaved. Your effect settings (voice cleaner,
+  timbre matching, ripple mode) carry over, since those describe how you work
+  rather than what you were working on. There's no separate *Close Project*: this
+  app is always showing a project, so closing one can only mean being left in
+  front of an empty one — which is exactly what New does.
 - **Export a single clip, or just the selection.** Right-click a clip card →
   *Export clip to file…* or *Export selection to file…*, which opens the same
   audio dialog as the mixdown. Edits live in the project file and the original
@@ -303,6 +310,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Play all tracks | **▶ Play All** (`Space` when nothing is being previewed) |
 | Stop | **■ Stop** |
 | Undo / Redo | `Ctrl+Z` / `Ctrl+Shift+Z` (or the toolbar buttons) |
+| New project | `Ctrl+N` (File ▸ New Project) |
 | Add files / Save project | `Ctrl+O` / `Ctrl+S` |
 | Open / Save / Export | **File** menu |
 | Scroll library | mouse wheel over the clip area |

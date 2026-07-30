@@ -511,6 +511,39 @@ int runSelfTest() {
         DeleteFileW(proj.c_str());
     }
 
+    // New Project: init() on a Document that already has content has to leave it
+    // indistinguishable from startup, or "new" hands you a project that is already
+    // dirty, still has the old undo history behind it, or has quietly inherited
+    // the sample rate of whatever was loaded before.
+    {
+        Document d; d.init(rate);
+        int id = d.addClip(L"old", makeSine(rate, 0.5, 300.0), L"", L"add");
+        int tid = d.project().tracks.empty() ? d.addTrack() : d.project().tracks[0].id;
+        d.placeClip(tid, id, 1000, L"place");
+        d.addTrack();
+        d.view().playheadFrame = 12345;
+        d.view().selClipId = id;
+        check(d.isModified() && d.canUndo(), L"new project: the old project is dirty first");
+
+        d.init(rate);
+        check(d.project().library.empty(), L"new project: the library is emptied");
+        check(d.project().tracks.size() == 1 && d.project().tracks[0].clips.empty(),
+              L"new project: one empty track, as at startup",
+              std::to_wstring(d.project().tracks.size()));
+        check(d.project().sampleRate == rate, L"new project: runs at the rate it was given");
+        check(!d.isModified(), L"new project: starts clean, so exiting won't prompt");
+        // The old history must not be reachable: undoing into the previous project
+        // would resurrect clips the user just discarded.
+        check(!d.canUndo() && !d.canRedo(), L"new project: no undo history carried over");
+        check(d.view().playheadFrame == 0 && d.view().selClipId == -1,
+              L"new project: playhead and selection reset");
+        // A rate other than the previous one must actually take effect -- the
+        // engine follows project().sampleRate, so a stale value plays back wrong.
+        d.init(44100);
+        check(d.project().sampleRate == 44100 && !d.isModified(),
+              L"new project: a different sample rate takes effect and stays clean");
+    }
+
     // Gaps between clips on a track are pure arrangement -- no audio changes --
     // which makes them the easiest kind of edit to lose: if rippleClips forgot to
     // commit, the project would look edited but never ask to be saved, and the
