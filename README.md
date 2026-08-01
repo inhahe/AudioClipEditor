@@ -121,6 +121,10 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   went to look at something on purpose); pressing play again, or clicking to move
   the playhead, re-arms it.
 - **Prominent Play All** button plays every track together from the playhead.
+  Playback always reflects the arrangement as it stands: silence between clips is
+  played as silence, an edit made while it's running is heard straight away, and
+  pausing, rearranging and then playing again picks up the new arrangement rather
+  than the one you paused.
 - **Per-clip and per-track volume.** Every card and every track header has a
   volume slider (0–200%). Gain is applied live to preview, timeline mixing, and
   export, and each change is a single undo step.

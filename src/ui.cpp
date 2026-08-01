@@ -141,6 +141,9 @@ struct App {
     bool previewSeekPending = false;  // cursor moved while not playing; re-arm on resume
     bool timelinePlaying = false;
     int64_t playheadFrame = 0;
+    // Which arrangement the engine's timeline snapshot was built from; see
+    // timelineFingerprint(). 0 = the engine holds no arrangement of ours.
+    uint64_t armedFingerprint = 0;
 
     // selection (belongs to selClipId)
     int selClipId = -1;
@@ -2375,11 +2378,35 @@ struct App {
             L"Controls", MB_ICONINFORMATION);
     }
 
-    void playAll() {
-        if (timelinePlaying && engine.isPlaying()) { engine.pause(); refresh(); return; }
-        if (timelinePlaying && engine.isPaused()) { engine.resume(); refresh(); return; }
-        // build snapshot
-        std::vector<TimelineSegment> segs;
+    // The engine plays a *snapshot* of the arrangement, not the arrangement itself:
+    // handing it the live project would mean touching model data from the audio
+    // thread. The snapshot therefore goes stale the moment a clip is moved, muted,
+    // regained or deleted, and both resuming and continuing it would then play an
+    // arrangement that no longer exists. `armedFingerprint` records which
+    // arrangement the engine is currently holding so staleness can be detected.
+    uint64_t timelineFingerprint() const {
+        uint64_t h = 1469598103934665603ull;                 // FNV-1a, 64-bit
+        auto mix = [&h](uint64_t v) {
+            for (int i = 0; i < 8; ++i) { h ^= (v >> (i * 8)) & 0xFF; h *= 1099511628211ull; }
+        };
+        auto mixf = [&mix](float f) { uint32_t b = 0; memcpy(&b, &f, sizeof b); mix(b); };
+        for (const auto& t : doc.project().tracks) {
+            mix((uint64_t)t.id); mix(t.muted ? 1 : 0); mixf(t.gain);
+            for (const auto& pc : t.clips) {
+                mix((uint64_t)pc.clipId); mix((uint64_t)pc.startFrame); mix((uint64_t)pc.lengthFrames);
+                const Clip* c = doc.project().findClip(pc.clipId);
+                // The buffer pointer covers destructive edits: an edit copies before
+                // it writes (undo snapshots share the buffer), so it lands elsewhere.
+                mix(c ? (uint64_t)(uintptr_t)c->buffer.get() : 0);
+                mixf(c ? c->gain : 0.0f);
+                mix(c && c->buffer ? (uint64_t)c->buffer->frames() : 0);
+            }
+        }
+        mix((uint64_t)doc.project().timelineLengthFrames());
+        return h;
+    }
+    // Returns false when there is nothing to play at all.
+    bool buildTimelineSegments(std::vector<TimelineSegment>& segs, int64_t& total) const {
         for (auto& t : doc.project().tracks) {
             if (t.muted) continue;
             for (auto& pc : t.clips) {
@@ -2390,18 +2417,44 @@ struct App {
                 segs.push_back(s);
             }
         }
-        int64_t total = doc.project().timelineLengthFrames();
-        if (total <= 0) return;
+        total = doc.project().timelineLengthFrames();
+        return total > 0;
+    }
+    void armTimeline(int64_t atFrame) {
+        std::vector<TimelineSegment> segs; int64_t total = 0;
+        if (!buildTimelineSegments(segs, total)) { stopAll(); return; }
+        armedFingerprint = timelineFingerprint();
+        engine.play(std::make_shared<TimelineSource>(std::move(segs), total),
+                    std::min(atFrame, total));
+    }
+    // Edits made while the arrangement is running are heard straight away rather
+    // than at the next Space. Driven from the timer, so it catches every way the
+    // project can change without every mutation site having to remember to call in.
+    void syncTimelineSource() {
+        if (!timelinePlaying || !engine.isPlaying()) return;
+        if (timelineFingerprint() == armedFingerprint) return;
+        armTimeline(engine.position());
+    }
+
+    void playAll() {
+        // Space must always pause a running arrangement, stale snapshot or not.
+        if (timelinePlaying && engine.isPlaying()) { engine.pause(); refresh(); return; }
+        // Resuming is only honest while the engine still holds the arrangement the
+        // user can see; otherwise fall through and re-arm from the playhead.
+        if (timelinePlaying && engine.isPaused() && timelineFingerprint() == armedFingerprint) {
+            engine.resume(); refresh(); return;
+        }
+        if (doc.project().timelineLengthFrames() <= 0) return;
         previewClipId = -1; previewIsSel = false; timelinePlaying = true;
         // Starting playback re-arms the view to chase the playhead, so a scroll
         // made while the last pass was running doesn't silently stay in force.
         followPlayhead = true;
-        engine.play(std::make_shared<TimelineSource>(std::move(segs), total), playheadFrame);
+        armTimeline(playheadFrame);
         followPlayheadIfPlaying();
         refresh();
     }
     void stopAll() {
-        engine.stop(); timelinePlaying = false;
+        engine.stop(); timelinePlaying = false; armedFingerprint = 0;
         previewClipId = -1; previewIsSel = false; previewSeekPending = false;
         previewBegin = previewEnd = 0; previewCursor = 0;
         refresh();
@@ -3385,6 +3438,7 @@ struct App {
         const bool playing = engine.isPlaying();
         setTimerRate(playing);
         if (playing) {
+            syncTimelineSource();
             if (timelinePlaying) { playheadFrame = engine.position(); followPlayheadIfPlaying(); }
             else if (previewClipId >= 0) previewCursor = previewBegin + engine.position();
             refresh();

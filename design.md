@@ -886,6 +886,51 @@ Validating (rather than restoring from `ViewState`) is the right move after
 undo/redo precisely because `ViewState` sits outside the undo tree — there is no
 older selection to roll back to, only the live one to check.
 
+## Timeline playback — the arrangement snapshot and its fingerprint
+
+The engine is never handed the live project: the WASAPI render thread would then
+be reading model data the UI thread is editing. `playAll` instead builds a
+**snapshot** — a `std::vector<TimelineSegment>` of `{buffer, timelineStart,
+length, gain}` plus the total length — and `TimelineSource` mixes from that.
+Gaps need no representation at all: `render` zero-fills the output block before
+mixing the segments that overlap it, so silence between clips is what you get by
+construction.
+
+The cost of a snapshot is that it goes stale the instant the arrangement changes,
+and a stale snapshot is *inaudibly* wrong — it plays a perfectly plausible
+arrangement that simply isn't the one on screen. `App` therefore records
+**`armedFingerprint`**: an FNV-1a hash of exactly the inputs the snapshot is
+built from (per track: id, mute, gain; per placed clip: clip id, start, length,
+the clip's gain and buffer pointer and frame count; then the total length). It is
+derived rather than maintained, so no mutation site has to remember to invalidate
+anything — which matters, since the arrangement can change from clip drags,
+ripples, mutes, gain changes, deletions, destructive edits, undo, redo and
+history jumps.
+
+Two places consult it:
+
+- **`playAll`** pauses a running arrangement unconditionally (Space must always
+  mean pause), but only *resumes* a paused one while the fingerprint still
+  matches. Otherwise it falls through and re-arms from the playhead. Without
+  this, the sequence "play, Space to stop, drag a clip, click a new play
+  position, Space" resumed the pre-drag snapshot, so the drag sounded as though
+  it had never happened — the clip's move and the silence it opened were both
+  missing. (`engine.resume()` reuses the stored source verbatim, and
+  `engine.seek()` merely repositions that same stale source, so the playhead
+  landed in the right place inside the wrong arrangement.)
+- **`syncTimelineSource`**, called from `onTimer` while playing, re-arms at
+  `engine.position()` when the fingerprint moves, so an edit made *during*
+  playback is heard immediately rather than at the next Space. Re-arming at the
+  heard (not rendered) position keeps the discontinuity to the device buffer.
+
+`armTimeline(atFrame)` is the one place that builds and hands over a snapshot and
+is the only writer of `armedFingerprint`; `stopAll()` clears it back to 0. The
+selftest builds snapshots the same way `playAll` does and pins both directions:
+after a ripple the gap renders as exact silence with the clips either side still
+sounding, and a snapshot captured *before* the ripple renders audio right through
+where the gap should be — the failure mode itself, held in place so the reason
+for the fingerprint can't be optimised away.
+
 ## Clip preview playback (cursor, play/pause, seeking)
 
 Clip auditioning is driven from `App` by a small block of preview state, with

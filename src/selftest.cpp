@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdio>
 #include <vector>
+#include <algorithm>
 
 static std::wstring exeDir() {
     wchar_t path[MAX_PATH]; GetModuleFileNameW(nullptr, path, MAX_PATH);
@@ -698,6 +699,71 @@ int runSelfTest() {
         float tail[64] = { 0 };
         check(src.render(tail, 32) == 4, L"preview source stops at the selection end");
         check(src.render(tail, 32) == 0, L"preview source drains once past the end");
+    }
+
+    // Playing an arrangement with a gap in it. Dragging a clip to the right is only
+    // meaningful if the silence it opens is actually heard, and the engine plays a
+    // *snapshot* of the arrangement rather than the arrangement itself -- so this
+    // pins both halves: a snapshot taken after the drag has the silence in it, and a
+    // snapshot taken before the drag does not (which is exactly why the UI has to
+    // notice its snapshot has gone stale instead of resuming it).
+    {
+        Document d; d.init(rate);
+        int a = d.addClip(L"a", makeSine(rate, 0.5, 300.0), L"", L"add a");
+        int b = d.addClip(L"b", makeSine(rate, 0.5, 400.0), L"", L"add b");
+        int tid = d.project().tracks.empty() ? d.addTrack() : d.project().tracks[0].id;
+        const int64_t len = rate / 2;
+        d.placeClip(tid, a, 0, L"place a");
+        d.placeClip(tid, b, len, L"place b");
+
+        // Exactly what the UI's buildTimelineSegments() does, so the thing under
+        // test is the arrangement the user would actually hear.
+        auto snapshot = [&](const Document& doc) {
+            std::vector<TimelineSegment> segs;
+            for (const auto& t : doc.project().tracks) {
+                if (t.muted) continue;
+                for (const auto& pc : t.clips) {
+                    const Clip* c = doc.project().findClip(pc.clipId);
+                    if (!c || !c->buffer) continue;
+                    TimelineSegment s; s.buf = c->buffer; s.timelineStart = pc.startFrame;
+                    s.length = pc.lengthFrames; s.gain = c->gain * t.gain;
+                    segs.push_back(s);
+                }
+            }
+            return std::make_shared<TimelineSource>(std::move(segs),
+                                                    doc.project().timelineLengthFrames());
+        };
+        auto peak = [](IPlaybackSource& s, int64_t from, int frames) {
+            std::vector<float> buf((size_t)frames * 2, 0.0f);
+            s.seek(from);
+            const int got = s.render(buf.data(), frames);
+            float m = 0.0f;
+            for (int i = 0; i < got * 2; ++i) m = std::max(m, std::fabs(buf[(size_t)i]));
+            return m;
+        };
+
+        auto packed = snapshot(d);              // the pre-drag snapshot, kept on purpose
+        const int64_t gap = rate / 4;           // shift 'b' a quarter second to the right
+        check(d.rippleClips(tid, 1, gap, L"drag b right") == gap,
+              L"gap playback: the drag opens the space it was asked for");
+        auto spaced = snapshot(d);
+
+        check(spaced->total() == len * 2 + gap,
+              L"gap playback: the arrangement is as long as the gap made it",
+              std::to_wstring(spaced->total()));
+        // Straddle the gap the way the user did: start a little before it and play
+        // through. Silence has to be silence, and the second clip has to survive.
+        check(peak(*spaced, len - 1000, 512) > 0.1f,
+              L"gap playback: the clip before the gap still sounds");
+        check(peak(*spaced, len + 100, (int)gap - 200) == 0.0f,
+              L"gap playback: the gap is heard as silence");
+        check(peak(*spaced, len + gap + 100, 512) > 0.1f,
+              L"gap playback: the clip after the gap comes back in");
+
+        // The stale snapshot: same project, same frames, no silence. Resuming one of
+        // these is what made a drag sound as though it had never happened.
+        check(packed->total() == len * 2 && peak(*packed, len + 100, (int)gap - 200) > 0.1f,
+              L"gap playback: a snapshot taken before the drag has no gap in it");
     }
 
     // Voice isolation ("remove non-voice"): a harmonic speech-like stretch plus a
