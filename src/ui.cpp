@@ -59,7 +59,7 @@ enum {
     IDM_EXPORTCLIP, IDM_EXPORTSEL,
     IDM_SILENCESEL, IDM_DELETESEL,
     IDM_ADDTL_BASE = 200,   // + track index
-    IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK, IDM_TL_GAP, IDM_TL_CLOSEGAP,
+    IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK, IDM_TL_GAP, IDM_TL_CLOSEGAP, IDM_TL_RIPPLE,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE, IDM_TRK_VOICEISO,
     IDM_TRK_TIMBRE,
     IDM_SORT_NAME = 340, IDM_SORT_TIME,
@@ -1235,7 +1235,7 @@ struct App {
                 const int ignore = (tid == moveTrackId) ? moveIndex : -1;
                 const Track* tk = doc.project().findTrack(tid);
                 for (auto& tl : trackLays) if (tl.trackId == tid) {
-                    RECT grabbed{};
+                    RECT grabbed{}; bool grabbedOk = true;
                     for (int i = moveIndex; i <= last; ++i) {
                         const PlacedClip& pc = home->clips[i];
                         const int64_t start = pc.startFrame + delta;
@@ -1247,7 +1247,7 @@ struct App {
                         const bool ok = rippleDrag || (tk && !tk->overlaps(start, pc.lengthFrames, ignore));
                         drawClipBlock(h, g, doc.project().findClip(pc.clipId),
                                       ok ? col::clipBlkSel : col::stop, col::text);
-                        if (i == moveIndex) grabbed = g;
+                        if (i == moveIndex) { grabbed = g; grabbedOk = ok; }
                     }
                     // Say what the gesture currently is and what it is doing. A
                     // ripple and a move look alike until they land, and the whole
@@ -1261,6 +1261,19 @@ struct App {
                         swprintf(buf, 128, L"ripple \u2022 gap %.2f s \u2022 carrying %d clip%s",
                                  std::max(0.0, gap), last - moveIndex + 1,
                                  (last - moveIndex + 1) == 1 ? L"" : L"s");
+                    } else if (!grabbedOk) {
+                        // The red ghost is the moment the feature is needed and the
+                        // moment it looks like a bug: the drag has run into the next
+                        // clip and will be refused. So this badge stops reporting a
+                        // distance nothing will move by and names the way out
+                        // instead -- it is the only text on screen at the instant
+                        // the reader is asking "why won't it go there?".
+                        // ...but only on the clip's own lane. A ripple is lane-locked,
+                        // so it is no answer to "that other track is already full".
+                        swprintf(buf, 128, tid == moveTrackId
+                                 ? L"won\u2019t fit \u2014 the next clip is in the way"
+                                   L"   \u2022   Shift: carry it and the rest along"
+                                 : L"won\u2019t fit \u2014 there is already a clip here");
                     } else {
                         // The plain move says what the *other* gesture is, because
                         // a modifier nobody mentions is a feature nobody finds --
@@ -1273,7 +1286,7 @@ struct App {
                     // Wide enough for the longest badge even when the clip is a
                     // sliver: the hint is worth more than staying inside the block.
                     RECT br = { grabbed.left + S(6), grabbed.bottom - S(17),
-                                std::max(grabbed.right, (LONG)(grabbed.left + S(400))) - S(4),
+                                std::max(grabbed.right, (LONG)(grabbed.left + S(520))) - S(4),
                                 grabbed.bottom - S(3) };
                     textOut(h, br, buf, col::text, fSmall, DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
                 }
@@ -2343,8 +2356,9 @@ struct App {
             L"    track, so you change one gap and the rest keep their spacing\n"
             L"    (press Shift after starting the drag and it still counts; the\n"
             L"    dragged clip says whether it will move or ripple)\n"
-            L"  \u2022 Timeline \u25B8 Ripple drag makes that the standing behaviour, so\n"
-            L"    no modifier is needed \u2014 Shift then means \"just this clip\"\n"
+            L"  \u2022 Right-click a placed clip (or the Timeline menu) \u2192 Dragging a\n"
+            L"    clip carries the later ones, to make that the standing behaviour\n"
+            L"    \u2014 no modifier needed, and Shift then means \"just this clip\"\n"
             L"  \u2022 Right-click a placed clip to set the space before it exactly,\n"
             L"    or to close it \u2014 later clips move to match, either way\n"
             L"  \u2022 Drag a track's volume slider to change the track level\n"
@@ -2874,7 +2888,17 @@ struct App {
                     }
                 } else {
                     int tid = moveTrackId; trackAtPoint(p, tid);
-                    doc.moveClip(moveTrackId, moveIndex, tid, newStart, L"Move clip");
+                    // A refused move used to be silent: the clip sprang back to where
+                    // it started and nothing said why, which is exactly what a broken
+                    // drag looks like. It is also the one moment the ripple gesture is
+                    // wanted, so the refusal names it -- but only when it would help,
+                    // i.e. when the obstruction is on the clip's own lane. A ripple is
+                    // lane-locked, so it is no answer to "that track is already full".
+                    if (!doc.moveClip(moveTrackId, moveIndex, tid, newStart, L"Move clip"))
+                        toast(tid == moveTrackId
+                              ? L"Won\u2019t fit \u2014 hold Shift while dragging to carry the "
+                                L"later clips along (Timeline \u25B8 Ripple drag makes that standing)"
+                              : L"Won\u2019t fit \u2014 there is already a clip in that spot");
                 }
                 afterPlaceRefresh();
             }
@@ -2908,6 +2932,14 @@ struct App {
                 AppendMenuW(m, MF_STRING, IDM_TL_GAP, L"Space before this clip\u2026");
                 AppendMenuW(m, MF_STRING, IDM_TL_CLOSEGAP, L"Close the space before this clip");
                 AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+                // The same toggle as Timeline > Ripple drag, repeated here because
+                // this is the menu someone spacing out an arrangement actually opens
+                // -- the two gap commands next to it are what brought them. A
+                // gesture that lives only behind a modifier and a menu-bar item
+                // nobody has reason to open is a gesture nobody finds.
+                AppendMenuW(m, MF_STRING | (rippleMode ? MF_CHECKED : 0), IDM_TL_RIPPLE,
+                            L"Dragging a clip carries the later ones (Shift inverts)");
+                AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
                 AppendMenuW(m, MF_STRING, IDM_TL_REMOVE, L"Remove from timeline");
                 POINT sp = p; ClientToScreen(hwnd, &sp);
                 int cmd = TrackPopupMenu(m, TPM_RETURNCMD, sp.x, sp.y, 0, hwnd, nullptr);
@@ -2915,6 +2947,7 @@ struct App {
                 if (cmd == IDM_TL_REMOVE) { doc.removePlaced(gTrack, gIndex, L"Remove clip from track"); afterHistory(); }
                 else if (cmd == IDM_TL_GAP) editGapBefore(gTrack, gIndex);
                 else if (cmd == IDM_TL_CLOSEGAP) setGapBefore(gTrack, gIndex, 0, L"Close space before clip");
+                else if (cmd == IDM_TL_RIPPLE) toggleRippleMode();
                 return;
             }
             // right-click a track header or empty lane -> track menu
@@ -3196,6 +3229,20 @@ struct App {
         SetMenu(hwnd, bar);
     }
 
+    // Reachable from two places (the Timeline menu and a placed clip's right-click
+    // menu), so the tick on the menu-bar item and the toast both live here rather
+    // than at each call site, where they could drift apart. The toast says which way
+    // the toggle just went, because a menu that was dismissed to read its own tick
+    // is a poor way to find out.
+    void toggleRippleMode() {
+        rippleMode = !rippleMode;
+        CheckMenuItem(GetMenu(hwnd), IDC_RIPPLEMODE,
+                      MF_BYCOMMAND | (rippleMode ? MF_CHECKED : MF_UNCHECKED));
+        toast(rippleMode ? L"Dragging a clip now carries the later ones \u2014 hold Shift for just the one"
+                         : L"Dragging a clip now moves just that one \u2014 hold Shift to carry the later ones");
+        refresh();
+    }
+
     void onCommand(int id) {
         switch (id) {
         case IDC_ADDFILES: addFiles(); break;
@@ -3210,12 +3257,7 @@ struct App {
         case IDC_HISTORY: showHistory(); break;
         case IDC_ADDTRACK: addTrackAndReveal(); break;
         case IDC_CONTROLS: showControls(); break;
-        case IDC_RIPPLEMODE:
-            rippleMode = !rippleMode;
-            CheckMenuItem(GetMenu(hwnd), IDC_RIPPLEMODE,
-                          MF_BYCOMMAND | (rippleMode ? MF_CHECKED : MF_UNCHECKED));
-            refresh();
-            break;
+        case IDC_RIPPLEMODE: toggleRippleMode(); break;
         }
     }
 

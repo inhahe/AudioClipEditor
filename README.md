@@ -108,8 +108,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   into a ripple there and then — and once it has, letting go of Shift won't undo
   it (press Esc if you want to abandon the drag). The clip you're dragging shows
   what it's about to do: `move • +0.42 s`, or `ripple • gap 1.35 s • carrying 4
-  clips` — and an ordinary drag reminds you the other gesture is there. If you're
-  doing a lot of this, tick **Timeline ▸ Ripple drag** and every clip drag carries
+  clips` — and an ordinary drag reminds you the other gesture is there. If a drag
+  runs into the next clip it says so rather than just going red and springing
+  back, and points at Shift as the way through. If you're doing a lot of this,
+  tick **Ripple drag** — in the **Timeline** menu, or in a placed clip's
+  right-click menu next to the two space commands — and every clip drag carries
   the later clips with no modifier at all; Shift then means "just this one clip".
 - **The view follows the playhead** while the timeline plays, so a long
   arrangement doesn't just run off the right-hand edge. It pages ahead when the
@@ -315,6 +318,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Change one gap and keep the spacing after it | **`Shift`+drag** a placed clip — every clip after it on that track moves with it |
 | Set the space before a clip exactly | right-click it → **Space before this clip…**, type it in seconds |
 | Butt a clip against the one before it | right-click it → **Close the space before this clip** |
+| Make that the standing behaviour | right-click a placed clip (or the **Timeline** menu) → **Dragging a clip carries the later ones**; `Shift` then means "just this one" |
 | Remove a placed clip | right-click it → Remove |
 | Set the playhead | click a track lane or the ruler |
 | Play all tracks | **▶ Play All** (`Space` when nothing is being previewed) |

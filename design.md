@@ -720,8 +720,9 @@ ripple was reported as broken twice, and both reports turned out to be the same
 thing: a modifier is invisible. Nothing on screen said the gesture existed, so
 the drag did what a drag does, hit the next clip, and went red — behaviour that
 looks exactly like a bug when you don't know the other mode is there. The
-arithmetic had been right the whole time. Two answers, both of which put the
-gesture somewhere it can be *seen*:
+arithmetic had been right the whole time. Four answers, all of which put the
+gesture somewhere it can be *seen*, and the last two of which put it at the
+moment of failure:
 
 - **`Timeline ▸ Ripple drag`** — `rippleMode`, a standing, session-scoped
   preference, with `rippleDrag == rippleMode != rippleShift`, so Shift *inverts*
@@ -729,11 +730,29 @@ gesture somewhere it can be *seen*:
   directions. A menu item is a feature you can find by looking; it is also what
   you want when a whole session is spacing work, and it gives the gesture a route
   that does not depend on the keyboard at all.
+- **The same toggle in a placed clip's right-click menu**, next to *Space before
+  this clip…* and *Close the space before this clip* — because that is the menu
+  someone spacing out an arrangement actually opens, and those two neighbours are
+  what brought them there. The menu-bar Timeline popup has nothing else in it, so
+  it is a menu with no reason to be opened; a feature reachable only from there is
+  a feature nobody finds. Both routes go through `App::toggleRippleMode`, which
+  owns the menu-bar tick and a toast naming the direction the toggle just went (a
+  menu you dismissed to read its own tick is a poor way to learn what you did).
 - **The plain-move badge names the other gesture**: `move • +0.42 s • Shift:
   carry the later clips too`, dropped once Shift has been used in that drag,
   since by then it is known. A hint costs nothing at the one instant the reader
   is certainly looking at the clip and thinking about where it goes — which is
   worth more than any amount of it being written in the Controls dialog.
+- **The blocked drag says why, and says the way out.** When the grabbed clip's
+  target overlaps, the ghost goes red and the badge stops reporting a distance
+  nothing will move by: `won't fit — the next clip is in the way • Shift: carry it
+  and the rest along`. And the **drop itself is no longer silent** —
+  `Document::moveClip` returns false when it refuses, a return `onLUp` used to
+  discard, leaving the clip springing back with no explanation, which is precisely
+  what a broken drag looks like. It now raises the undo/redo toast instead. Both
+  messages are conditioned on the obstruction being on the clip's **own** lane:
+  a ripple is lane-locked, so it is no answer to "that other track is already
+  full", and offering it there would be a false lead.
 
 **The ghost says which gesture it is.** A ripple and a move look alike until they
 land, so the grabbed clip's ghost carries a one-line badge: `move • +0.42 s`, or
