@@ -1,5 +1,6 @@
 #pragma once
 #include "model.h"
+#include <algorithm>
 #include <memory>
 #include <vector>
 #include <string>
@@ -62,6 +63,42 @@ public:
 
     UndoNode* current() const { return current_; }
     UndoNode* rootNode() const { return root_.get(); }
+
+    // The single line of history the user can see and walk: root -> ... -> current
+    // (everything that is applied right now), then on past current down the
+    // remembered redo trail to the tip (everything that was undone but can still be
+    // redone). That is exactly the set of states reachable by pressing Ctrl+Z and
+    // Ctrl+Shift+Z alone, which is what makes it the right thing to show as a list.
+    // Branches hanging off the side are not included -- they're reachable only via
+    // the redo picker -- but `children.size() > 1` on a listed node tells the UI to
+    // say so. `currentIndex` receives the position of the current node.
+    std::vector<const UndoNode*> chain(int* currentIndex = nullptr) const {
+        std::vector<const UndoNode*> out;
+        for (const UndoNode* n = current_; n; n = n->parent) out.push_back(n);
+        std::reverse(out.begin(), out.end());
+        if (currentIndex) *currentIndex = (int)out.size() - 1;
+        for (const UndoNode* n = current_; n && !n->children.empty(); ) {
+            const int b = n->lastChild >= 0 ? n->lastChild : 0;
+            n = n->children[(size_t)b].get();
+            out.push_back(n);
+        }
+        return out;
+    }
+
+    // Jump straight to a node (the History window's click-to-go). Equivalent to
+    // pressing undo/redo the right number of times, so it also re-points the redo
+    // trail at the target: after jumping back, undoing further and then redoing
+    // must return the way it came, not down whichever branch happened to be last.
+    const Project& gotoNode(const UndoNode* target) {
+        UndoNode* t = const_cast<UndoNode*>(target);
+        for (UndoNode* n = t; n && n->parent; n = n->parent) {
+            UndoNode* p = n->parent;
+            for (int i = 0; i < (int)p->children.size(); ++i)
+                if (p->children[(size_t)i].get() == n) { p->lastChild = i; break; }
+        }
+        current_ = t;
+        return current_->snapshot;
+    }
 
 private:
     std::unique_ptr<UndoNode> root_;

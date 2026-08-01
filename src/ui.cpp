@@ -71,7 +71,7 @@ enum {
 enum {
     IDC_ADDFILES = 1000, IDC_NEWPROJ, IDC_OPENPROJ, IDC_SAVEPROJ, IDC_SAVEPROJAS,
     IDC_EXPORTMIX, IDC_EXIT,
-    IDC_UNDO, IDC_REDO, IDC_ADDTRACK, IDC_CONTROLS, IDC_RIPPLEMODE
+    IDC_UNDO, IDC_REDO, IDC_HISTORY, IDC_ADDTRACK, IDC_CONTROLS, IDC_RIPPLEMODE
 };
 
 struct CardLayout { int clipId; RECT card, top, play, del, wave, vol, crop, savesel; };
@@ -104,6 +104,13 @@ struct App {
 
     std::wstring projectPath;      // current .acep path (empty = unsaved)
     bool lastTitleDirty = false;   // last unsaved-changes state reflected in the title
+
+    // Transient status badge. Undo and redo are the one pair of commands whose
+    // effect is regularly invisible -- undoing a timbre match or a noise reduction
+    // changes only how the audio sounds, and nothing on screen moves -- so they say
+    // what they just did instead of appearing to do nothing. Expires on the timer.
+    std::wstring toastText;
+    DWORD toastUntil = 0;
 
     // scroll / zoom
     int libScroll = 0, libContentH = 0;
@@ -687,6 +694,7 @@ struct App {
             paintTransport(mem);
             paintDragOverlay(mem);
         }
+        paintToast(mem, client);   // above both views: it reports on either
 
         BitBlt(hdc, 0, 0, client.right, client.bottom, mem, 0, 0, SRCCOPY);
         SelectObject(mem, oldb); DeleteObject(bmp); DeleteDC(mem);
@@ -851,6 +859,45 @@ struct App {
         roundFill(h, g, col::accentDk, col::text, S(6));
         RECT nm = { g.left + S(8), g.top, g.right - S(8), g.bottom };
         textOut(h, nm, c->name, col::text, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+
+    // Show a short message for a couple of seconds. Long enough to read a clip name
+    // in it, short enough that it never has to be dismissed.
+    void toast(const std::wstring& s) {
+        toastText = s;
+        toastUntil = GetTickCount() + 2600;
+        refresh();
+    }
+    bool toastExpired() const {
+        // Unsigned wrap-safe: the difference is what matters, not the absolute tick.
+        return !toastText.empty() && (int)(GetTickCount() - toastUntil) >= 0;
+    }
+
+    // Drawn floating over everything, centred just under the toolbar, because the
+    // message is about the whole project rather than about any one panel. Under the
+    // toolbar rather than over it so it never hides the very Undo button that is
+    // probably being clicked repeatedly.
+    void paintToast(HDC h, const RECT& client) {
+        if (toastText.empty()) return;
+        // Measured with DrawText, not GetTextExtentPoint32, and with the same flags
+        // it will be drawn with: the two disagree by a pixel or two on overhang, and
+        // a box sized one pixel short makes DT_END_ELLIPSIS eat the last word --
+        // which on "Nothing left to undo" turns the message into a different one.
+        HGDIOBJ of = SelectObject(h, fNorm);
+        RECT m{ 0, 0, 0, 0 };
+        DrawTextW(h, toastText.c_str(), -1, &m, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(h, of);
+        const int padX = S(14), padY = S(8);
+        const int tw = m.right - m.left + S(2), th = m.bottom - m.top;
+        int w = std::min<int>(tw + padX * 2, std::max<int>(S(120), client.right - S(40)));
+        int ht = th + padY * 2;
+        int cx = client.right / 2;
+        int top = (editorActive() ? edToolbarH : rcTransport.bottom) + S(10);
+        RECT box = { cx - w / 2, top, cx + w / 2, top + ht };
+        roundFill(h, box, col::transport, col::accent, S(8));
+        RECT tr = { box.left + padX, box.top, box.right - padX, box.bottom };
+        textOut(h, tr, toastText, col::text, fNorm,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
     static void fill(HDC h, const RECT& r, COLORREF c) {
@@ -2308,6 +2355,7 @@ struct App {
             L"    scrollbar along the bottom, and the view follows the playhead\n"
             L"    while playing (scrolling by hand stops it until you play again)\n\n"
             L"Keys:  Space = play/pause   Ctrl+Z = undo   Ctrl+Shift+Z = redo\n"
+            L"       Ctrl+H = history (every step, which are applied, jump to any)\n"
             L"       \u2190 \u2192 scroll the timeline (Ctrl or PgUp/PgDn = page)\n"
             L"       Home / End = jump to the start / end of the arrangement",
             L"Controls", MB_ICONINFORMATION);
@@ -2361,13 +2409,29 @@ struct App {
     void recordSelChange(const selhist::Sel& prev) { selHist.record(selHistBase(), prev, curSel()); }
     void recordSelChangeFromDrag() { recordSelChange({ selSaveClipId, selSaveStart, selSaveEnd }); }
 
+    // Undo and redo announce what they moved. Most edits show their own result --
+    // a clip reappears, a track shifts -- but an effect changes only the audio, so
+    // undoing one otherwise looks exactly like a key that did nothing. Naming the
+    // step covers both cases without having to guess which one it is, and telling
+    // the user there is nothing left to undo is worth as much as the undo itself.
     void doUndo() {
-        if (canSelUndo()) { applySel(selHist.undo(curSel())); validateSelection(); refresh(); return; }
-        if (doc.canUndo()) { doc.undo(); afterHistory(); }
+        if (canSelUndo()) {
+            applySel(selHist.undo(curSel())); validateSelection(); refresh();
+            toast(L"Undone: selection change");
+            return;
+        }
+        if (!doc.canUndo()) { toast(L"Nothing left to undo"); return; }
+        const std::wstring what = doc.undoDesc();
+        doc.undo(); afterHistory();
+        toast(L"Undone: " + what);
     }
     void doRedo() {
-        if (canSelRedo()) { applySel(selHist.redo(curSel())); validateSelection(); refresh(); return; }
-        if (!doc.canRedo()) return;
+        if (canSelRedo()) {
+            applySel(selHist.redo(curSel())); validateSelection(); refresh();
+            toast(L"Redone: selection change");
+            return;
+        }
+        if (!doc.canRedo()) { toast(L"Nothing left to redo"); return; }
         int branch = doc.defaultRedoBranch();
         if (doc.redoBranchCount() > 1) {
             HMENU m = CreatePopupMenu();
@@ -2378,7 +2442,27 @@ struct App {
             DestroyMenu(m);
             if (cmd >= IDM_REDO_BASE) branch = cmd - IDM_REDO_BASE; else return;
         }
+        const std::wstring what = doc.redoChildDesc(branch);
         doc.redo(branch); afterHistory();
+        toast(L"Redone: " + what);
+    }
+
+    // The History window. Jumping is done through the callback rather than by
+    // returning a chosen row, so the window stays open while the project moves
+    // behind it -- checking "was the timbre match undone?" usually means trying a
+    // couple of positions and listening, not one decision.
+    void showHistory() {
+        dlg::HistoryContext ctx;
+        for (const auto& e : doc.history())
+            ctx.items.push_back({ e.desc, e.applied, e.current, e.saved, e.branches });
+        ctx.jump = [this](int index) {
+            if (doc.gotoHistory(index)) {
+                afterHistory();
+                lastTitleDirty = projectModified(); setTitle();
+            }
+            return doc.historyIndex();
+        };
+        dlg::history(hwnd, ctx);
     }
     // Called after an edit that may have replaced or removed clips: undo / redo, or
     // deleting a clip, a track, or a clip's placement on a track.
@@ -3092,6 +3176,8 @@ struct App {
         HMENU edit = CreatePopupMenu();
         AppendMenuW(edit, MF_STRING, IDC_UNDO, L"Undo\tCtrl+Z");
         AppendMenuW(edit, MF_STRING, IDC_REDO, L"Redo\tCtrl+Shift+Z");
+        AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(edit, MF_STRING, IDC_HISTORY, L"History\u2026\tCtrl+H");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)edit, L"Edit");
 
         HMENU track = CreatePopupMenu();
@@ -3121,6 +3207,7 @@ struct App {
         case IDC_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
         case IDC_UNDO: doUndo(); break;
         case IDC_REDO: doRedo(); break;
+        case IDC_HISTORY: showHistory(); break;
         case IDC_ADDTRACK: addTrackAndReveal(); break;
         case IDC_CONTROLS: showControls(); break;
         case IDC_RIPPLEMODE:
@@ -3184,6 +3271,7 @@ struct App {
         if (ctrl && (k == 'S')) { saveProjectFile(); return; }
         if (ctrl && (k == 'O')) { addFiles(); return; }
         if (ctrl && (k == 'N')) { newProject(); return; }
+        if (ctrl && (k == 'H')) { showHistory(); return; }
         if (k == VK_SPACE) {
             if (previewClipId >= 0 && !timelinePlaying) togglePlayClip(previewClipId);
             else playAll();
@@ -3251,6 +3339,7 @@ struct App {
     void onTimer() {
         // Keep the title's unsaved-changes marker (" *") in sync as edits happen.
         if (projectModified() != lastTitleDirty) { lastTitleDirty = projectModified(); setTitle(); }
+        if (toastExpired()) { toastText.clear(); refresh(); }
         const bool playing = engine.isPlaying();
         setTimerRate(playing);
         if (playing) {

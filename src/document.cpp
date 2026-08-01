@@ -454,3 +454,38 @@ void Document::redo(int branch) {
     if (branch < 0 || branch >= undo_.redoBranchCount()) branch = undo_.defaultRedoBranch();
     project_ = undo_.redo(branch);
 }
+
+std::vector<Document::HistoryEntry> Document::history() const {
+    int cur = 0;
+    const std::vector<const UndoNode*> chain = undo_.chain(&cur);
+    std::vector<HistoryEntry> out;
+    out.reserve(chain.size());
+    for (int i = 0; i < (int)chain.size(); ++i) {
+        HistoryEntry e;
+        e.desc = chain[(size_t)i]->desc;
+        e.applied = i <= cur;
+        e.current = i == cur;
+        e.saved = chain[(size_t)i] == savedNode_;
+        e.branches = (int)chain[(size_t)i]->children.size();
+        out.push_back(std::move(e));
+    }
+    return out;
+}
+
+int Document::historyIndex() const {
+    int cur = 0;
+    undo_.chain(&cur);
+    return cur;
+}
+
+// The index is re-resolved against a freshly built chain rather than taking a node
+// pointer from the caller: the History window hands back a row number it was given
+// earlier, and a node pointer held across that boundary would be a dangling one the
+// moment anything committed in between.
+bool Document::gotoHistory(int index) {
+    int cur = 0;
+    const std::vector<const UndoNode*> chain = undo_.chain(&cur);
+    if (index < 0 || index >= (int)chain.size() || index == cur) return false;
+    project_ = undo_.gotoNode(chain[(size_t)index]);
+    return true;
+}

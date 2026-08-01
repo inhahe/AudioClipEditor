@@ -104,6 +104,25 @@ public:
     int  defaultRedoBranch() const { return undo_.defaultRedoBranch(); }
     void redo(int branch);
 
+    // --- History (what the History window lists) ---
+    // One row per state on the undo/redo chain, oldest first. Effects like timbre
+    // matching change audio without changing anything you can see in the arrangement,
+    // so "did I apply that, and is it still applied?" is otherwise unanswerable --
+    // this is the answer: every step by name, which of them are in effect, and where
+    // the last save falls among them.
+    struct HistoryEntry {
+        std::wstring desc;      // what the step did ("Match timbre of 23 clips ...")
+        bool applied = false;   // in effect right now (at or before the current state)
+        bool current = false;   // the state the project is in
+        bool saved = false;     // the state the file on disk holds
+        int  branches = 0;      // redo children; >1 means alternatives not listed here
+    };
+    std::vector<HistoryEntry> history() const;
+    // Where in history() the project currently is.
+    int historyIndex() const;
+    // Move to history()[index]; false if the index is out of range or already current.
+    bool gotoHistory(int index);
+
     // Identifies *where* in the history we currently are. The UI keeps its own
     // selection-undo stack alongside this one and uses the node's identity to tell
     // when the document has moved out from under it (see selection history in

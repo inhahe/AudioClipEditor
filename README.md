@@ -72,6 +72,16 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   too: `Ctrl+Z` first walks back through the selections you've made since the last
   edit, so a stray click that wipes a carefully-placed selection costs one
   keystroke, and only once those run out does it undo the edit itself.
+  Undo and redo **say what they just did** in a badge under the toolbar
+  (*"Undone: Match timbre of 23 clips to their average"*), including when there
+  is nothing left to undo — effects change how clips sound without changing
+  anything on screen, so otherwise undoing one looks like a key that did nothing.
+- **History** (`Edit ▸ History…`, `Ctrl+H`) lists every step taken in this
+  project, oldest first, so you can see whether an effect like timbre matching or
+  noise reduction is applied right now. Steps in effect are ticked; steps you
+  undid stay listed but greyed (Redo brings them back), and the list marks which
+  step the saved file holds. Click any step to jump straight to it, and keep the
+  window open while you listen — the project moves behind it.
 - **Tracks & timeline.** The timeline sits on top (sized to just fit the current
   number of tracks) with the clip library below it. Start with one track, add as
   many as you like — once there are more tracks than fit, the tracks pane grows a
@@ -310,6 +320,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Play all tracks | **▶ Play All** (`Space` when nothing is being previewed) |
 | Stop | **■ Stop** |
 | Undo / Redo | `Ctrl+Z` / `Ctrl+Shift+Z` (or the toolbar buttons) |
+| See what's been done, and what's still applied | `Ctrl+H` (Edit ▸ History…) — click a step to jump to it |
 | New project | `Ctrl+N` (File ▸ New Project) |
 | Add files / Save project | `Ctrl+O` / `Ctrl+S` |
 | Open / Save / Export | **File** menu |
@@ -329,11 +340,11 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `decoder.{h,cpp}` | Media Foundation Source Reader → stereo float at the device rate |
 | `encoder.{h,cpp}` | WAV (manual RIFF, 16/24-bit PCM or 32-bit float) + Media Foundation Sink Writer (MP3/AAC/WMA); resamples to the chosen output rate |
 | `engine.{h,cpp}` | WASAPI render engine; `BufferSource` (preview) + `TimelineSource` (mix all tracks); linear-resamples the project rate to the device rate on the audio thread |
-| `undo.h` | Snapshot-based undo **tree** with branching redo |
+| `undo.h` | Snapshot-based undo **tree** with branching redo; flattens to the step list the History window shows, and can jump to any step on it |
 | `document.{h,cpp}` | Owns the project + undo tree; every edit commits a snapshot |
 | `waveform.{h,cpp}` | GDI oscilloscope rendering: min/max envelope zoomed out, sample line zoomed in |
 | `dsp.{h,cpp}` | FFT, speech-aware loudness, STFT noise reduction (spectral subtraction / Wiener / Audacity-style profile gate), voice isolation (non-speech removal), LTAS timbre matching, manual silence/delete edits |
-| `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, remove-non-voice options, match-timbre options, open/save file & project dialogs |
+| `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, remove-non-voice options, match-timbre options, history list, open/save file & project dialogs |
 | `ui.cpp` | Main window: menu bar, layout, painting, hit-testing, all interaction |
 | `selftest.cpp` | `--selftest` backend round-trip checks (decode/encode/peaks/DSP) |
 

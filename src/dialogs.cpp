@@ -879,6 +879,131 @@ bool timbreMatch(HWND parent, TimbreMatchContext& ctx) {
     return st.ok;
 }
 
+// ------------------------------------------------------------------ history
+// The list is owner-drawn for one reason: the difference between a step that is in
+// effect and one that was undone has to be visible at a glance, and a plain listbox
+// can only vary the text. So applied steps are drawn in the normal text colour and
+// undone ones greyed, with a marker column carrying the same distinction for anyone
+// who can't rely on the colour.
+struct HistoryState {
+    HistoryContext* ctx = nullptr;
+    HWND list = nullptr;
+};
+
+static std::wstring histRowText(const HistoryItem& it) {
+    std::wstring s = it.current ? L"\u25B6  " : it.applied ? L"\u2713  " : L"\u21BA  ";
+    s += it.desc;
+    if (it.current) s += L"      \u2190 you are here";
+    if (it.saved)   s += it.current ? L", and this is what the saved file holds"
+                                    : L"      (the saved file holds this)";
+    if (it.branches > 1)
+        s += L"      (+" + std::to_wstring(it.branches - 1) + L" other version" +
+             (it.branches > 2 ? L"s" : L"") + L" \u2014 Redo asks which)";
+    return s;
+}
+
+// Re-flag the rows after a jump. The chain itself doesn't change when you move
+// along it -- only which point on it you're standing at -- so this is the whole
+// update.
+static void histSetCurrent(HistoryState* st, int cur) {
+    for (int i = 0; i < (int)st->ctx->items.size(); ++i) {
+        HistoryItem& it = st->ctx->items[(size_t)i];
+        it.current = (i == cur);
+        it.applied = (i <= cur);
+    }
+    SendMessageW(st->list, LB_SETCURSEL, cur, 0);
+    InvalidateRect(st->list, nullptr, TRUE);
+}
+
+static void histJump(HistoryState* st) {
+    const int sel = (int)SendMessageW(st->list, LB_GETCURSEL, 0, 0);
+    if (sel < 0 || !st->ctx->jump) return;
+    histSetCurrent(st, st->ctx->jump(sel));
+}
+
+static LRESULT CALLBACK HistProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    auto* st = (HistoryState*)GetWindowLongPtrW(h, GWLP_USERDATA);
+    switch (m) {
+    case WM_DRAWITEM: {
+        auto* di = (DRAWITEMSTRUCT*)l;
+        if (!st || di->CtlType != ODT_LISTBOX || (int)di->itemID < 0 ||
+            di->itemID >= st->ctx->items.size()) return TRUE;
+        const HistoryItem& it = st->ctx->items[di->itemID];
+        const bool sel = (di->itemState & ODS_SELECTED) != 0;
+        FillRect(di->hDC, &di->rcItem, GetSysColorBrush(sel ? COLOR_HIGHLIGHT : COLOR_WINDOW));
+        SetBkMode(di->hDC, TRANSPARENT);
+        SetTextColor(di->hDC, sel ? GetSysColor(COLOR_HIGHLIGHTTEXT)
+                                  : GetSysColor(it.applied ? COLOR_WINDOWTEXT : COLOR_GRAYTEXT));
+        RECT tr = di->rcItem; tr.left += 6;
+        const std::wstring row = histRowText(it);
+        DrawTextW(di->hDC, row.c_str(), -1, &tr,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        if (di->itemState & ODS_FOCUS) DrawFocusRect(di->hDC, &di->rcItem);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (LOWORD(w) == IDOK) { histJump(st); return 0; }
+        if (LOWORD(w) == IDCANCEL) { DestroyWindow(h); return 0; }
+        if (HIWORD(w) == LBN_DBLCLK) { histJump(st); return 0; }
+        break;
+    case WM_CLOSE: DestroyWindow(h); return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+void history(HWND parent, HistoryContext& ctx) {
+    static bool reg = false;
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    if (!reg) {
+        WNDCLASSW wc{}; wc.lpfnWndProc = HistProc; wc.hInstance = hInst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"ACE_History"; RegisterClassW(&wc); reg = true;
+    }
+    HistoryState st; st.ctx = &ctx;
+    DlgUI ui(parent);
+
+    static const wchar_t* kIntro =
+        L"Everything done to this project, oldest first. \u2713 steps are in effect now; "
+        L"\u21BA steps were undone (Redo brings them back). Effects like timbre matching "
+        L"and noise reduction change how clips sound without changing anything you can "
+        L"see, so this is the place to check whether one is applied. Click a step to go "
+        L"straight to it.";
+
+    const int contentW = ui.S(600);
+    const int introH = ui.measure(kIntro, contentW).cy;
+    const int itemH = ui.lineH + ui.S(7);
+    const int listH = itemH * 12 + ui.S(4);
+    const int bw = ui.btnW(L"Go to this step"), bh = ui.btnH();
+    const int clientH = ui.margin + introH + ui.S(12) + listH + ui.S(14) + bh + ui.margin;
+    HWND h = ui.create(L"ACE_History", L"History", parent, ui.margin * 2 + contentW, clientH);
+    SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
+
+    int y = ui.margin;
+    ui.label(kIntro, ui.margin, y, contentW, introH);
+    y += introH + ui.S(12);
+    st.list = ui.ctl(L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY |
+                     LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                     ui.margin, y, contentW, listH, 0, WS_EX_CLIENTEDGE);
+    SendMessageW(st.list, LB_SETITEMHEIGHT, 0, itemH);
+    int cur = 0;
+    for (int i = 0; i < (int)ctx.items.size(); ++i) {
+        SendMessageW(st.list, LB_ADDSTRING, 0, (LPARAM)ctx.items[(size_t)i].desc.c_str());
+        if (ctx.items[(size_t)i].current) cur = i;
+    }
+    SendMessageW(st.list, LB_SETCURSEL, cur, 0);
+    // Show the current step with some history above it rather than pinned to the top.
+    SendMessageW(st.list, LB_SETTOPINDEX, std::max(0, cur - 6), 0);
+    y += listH + ui.S(14);
+
+    const int right = ui.margin + contentW;
+    ui.button(L"Go to this step", right - bw * 2 - ui.S(8), y, bw, bh, IDOK, true);
+    ui.button(L"Close", right - bw, y, bw, bh, IDCANCEL);
+    SetFocus(st.list);
+
+    runModal(h, parent);
+}
+
 // ------------------------------------------------------------------ project files
 std::wstring openProject(HWND parent) {
     wchar_t buf[1024] = { 0 };

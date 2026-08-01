@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <functional>
 #include <string>
 #include <vector>
 #include "encoder.h"
@@ -64,6 +65,28 @@ struct TimbreMatchContext {
     std::wstring scopeLabel;                   // what Apply will act on
 };
 bool timbreMatch(HWND parent, TimbreMatchContext& ctx);
+
+// History window: everything done to the project, oldest first, with the steps
+// that are currently in effect distinguished from the ones that were undone.
+// Effects such as timbre matching or noise reduction change how clips *sound*
+// without changing anything on screen, so after a few undos there is otherwise no
+// way to tell whether one is still applied. Clicking a row jumps the project to
+// that state, which is the same thing as pressing undo or redo the right number
+// of times.
+struct HistoryItem {
+    std::wstring desc;      // "Match timbre of 23 clips to their average"
+    bool applied = false;   // in effect right now
+    bool current = false;   // the state the project is in
+    bool saved = false;     // the state the file on disk holds
+    int  branches = 0;      // redo children; >1 means there are unlisted alternatives
+};
+struct HistoryContext {
+    std::vector<HistoryItem> items;
+    // Called when the user picks a row. The caller moves the project to that state
+    // and returns the index that is current afterwards (unchanged if it refused).
+    std::function<int(int)> jump;
+};
+void history(HWND parent, HistoryContext& ctx);
 
 // Project open/save file dialogs (.acep). Return empty string on cancel.
 std::wstring openProject(HWND parent);

@@ -603,6 +603,79 @@ int runSelfTest() {
         DeleteFileW(proj.c_str());
     }
 
+    // History list. This is the only way to find out whether an effect that changes
+    // nothing visible -- timbre matching, noise reduction -- is currently applied, so
+    // the flags have to be exactly right: a step listed as applied when it has been
+    // undone is worse than no list at all. It also has to list the *whole* reachable
+    // line, undone steps included, or "did I undo that?" still can't be answered.
+    {
+        Document d; d.init(rate);
+        {
+            const auto h = d.history();
+            check(h.size() == 1 && h[0].current && h[0].applied && h[0].saved,
+                  L"history: a new project is one step, current and saved");
+        }
+        int a = d.addClip(L"a", makeSine(rate, 0.2, 300.0), L"", L"Add 'a'");
+        d.markSaved();
+        d.addClip(L"b", makeSine(rate, 0.2, 400.0), L"", L"Add 'b'");
+        d.setClipGain(a, 0.5f, L"Level of 'a'");
+        {
+            const auto h = d.history();
+            check(h.size() == 4 && h[3].current && d.historyIndex() == 3,
+                  L"history: every step is listed, newest last",
+                  std::to_wstring(h.size()));
+            check(h[1].desc == L"Add 'a'" && h[3].desc == L"Level of 'a'",
+                  L"history: steps carry the description the edit was committed with");
+            check(h[0].applied && h[1].applied && h[2].applied && h[3].applied,
+                  L"history: nothing undone yet, so every step is in effect");
+            check(h[1].saved && !h[3].saved,
+                  L"history: the saved marker sits on the step the file holds");
+        }
+
+        // Undone steps stay listed -- greyed, not applied -- because they are still
+        // reachable with Redo, and that is precisely the question being asked.
+        d.undo(); d.undo();
+        {
+            const auto h = d.history();
+            check(h.size() == 4 && d.historyIndex() == 1,
+                  L"history: undoing keeps the undone steps listed",
+                  std::to_wstring(h.size()) + L"/" + std::to_wstring(d.historyIndex()));
+            check(h[1].current && h[1].applied && !h[2].applied && !h[3].applied,
+                  L"history: the undone steps are marked not applied");
+            check(!d.isModified(), L"history: undoing back to the saved step is clean again");
+        }
+
+        // Jumping is undo/redo by another route, so it has to restore the same state.
+        check(d.gotoHistory(3) && d.historyIndex() == 3 &&
+              d.project().library.size() == 2 && d.project().library[0].gain == 0.5f,
+              L"history: jumping forward restores the state that step produced");
+        check(d.gotoHistory(0) && d.project().library.empty() && d.historyIndex() == 0,
+              L"history: jumping to the start empties the project again");
+        check(!d.gotoHistory(0) && !d.gotoHistory(-1) && !d.gotoHistory(99),
+              L"history: jumping nowhere, or off the ends, does nothing");
+        // ...and the trail it leaves must lead back the way it came: redo from here
+        // has to walk forward through the same steps, not down some older branch.
+        d.redo(d.defaultRedoBranch());
+        d.redo(d.defaultRedoBranch());
+        d.redo(d.defaultRedoBranch());
+        check(d.historyIndex() == 3 && d.project().library.size() == 2,
+              L"history: redo after a jump follows the same line back");
+
+        // A new edit made after undoing forks the tree. The list follows the branch
+        // just taken, and the fork point says how many other versions exist so the
+        // user isn't left thinking the old ones vanished.
+        d.undo();
+        d.removeClip(a);
+        {
+            const auto h = d.history();
+            check(h.size() == 4 && h[3].desc != L"Level of 'a'" && h[3].current,
+                  L"history: a new edit after undo replaces the listed tail");
+            check(h[2].branches == 2,
+                  L"history: the fork point reports the alternative it isn't showing",
+                  std::to_wstring(h[2].branches));
+        }
+    }
+
     // Sub-range preview source: the UI arms a BufferSource over [begin,end) and
     // maps clip frames to source frames with (frame - begin), so position() must
     // stay relative to begin and rendering must stop at end.

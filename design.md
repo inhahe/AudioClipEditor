@@ -15,11 +15,11 @@ sync with behavior changes.
 | `decoder.{h,cpp}` | MF Source Reader → stereo float at the project rate |
 | `encoder.{h,cpp}` | WAV writer (manual RIFF; 16/24-bit PCM, 32-bit float) + MF Sink Writer (MP3/AAC/WMA); output-rate resampling |
 | `engine.{h,cpp}` | WASAPI shared-mode render thread; `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
-| `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker |
-| `document.{h,cpp}` | Owns `Project` + undo tree + `ViewState`; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`) |
+| `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker; `chain()` flattens the walkable line for the History window and `gotoNode()` jumps to any point on it |
+| `document.{h,cpp}` | Owns `Project` + undo tree + `ViewState`; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`); `history()`/`gotoHistory()` expose the step list |
 | `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms, voice isolation, LTAS timbre matching, manual region edits (see below) |
 | `waveform.{h,cpp}` | GDI oscilloscope: per-column min/max envelope (one `PolyPolyline`) zoomed out, per-sample trace zoomed in |
-| `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, file/project pickers |
+| `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, history list, file/project pickers |
 | `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`), toolbar row wrapping (`flowButtons`), and scrollbar sizing (`scrollBarsNeeded`, `scrollThumb`, `scrollFromThumb`) |
 | `transport.h` | Pure play/pause decision logic, likewise split out to be testable: `decide(State, Press)` → pause / resume / restart-from-where, for both the single combined control and the editor's labelled button pair |
 | `selhistory.h` | Pure undo/redo state machine for the waveform selection, kept out of the document's snapshot tree; a `base` token ties the stack to a point in the document history |
@@ -1339,11 +1339,80 @@ correction lands between 60 Hz and 14 kHz. It measured **1.4 dB at 70 Hz**;
 before the weights, over 20 dB at 30 Hz. DC and Nyquist are separately asserted
 to come out at exactly 0 dB.
 
+**History** (14 checks) is tested for the flags rather than the plumbing, because
+a step listed as applied when it has actually been undone is worse than no list
+at all: a new project is one current, saved step; three edits list four steps
+newest-last with their commit descriptions; undoing twice *keeps the undone steps
+listed* (they're still redoable — that is the question being asked) but marks
+them not applied; the saved marker sits on the step the file holds and moves with
+`markSaved`. Jumping is checked to restore the same state undo/redo would
+(including clip gain, which nothing on screen would show), to refuse a jump to
+where it already is or off either end, and — the subtle one — to leave a redo
+trail that walks *forward the way it came* rather than down an older branch. A
+new edit made after undoing is checked to replace the listed tail and to leave
+the fork point reporting `branches == 2`.
+
 ## Undo / scopes
 
 Voice cleaning (any algorithm), voice isolation and timbre matching replace clip
 buffers and commit **one snapshot per operation** — a track-wide or project-wide
 clean / isolation / match is a single undo step.
+
+## History window and undo feedback
+
+The problem this solves: an effect changes only how a clip *sounds*. After
+matching the timbre of 23 clips, undoing twice and redoing once, nothing on
+screen distinguishes "the match is applied" from "the match is undone" — and the
+one command whose whole purpose is to change state, `Ctrl+Z`, looks like a key
+that did nothing. Two pieces, both built on descriptions the undo tree was
+already storing.
+
+**`UndoTree::chain(int* currentIndex)`** returns the single line the user can
+walk with the keyboard: root → … → current (everything applied), then on past
+current down the remembered `lastChild` trail to the tip (everything undone but
+still redoable). Side branches are *not* listed — they're reachable only through
+the redo picker — but a listed node with `children.size() > 1` lets the UI say
+how many alternatives it isn't showing, so the old ones don't look lost.
+
+**`UndoTree::gotoNode`** is click-to-jump. It re-points `lastChild` all the way
+up the path to the target, because jumping has to be indistinguishable from
+pressing undo/redo the right number of times: after jumping back, undoing
+further and then redoing must return *the way it came*, not down whichever
+branch happened to be last followed.
+
+**`Document::history()`** turns the chain into `HistoryEntry` rows (`desc`,
+`applied`, `current`, `saved`, `branches`); `historyIndex()` says where we are;
+`gotoHistory(index)` moves there. `gotoHistory` takes an **index**, not a node
+pointer, and re-derives the chain: the History window hands back a row number it
+was given earlier, and a node pointer held across that boundary would dangle the
+moment anything committed in between.
+
+**`dlg::history` (`dialogs.cpp`)** is an owner-drawn listbox (`LBS_OWNERDRAWFIXED`)
+because the applied/undone distinction has to be visible at a glance and a plain
+listbox can only vary the text: applied rows draw in `COLOR_WINDOWTEXT`, undone
+rows in `COLOR_GRAYTEXT`, and a marker column (`▶` current, `✓` applied, `↺`
+undone) carries the same information without relying on colour. Rows also call
+out the saved state ("the saved file holds this") and fork points. The window
+**stays open** while the project moves behind it — jumping goes through a
+`std::function<int(int)> jump` callback that returns the new current index rather
+than the dialog closing with a choice — because answering "was the timbre match
+undone?" usually means trying two positions and *listening*, not making one
+decision. Reached from `Edit ▸ History…` or `Ctrl+H`.
+
+**Undo/redo toast** (`App::toast`, `paintToast`, expiry in `onTimer`): a
+transient badge, centred under the toolbar, naming what just moved — *"Undone:
+Match timbre of 23 clips to their average"*. It fires on **every** undo and redo
+rather than trying to classify which edits are visible: a heuristic for "was that
+change on screen?" would be wrong sometimes, and always-accurate feedback beats
+a badge that sometimes stays silent when it mattered. "Nothing left to undo" is
+reported too — that's the case most easily mistaken for a broken key. The
+description comes from `undoDesc()` before undoing and `redoChildDesc(branch)`
+before redoing; selection-history undo (which short-circuits ahead of document
+undo) says *"Undone: selection change"*. The badge is measured with
+`DrawText DT_CALCRECT` using the same flags it is drawn with, not
+`GetTextExtentPoint32` — the two disagree by a pixel or two on overhang, and a
+box one pixel short makes `DT_END_ELLIPSIS` eat the last word, which turns
+"Nothing left to undo" into a different message.
 
 ## Unsaved-changes guard
 
