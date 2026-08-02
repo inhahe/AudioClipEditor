@@ -79,6 +79,9 @@ struct HistoryItem {
     bool current = false;   // the state the project is in
     bool saved = false;     // the state the file on disk holds
     int  branches = 0;      // redo children; >1 means there are unlisted alternatives
+    bool restorable = true; // false: named but its state was not stored (the project
+                            // file's history budget ran out), so it is a record of
+                            // what happened rather than a place to go back to
 };
 struct HistoryContext {
     std::vector<HistoryItem> items;

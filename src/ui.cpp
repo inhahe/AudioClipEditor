@@ -71,7 +71,8 @@ enum {
 enum {
     IDC_ADDFILES = 1000, IDC_NEWPROJ, IDC_OPENPROJ, IDC_SAVEPROJ, IDC_SAVEPROJAS,
     IDC_EXPORTMIX, IDC_EXIT,
-    IDC_UNDO, IDC_REDO, IDC_HISTORY, IDC_ADDTRACK, IDC_CONTROLS, IDC_RIPPLEMODE
+    IDC_UNDO, IDC_REDO, IDC_HISTORY, IDC_ADDTRACK, IDC_CONTROLS, IDC_RIPPLEMODE,
+    IDC_SAVEHISTORY
 };
 
 struct CardLayout { int clipId; RECT card, top, play, del, wave, vol, crop, savesel; };
@@ -208,6 +209,12 @@ struct App {
     // — a screenshot hotkey, a focus change, letting go early — would otherwise
     // silently turn a ripple, which always succeeds, into a plain move, which
     // the next clip on the lane can refuse. Esc still cancels the whole drag.
+    // Whether a saved project carries its edit history. On by default: the History
+    // window's whole job is answering "did I apply that?", and a session boundary is
+    // exactly when that stops being answerable from memory. Off is for when the
+    // history's superseded audio is making the file bigger than it's worth.
+    bool saveHistory = true;
+
     bool rippleMode = false;      // standing preference (session-scoped)
     bool rippleShift = false;     // Shift seen during this drag (latched)
     bool rippleDrag = false;      // == rippleMode != rippleShift, for this drag
@@ -2253,18 +2260,45 @@ struct App {
         std::wstring path = dlg::saveProject(hwnd, suggested);
         if (path.empty()) return false;
         storeViewState();
-        if (!doc.saveProject(path)) { MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING); return false; }
-        projectPath = path; setTitle(); return true;
+        if (!doc.saveProject(path, saveHistory)) { MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING); return false; }
+        projectPath = path; setTitle(); reportHistoryCost(); return true;
     }
     bool saveProjectFile() {
         if (projectPath.empty()) return saveProjectAs();
         storeViewState();
-        if (!doc.saveProject(projectPath)) {
+        if (!doc.saveProject(projectPath, saveHistory)) {
             MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING);
             return false;
         }
         setTitle();
+        reportHistoryCost();
         return true;
+    }
+    // A save that quietly grew the file by a gigabyte, or quietly dropped the steps
+    // that answer "did I apply that?", is exactly the kind of thing you only find
+    // out about far too late. Both are worth one line in the toast.
+    void reportHistoryCost() {
+        const int64_t extra = doc.lastSaveHistoryBytes();
+        const int dropped = doc.lastSaveHistoryDropped();
+        if (dropped > 0) {
+            toast(L"Saved \u2014 " + std::to_wstring(dropped) + L" older step" +
+                  (dropped == 1 ? L" was" : L"s were") +
+                  L" recorded by name only (history storage limit)");
+        } else if (extra >= 64ll * 1024 * 1024) {
+            wchar_t buf[128];
+            swprintf(buf, 128, L"Saved \u2014 the edit history added %.0f MB to the file",
+                     (double)extra / (1024.0 * 1024.0));
+            toast(buf);
+        }
+    }
+    void toggleSaveHistory() {
+        saveHistory = !saveHistory;
+        CheckMenuItem(GetMenu(hwnd), IDC_SAVEHISTORY,
+                      MF_BYCOMMAND | (saveHistory ? MF_CHECKED : MF_UNCHECKED));
+        toast(saveHistory
+              ? L"Projects will store their edit history \u2014 reopening one keeps every step"
+              : L"Projects will be saved without their edit history \u2014 smaller files, "
+                L"but reopening starts from one step");
     }
     // Guard against losing unsaved work before an action that discards the current
     // project (exit, open another project). Returns true if the caller may proceed
@@ -2372,7 +2406,8 @@ struct App {
             L"    scrollbar along the bottom, and the view follows the playhead\n"
             L"    while playing (scrolling by hand stops it until you play again)\n\n"
             L"Keys:  Space = play/pause   Ctrl+Z = undo   Ctrl+Shift+Z = redo\n"
-            L"       Ctrl+H = history (every step, which are applied, jump to any)\n"
+            L"       Ctrl+H = history (every step, which are applied, jump to any;\n"
+            L"                kept in the project file, so reopening keeps the list)\n"
             L"       \u2190 \u2192 scroll the timeline (Ctrl or PgUp/PgDn = page)\n"
             L"       Home / End = jump to the start / end of the arrangement",
             L"Controls", MB_ICONINFORMATION);
@@ -2502,8 +2537,15 @@ struct App {
         int branch = doc.defaultRedoBranch();
         if (doc.redoBranchCount() > 1) {
             HMENU m = CreatePopupMenu();
-            for (int i = 0; i < doc.redoBranchCount(); ++i)
-                AppendMenuW(m, MF_STRING, IDM_REDO_BASE + i, doc.redoChildDesc(i).c_str());
+            for (int i = 0; i < doc.redoBranchCount(); ++i) {
+                // A branch read back from a project file without its state is still
+                // named here -- leaving it out would make the alternatives look
+                // fewer than they were -- but it cannot be chosen.
+                const bool ok = doc.redoBranchRestorable(i);
+                AppendMenuW(m, MF_STRING | (ok ? 0 : MF_GRAYED), IDM_REDO_BASE + i,
+                            (doc.redoChildDesc(i) +
+                             (ok ? L"" : L"   (state not stored)")).c_str());
+            }
             POINT p; GetCursorPos(&p);
             int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN, p.x, p.y, 0, hwnd, nullptr);
             DestroyMenu(m);
@@ -2521,7 +2563,7 @@ struct App {
     void showHistory() {
         dlg::HistoryContext ctx;
         for (const auto& e : doc.history())
-            ctx.items.push_back({ e.desc, e.applied, e.current, e.saved, e.branches });
+            ctx.items.push_back({ e.desc, e.applied, e.current, e.saved, e.branches, e.restorable });
         ctx.jump = [this](int index) {
             if (doc.gotoHistory(index)) {
                 afterHistory();
@@ -3253,6 +3295,8 @@ struct App {
         AppendMenuW(file, MF_STRING, IDC_OPENPROJ, L"Open Project\u2026");
         AppendMenuW(file, MF_STRING, IDC_SAVEPROJ, L"Save Project\tCtrl+S");
         AppendMenuW(file, MF_STRING, IDC_SAVEPROJAS, L"Save Project As\u2026");
+        AppendMenuW(file, MF_STRING | (saveHistory ? MF_CHECKED : 0), IDC_SAVEHISTORY,
+                    L"Store the edit history in project files");
         AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(file, MF_STRING, IDC_EXPORTMIX, L"Export Mixdown\u2026");
         AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
@@ -3311,6 +3355,7 @@ struct App {
         case IDC_ADDTRACK: addTrackAndReveal(); break;
         case IDC_CONTROLS: showControls(); break;
         case IDC_RIPPLEMODE: toggleRippleMode(); break;
+        case IDC_SAVEHISTORY: toggleSaveHistory(); break;
         }
     }
 

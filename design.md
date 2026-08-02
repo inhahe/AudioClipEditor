@@ -15,7 +15,7 @@ sync with behavior changes.
 | `decoder.{h,cpp}` | MF Source Reader → stereo float at the project rate |
 | `encoder.{h,cpp}` | WAV writer (manual RIFF; 16/24-bit PCM, 32-bit float) + MF Sink Writer (MP3/AAC/WMA); output-rate resampling |
 | `engine.{h,cpp}` | WASAPI shared-mode render thread; `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
-| `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker; `chain()` flattens the walkable line for the History window and `gotoNode()` jumps to any point on it |
+| `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker; `chain()` flattens the walkable line for the History window and `gotoNode()` jumps to any point on it; `allNodes()`/`rebuild()` round-trip the whole tree through the project file, `hasSnapshot` marks steps stored by name only, and `~UndoNode` tears down iteratively so a long history can't overflow the stack |
 | `document.{h,cpp}` | Owns `Project` + undo tree + `ViewState`; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`); `history()`/`gotoHistory()` expose the step list |
 | `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms, voice isolation, LTAS timbre matching, manual region edits (see below) |
 | `waveform.{h,cpp}` | GDI oscilloscope: per-column min/max envelope (one `PolyPolyline`) zoomed out, per-sample trace zoomed in |
@@ -859,7 +859,11 @@ alongside — deliberately **not inside** — `Project`:
   `confirmDiscardChanges()` all go through it.
 - `.acep` **format v3** appends the block (`selClipId`, `selStart`, `selEnd`,
   `playheadFrame`) **after the tracks**, so the older sections parse identically;
-  v1/v2 files simply load with a default (empty) view state.
+  v1/v2 files simply load with a default (empty) view state. **v4** appends the
+  edit history after *that*, on the same principle — see "Persisting the history"
+  below. Each version has only ever added a trailer, so every reader understands
+  every older file and older readers understand as much of a newer file as they
+  have sections for.
 
 ### Surviving edits: `clampSelection`
 
@@ -1445,7 +1449,7 @@ further and then redoing must return *the way it came*, not down whichever
 branch happened to be last followed.
 
 **`Document::history()`** turns the chain into `HistoryEntry` rows (`desc`,
-`applied`, `current`, `saved`, `branches`); `historyIndex()` says where we are;
+`applied`, `current`, `saved`, `branches`, `restorable`); `historyIndex()` says where we are;
 `gotoHistory(index)` moves there. `gotoHistory` takes an **index**, not a node
 pointer, and re-derives the chain: the History window hands back a row number it
 was given earlier, and a node pointer held across that boundary would dangle the
@@ -1462,6 +1466,72 @@ out the saved state ("the saved file holds this") and fork points. The window
 than the dialog closing with a choice — because answering "was the timbre match
 undone?" usually means trying two positions and *listening*, not making one
 decision. Reached from `Edit ▸ History…` or `Ctrl+H`.
+
+### Persisting the history — `.acep` v4 and the buffer pool
+
+The history used to die with the session: `loadProject` called `undo_.init()` and
+you got one step. That is backwards, because a session boundary is exactly when
+"did I apply the timbre match?" stops being answerable from memory — the window
+was empty precisely when it was most needed.
+
+Writing it is not a plain serialisation chore. Every `UndoNode` holds a whole
+`Project`, and Projects share their audio through `shared_ptr`, so a twenty-step
+history costs almost nothing in memory and would cost twenty copies of the audio
+on disk if written the obvious way. So the format gets a **content-addressed
+buffer pool** and snapshots reference it by index:
+
+- **Slots `0 … library-1` are the current library's buffers**, which the v3 body
+  has already written inline. Slot numbering is the library *position*, not a
+  dedup counter, because that is the only numbering a reader can reproduce
+  without being told it. A snapshot referring to audio the project still uses is
+  therefore free — which is the common case, since most steps (placements,
+  gains, renames, moves) change no audio at all.
+- **Only superseded buffers are appended**: earlier versions of clips that a
+  destructive edit replaced, and clips that were deleted. Identity is the
+  pointer, not the contents — that is exactly the sharing the undo tree creates,
+  and hashing every sample on every save to find more would cost more than it saves.
+- **Loading rebuilds the sharing**, handing one `shared_ptr` (and one `PeakCache`,
+  built once per slot) to every snapshot that wants it. So the round trip is
+  lossless in the thing that matters: memory usage after a load is what it was
+  before the save, not one copy per step.
+
+**The tree itself** is written flat — `allNodes()` walks it breadth-first, which
+guarantees parents come before children, so `rebuild()` can reconstruct it from
+one parent index per node. Each node carries `lastChild` (the remembered redo
+branch) so a fork comes back pointing the way it was pointing. `rebuild()`
+rejects anything malformed outright rather than building half a tree: a corrupt
+history must cost the history, never the project, which by then is already parsed
+and intact. The current node's snapshot is overwritten with the project as read
+from the file's own body, so the two can't disagree.
+
+**The budget** (`g_historyAudioBudget`, 512 MB) caps the *appended* audio only.
+Destructive effects rewrite every clip they touch, so a handful of them genuinely
+does multiply a project's size, and a save that silently turned 200 MB into 3 GB
+would be a worse surprise than a shortened history. Nodes are admitted
+**nearest-first** — breadth-first from the current node over parent *and* child
+links — which is both the right priority and the cheapest one, since recent steps
+are the most likely to be wanted back *and* the most likely to share their audio
+with the current project. A node that doesn't fit is still written, by **name
+only** (`hasSnapshot = false`): the History window can still say the timbre match
+happened, it just can't take you back to before it. Everything that can reach a
+node checks the flag — `canUndo` stops at the gap, `defaultRedoBranch` skips over
+it, `gotoHistory` refuses, and the row draws with a `·` marker instead of a tick
+or a rewind arrow, because either of those would promise a state that isn't there.
+`Document::setHistoryBudgetBytes` exists so the trimming path can be tested at a
+budget of one byte instead of with a half-gigabyte fixture.
+
+**Compatibility runs both ways.** The trailer is appended after everything a v3
+reader knows about, so an older build opens a v4 project and simply doesn't see
+the history; and `File ▸ Store the edit history in project files` off writes a
+v3 file byte-for-byte, for when the superseded audio isn't worth the disk.
+
+**`~UndoNode` tears the tree down iteratively.** Letting `unique_ptr` do it
+recurses once per node, and a history is one long thin chain — one stack frame
+per edit the project has ever recorded. That was survivable when a history lasted
+only as long as a session; now that it accumulates across reopens it grows
+without bound, and the crash would land on whoever had used the app longest. The
+selftest builds a 20 000-step history and destroys it; without the iterative
+destructor that test kills the process (verified).
 
 **Undo/redo toast** (`App::toast`, `paintToast`, expiry in `onTimer`): a
 transient badge, centred under the toolbar, naming what just moved — *"Undone:

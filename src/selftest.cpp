@@ -677,6 +677,216 @@ int runSelfTest() {
         }
     }
 
+    // Edit history in the project file (.acep v4). The History window is the only
+    // way to tell whether an inaudible-on-screen effect like a timbre match is still
+    // applied, and before this the answer was thrown away on every reopen -- exactly
+    // when it stops being answerable from memory. What makes it more than a
+    // serialisation chore is that every step holds a whole Project, and Projects
+    // share their audio through shared_ptr: write that naively and a twenty-step
+    // history multiplies the file by twenty. So the sharing has to survive the round
+    // trip, which is what most of these checks are really about.
+    {
+        const std::wstring proj = dir + L"\\_selftest_hist.acep";
+        auto fileSize = [](const std::wstring& p) -> int64_t {
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &fad)) return -1;
+            ULARGE_INTEGER u; u.LowPart = fad.nFileSizeLow; u.HighPart = fad.nFileSizeHigh;
+            return (int64_t)u.QuadPart;
+        };
+        const int64_t clipBytes = (int64_t)(rate * 0.5) * 2 * (int64_t)sizeof(float);
+
+        Document d; d.init(rate);
+        int a = d.addClip(L"a", makeSine(rate, 0.5, 300.0), L"", L"Add 'a'");
+        int b = d.addClip(L"b", makeSine(rate, 0.5, 400.0), L"", L"Add 'b'");
+        int tid = d.project().tracks[0].id;
+        d.placeClip(tid, a, 0, L"Place 'a'");
+        d.placeClip(tid, b, rate / 2, L"Place 'b'");
+        d.setClipGain(a, 0.5f, L"Level of 'a'");
+        check(d.saveProject(proj), L"history file: a project with history saves");
+
+        // Six steps, none of which changed any audio, so the history costs nothing
+        // beyond the two clips the project already contains. If the snapshots were
+        // written per-step this would be six times the size.
+        check(d.lastSaveHistoryBytes() == 0 && d.lastSaveHistoryDropped() == 0,
+              L"history file: steps that reuse existing audio add nothing to the file",
+              std::to_wstring(d.lastSaveHistoryBytes()));
+        const int64_t packed = fileSize(proj);
+        check(packed > clipBytes * 2 && packed < clipBytes * 2 + 65536,
+              L"history file: the file is the audio once, not once per step",
+              std::to_wstring(packed) + L" vs " + std::to_wstring(clipBytes * 2));
+
+        {
+            Document d2; d2.init(rate);
+            check(d2.loadProject(proj), L"history file: it loads back");
+            const auto h = d2.history();
+            check(h.size() == 6, L"history file: every step comes back",
+                  std::to_wstring(h.size()));
+            check(h[1].desc == L"Add 'a'" && h[5].desc == L"Level of 'a'",
+                  L"history file: the step names survive -- which is the whole point");
+            check(h[5].current && h[5].saved && h[5].applied,
+                  L"history file: you come back standing where you left, on the saved step");
+            check(!d2.isModified(), L"history file: a freshly loaded project is clean");
+            // The real test of the buffer pool: undo has to produce the *old* audio,
+            // which only exists because the snapshot's clip found it in the pool.
+            check(d2.project().findClip(a) && d2.project().findClip(a)->gain == 0.5f,
+                  L"history file: the loaded state is the state that was saved");
+            check(d2.canUndo(), L"history file: undo works on a loaded project");
+            d2.undo();
+            check(d2.project().findClip(a) && d2.project().findClip(a)->gain == 1.0f,
+                  L"history file: undoing after a reload really restores the old state");
+            check(d2.isModified(), L"history file: undoing past the saved step dirties it");
+            d2.redo(d2.defaultRedoBranch());
+            check(!d2.isModified() && d2.historyIndex() == 5,
+                  L"history file: redoing back to the saved step cleans it again");
+            // Walk all the way out and back: every snapshot in the chain has to be
+            // real, not just the one that happened to be current.
+            int steps = 0;
+            while (d2.canUndo()) { d2.undo(); ++steps; }
+            check(steps == 5 && d2.project().library.empty(),
+                  L"history file: the chain undoes all the way back to the empty project",
+                  std::to_wstring(steps));
+        }
+
+        // A destructive edit makes a genuinely new buffer, so the old one now exists
+        // only in the history and has to be paid for -- once, not once per step.
+        d.replaceClipBuffer(a, makeSine(rate, 0.5, 900.0), L"Rewrite 'a'");
+        d.setClipGain(b, 0.25f, L"Level of 'b'");
+        check(d.saveProject(proj), L"history file: saves after a destructive edit");
+        check(d.lastSaveHistoryBytes() == clipBytes,
+              L"history file: a superseded buffer costs exactly one copy",
+              std::to_wstring(d.lastSaveHistoryBytes()) + L" vs " + std::to_wstring(clipBytes));
+        {
+            Document d2; d2.init(rate);
+            check(d2.loadProject(proj), L"history file: loads with superseded audio in it");
+            const Clip* now = d2.project().findClip(a);
+            check(now && now->buffer && std::fabs(now->buffer->samples[100] -
+                  makeSine(rate, 0.5, 900.0)->samples[100]) < 1e-6f,
+                  L"history file: the current audio is the rewritten one");
+            d2.undo();                                  // Level of 'b'
+            d2.undo();                                  // Rewrite 'a'
+            const Clip* was = d2.project().findClip(a);
+            check(was && was->buffer && std::fabs(was->buffer->samples[100] -
+                  makeSine(rate, 0.5, 300.0)->samples[100]) < 1e-6f,
+                  L"history file: undoing a destructive edit gets the original audio back");
+        }
+
+        // Saving without the history writes what older builds wrote, and this build
+        // still reads it -- the compatibility promise runs both ways.
+        check(d.saveProject(proj, false), L"history file: saves with history turned off");
+        check(fileSize(proj) < packed + clipBytes,
+              L"history file: turning history off drops the superseded audio");
+        {
+            Document d2; d2.init(rate);
+            check(d2.loadProject(proj), L"history file: a history-less project still loads");
+            check(d2.history().size() == 1 && !d2.canUndo(),
+                  L"history file: no history in the file means one step, as before");
+            check(d2.project().library.size() == 2,
+                  L"history file: the project itself is unaffected by dropping history");
+        }
+
+        // The budget. Squeeze it until the superseded audio cannot fit and the oldest
+        // steps have to go name-only -- they must still be *listed*, because "was the
+        // timbre match ever applied?" is answerable from a name alone.
+        const int64_t saveBudget = Document::historyBudgetBytes();
+        Document::setHistoryBudgetBytes(1);             // nothing extra fits at all
+        check(d.saveProject(proj), L"history file: saves with the budget exhausted");
+        check(d.lastSaveHistoryDropped() > 0,
+              L"history file: an unaffordable step is dropped rather than written");
+        {
+            Document d2; d2.init(rate);
+            check(d2.loadProject(proj), L"history file: a budget-trimmed project loads");
+            const auto h = d2.history();
+            check(h.size() == 8, L"history file: trimmed steps are still listed by name",
+                  std::to_wstring(h.size()));
+            int restorable = 0;
+            for (const auto& e : h) if (e.restorable) ++restorable;
+            check(restorable < (int)h.size() && restorable > 0,
+                  L"history file: some steps kept their state and some did not",
+                  std::to_wstring(restorable));
+            check(h[7].current && h[7].restorable,
+                  L"history file: where you are is never the step that gets dropped");
+            // The root survives any budget because its library is empty and so costs
+            // nothing -- the trimming is driven by audio, not by step count.
+            check(h[0].restorable, L"history file: a step that needs no audio always fits");
+            int firstGone = -1, lastKept = -1;
+            for (int i = 0; i < (int)h.size(); ++i) {
+                if (!h[(size_t)i].restorable && firstGone < 0) firstGone = i;
+                if (h[(size_t)i].restorable && i != 7) lastKept = i;
+            }
+            check(firstGone > 0 && !d2.gotoHistory(firstGone),
+                  L"history file: jumping to a step with no stored state is refused",
+                  std::to_wstring(firstGone));
+            check(lastKept >= 0 && d2.gotoHistory(lastKept) && d2.historyIndex() == lastKept,
+                  L"history file: jumping to one that kept its state still works",
+                  std::to_wstring(lastKept));
+            d2.gotoHistory(7);
+            // Undo must stop at the gap rather than walk into a step with no state.
+            int walked = 0;
+            while (d2.canUndo()) { d2.undo(); ++walked; }
+            check(walked < 7, L"history file: undo stops where the stored states stop",
+                  std::to_wstring(walked));
+        }
+        Document::setHistoryBudgetBytes(saveBudget);
+        check(Document::historyBudgetBytes() == saveBudget,
+              L"history file: the budget is restored for the rest of the run");
+
+        // Branches. History is a tree, not a list: editing after an undo forks it,
+        // and the abandoned branch is still reachable through the redo picker. The
+        // file stores parent links and the remembered branch per node, so this is
+        // where a flattening bug would show up -- a tree that comes back as a chain
+        // would silently lose whichever alternative wasn't being followed.
+        {
+            Document f; f.init(rate);
+            int x = f.addClip(L"x", makeSine(rate, 0.1, 300.0), L"", L"Add 'x'");
+            f.addClip(L"y", makeSine(rate, 0.1, 400.0), L"", L"Add 'y'");
+            f.undo();                                   // back to just 'x'
+            f.setClipGain(x, 0.25f, L"Level of 'x'");   // forks: 'y' vs this
+            check(f.redoBranchCount() == 0 && f.history()[1].branches == 2,
+                  L"history file: the fork exists before saving");
+            check(f.saveProject(proj), L"history file: a forked history saves");
+
+            Document g; g.init(rate);
+            check(g.loadProject(proj), L"history file: a forked history loads");
+            const auto h = g.history();
+            check(h.size() == 3 && h[2].desc == L"Level of 'x'" && h[2].current,
+                  L"history file: the branch that was taken is the one listed");
+            check(h[1].branches == 2,
+                  L"history file: the fork point still knows about the other version",
+                  std::to_wstring(h[1].branches));
+            g.undo();
+            check(g.redoBranchCount() == 2 && g.defaultRedoBranch() == 1,
+                  L"history file: both branches come back, and the one last taken is default",
+                  std::to_wstring(g.defaultRedoBranch()));
+            check(g.redoChildDesc(0) == L"Add 'y'" && g.redoChildDesc(1) == L"Level of 'x'",
+                  L"history file: the branches keep their order and their names");
+            g.redo(0);                                  // deliberately the abandoned one
+            check(g.project().library.size() == 2 &&
+                  g.project().findClip(x) && g.project().findClip(x)->gain == 1.0f,
+                  L"history file: the abandoned branch is still a real state to go to");
+        }
+        DeleteFileW(proj.c_str());
+
+        // A history now outlives the session that made it, so its depth is bounded
+        // by how long the project has been worked on rather than by one sitting.
+        // Building and then destroying a deep one is the check: the teardown used to
+        // recurse once per node, so this would have died in the destructor.
+        {
+            Document deep; deep.init(rate);
+            int id = deep.addClip(L"d", makeSine(rate, 0.01, 300.0), L"", L"add");
+            for (int i = 0; i < 20000; ++i)
+                deep.setClipGain(id, 0.5f + (float)(i % 3) * 0.1f, L"level");
+            check((int)deep.history().size() == 20002,
+                  L"history: a twenty-thousand step history builds and walks",
+                  std::to_wstring(deep.history().size()));
+            int back = 0;
+            while (deep.canUndo() && back < 30000) { deep.undo(); ++back; }
+            check(back == 20001 && deep.project().library.empty(),
+                  L"history: and undoes all the way back to the empty root",
+                  std::to_wstring(back));
+        }   // <- the destructor is the thing under test
+        check(true, L"history: a deep history tears down without overflowing the stack");
+    }
+
     // Sub-range preview source: the UI arms a BufferSource over [begin,end) and
     // maps clip frames to source frames with (frame - begin), so position() must
     // stay relative to begin and rendering must stop at end.

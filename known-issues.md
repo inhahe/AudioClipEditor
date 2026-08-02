@@ -30,33 +30,44 @@ fix belongs in `design.md`.
 
 ## Technical debt
 
-### Edit history does not survive save/load
+### A loaded history holds all its audio in RAM
 
-- **Where:** `document.cpp` — `saveProject` (the `.acep` v3 writer stops at the
-  view state) and `loadProject:438`, `undo_.init(project_)` — "fresh history for
-  loaded project".
-- **Symptom:** reopening a project gives you a History window with exactly one
-  step and no undo. Saving is fine *within* a session (`markSaved` only moves the
-  saved marker onto the current node; the tree is untouched), but quitting loses
-  every step.
-- **Why it matters:** the History window exists because a timbre match, a noise
-  reduction or a normalise changes nothing you can see, so the list is the only
-  way to answer "did I apply that, or did I undo it?". That answer evaporates on
-  reload — which is precisely when it is most likely to be asked, since a session
-  boundary is where memory of what was done runs out.
-- **Cause / why it isn't just a serialisation chore:** every `UndoNode` holds a
-  full `Project` snapshot. In memory that is cheap because the clips' buffers are
-  shared via `shared_ptr`, but the `.acep` format writes each clip's raw float
-  samples inline (`saveProject:357`) with no dedup or back-reference. Writing N
-  history steps the obvious way writes the audio up to N times — a 20-step
-  history on a 200 MB project would be a multi-gigabyte file.
-- **Proper fix:** content-address the audio in the format. Bump to v4, write each
-  *unique* `AudioBuffer` once into a buffer pool keyed by identity, have clips
-  (in every snapshot) reference a pool index, then serialise the undo tree as
-  nodes of `{parent, desc, lastChild, project-with-buffer-indices}`. Reload
-  rebuilds the pool as `shared_ptr`s so the in-memory sharing is restored, which
-  also makes the load cheaper than it is today. Worth capping the persisted depth
-  (and offering "save without history"), since even deduped, a history that
-  spans several destructive edits stores every intermediate version of the audio.
-- **Workaround today:** none in-app. Before quitting, the History window is the
-  record — read it while it still exists.
+- **Where:** `document.cpp`, `loadProject` — the v4 trailer reader fills a
+  `BufferPool` with every superseded `AudioBuffer` the history refers to, and
+  `buildPeaks` runs over each one.
+- **Symptom:** opening a project with a long history of *destructive* edits
+  (timbre match, noise reduction, normalise) costs both memory and load time in
+  proportion to the history, not to the project. The audio budget caps this at
+  512 MB of superseded samples on top of the project itself, so it is bounded,
+  but the worst case is a noticeably slower open and a much larger process.
+- **Why it isn't urgent:** ordinary edits — placements, moves, gains, renames —
+  add nothing at all, because their snapshots share the live library's buffers.
+  Only edits that actually rewrite audio contribute, and only the versions no
+  longer in use.
+- **Proper fix:** load the trailer lazily. Record each pool slot's file offset
+  and length instead of its samples, and fault the buffer in (plus its peaks) the
+  first time a snapshot needing it is actually restored. `AudioBufferPtr` is
+  already a `shared_ptr`, so the swap-in point is contained; the awkward part is
+  that `loadProject` currently closes the file before returning, so the Document
+  would have to keep a handle (or the path plus offsets) alive.
+- **Workaround today:** `File ▸ Store the edit history in project files` off.
+
+### History node count grows without bound across sessions
+
+- **Where:** `undo.h` / the v4 trailer. The audio budget caps the *samples* a
+  save may store, but nothing caps the number of steps.
+- **Symptom:** a project worked on over months accumulates every step ever taken.
+  Each name-only step is small (roughly a description plus three ints, ~100
+  bytes), so 10 000 steps is on the order of 1 MB of file and a comparable amount
+  of RAM — currently a non-problem, but monotonic.
+- **Mitigated, not solved:** the stack-overflow consequence *is* fixed —
+  `~UndoNode` tears the tree down iteratively, and a selftest builds and destroys
+  a 20 000-step history (it kills the process without the fix). What remains is
+  unbounded growth.
+- **Proper fix:** cap the persisted step count by re-rooting. Walk up from the
+  current node keeping at most N ancestors, drop everything above, and write the
+  new topmost kept node as the root — its snapshot is self-contained, so the
+  result is a valid tree that simply can't undo as far back. Needs a rule for
+  side branches hanging off the dropped prefix (drop with it) and a decision on
+  whether the dropped steps should survive as name-only entries, which would
+  defeat the point unless the cap is on *snapshots* rather than on nodes.

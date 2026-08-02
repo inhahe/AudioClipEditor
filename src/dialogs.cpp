@@ -891,11 +891,17 @@ struct HistoryState {
 };
 
 static std::wstring histRowText(const HistoryItem& it) {
-    std::wstring s = it.current ? L"\u25B6  " : it.applied ? L"\u2713  " : L"\u21BA  ";
+    // A step whose state wasn't stored gets its own marker rather than the
+    // applied/undone pair: it is still a true statement about what was done -- which
+    // is the question this window exists to answer -- but it is not somewhere you
+    // can stand, and a tick or a rewind arrow would promise that it is.
+    std::wstring s = !it.restorable ? L"\u00B7  "
+                   : it.current ? L"\u25B6  " : it.applied ? L"\u2713  " : L"\u21BA  ";
     s += it.desc;
     if (it.current) s += L"      \u2190 you are here";
     if (it.saved)   s += it.current ? L", and this is what the saved file holds"
                                     : L"      (the saved file holds this)";
+    if (!it.restorable) s += L"      (recorded, but this state wasn\u2019t stored)";
     if (it.branches > 1)
         s += L"      (+" + std::to_wstring(it.branches - 1) + L" other version" +
              (it.branches > 2 ? L"s" : L"") + L" \u2014 Redo asks which)";
@@ -918,6 +924,9 @@ static void histSetCurrent(HistoryState* st, int cur) {
 static void histJump(HistoryState* st) {
     const int sel = (int)SendMessageW(st->list, LB_GETCURSEL, 0, 0);
     if (sel < 0 || !st->ctx->jump) return;
+    // Refusing in silence is what a broken button looks like. The row already says
+    // why, so a beep is enough to connect the press to the reason.
+    if (!st->ctx->items[(size_t)sel].restorable) { MessageBeep(MB_ICONWARNING); return; }
     histSetCurrent(st, st->ctx->jump(sel));
 }
 
@@ -933,7 +942,8 @@ static LRESULT CALLBACK HistProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         FillRect(di->hDC, &di->rcItem, GetSysColorBrush(sel ? COLOR_HIGHLIGHT : COLOR_WINDOW));
         SetBkMode(di->hDC, TRANSPARENT);
         SetTextColor(di->hDC, sel ? GetSysColor(COLOR_HIGHLIGHTTEXT)
-                                  : GetSysColor(it.applied ? COLOR_WINDOWTEXT : COLOR_GRAYTEXT));
+                                  : GetSysColor(it.applied && it.restorable
+                                                ? COLOR_WINDOWTEXT : COLOR_GRAYTEXT));
         RECT tr = di->rcItem; tr.left += 6;
         const std::wstring row = histRowText(it);
         DrawTextW(di->hDC, row.c_str(), -1, &tr,

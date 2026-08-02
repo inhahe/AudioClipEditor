@@ -71,8 +71,24 @@ public:
     int normalizeClips(int onlyClipId /* -1 = all */, bool acrossAll);
 
     // --- Project I/O and mixdown ---
-    bool saveProject(const std::wstring& path);
+    // `withHistory` writes the undo tree into the file (format v4) so reopening the
+    // project can still answer "did I apply that?". It costs disk: every superseded
+    // version of a clip's audio that the history still refers to has to be stored,
+    // deduplicated but uncompressed. Passing false writes a v3-shaped file holding
+    // only the current state, which is what the older versions of this app wrote.
+    bool saveProject(const std::wstring& path, bool withHistory = true);
     bool loadProject(const std::wstring& path);
+    // Bytes of *superseded* audio the last save wrote (0 when the history fitted in
+    // what the project already contains, which is the common case), and how many
+    // steps had to be stored name-only because the budget ran out.
+    int64_t lastSaveHistoryBytes() const { return lastHistBytes_; }
+    int  lastSaveHistoryDropped() const { return lastHistDropped_; }
+    // How much superseded audio a save may store before it starts recording steps
+    // by name only. Settable so the trimming path can be exercised without building
+    // a half-gigabyte fixture -- it is the fiddliest part of the format, so being
+    // able to test it at a budget of a few hundred bytes is worth the knob.
+    static int64_t historyBudgetBytes();
+    static void setHistoryBudgetBytes(int64_t bytes);
     AudioBufferPtr renderMix() const;   // all tracks mixed to one stereo buffer
 
     // Commit a snapshot after direct live edits (e.g. dragging a volume slider).
@@ -101,6 +117,7 @@ public:
 
     int  redoBranchCount() const { return undo_.redoBranchCount(); }
     std::wstring redoChildDesc(int i) const { return undo_.redoChildDesc(i); }
+    bool redoBranchRestorable(int i) const { return undo_.redoBranchRestorable(i); }
     int  defaultRedoBranch() const { return undo_.defaultRedoBranch(); }
     void redo(int branch);
 
@@ -116,6 +133,10 @@ public:
         bool current = false;   // the state the project is in
         bool saved = false;     // the state the file on disk holds
         int  branches = 0;      // redo children; >1 means alternatives not listed here
+        // False for a step read back from a project whose history exceeded the
+        // storage budget: still named here (which answers "was this done?"), but
+        // its state was not stored, so it can't be gone back to.
+        bool restorable = true;
     };
     std::vector<HistoryEntry> history() const;
     // Where in history() the project currently is.
@@ -155,4 +176,6 @@ private:
     UndoTree undo_;
     const UndoNode* savedNode_ = nullptr;
     ViewState savedView_;            // selection as of the last save/load/new
+    int64_t lastHistBytes_ = 0;      // reporting for the last saveProject
+    int lastHistDropped_ = 0;
 };

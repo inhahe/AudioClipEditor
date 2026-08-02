@@ -82,6 +82,20 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   undid stay listed but greyed (Redo brings them back), and the list marks which
   step the saved file holds. Click any step to jump straight to it, and keep the
   window open while you listen — the project moves behind it.
+- **The history is saved with the project.** Reopen a project days later and the
+  whole list is still there — every step by name, which ones are in effect, and
+  the branches you didn't take — and `Ctrl+Z` still walks back through them. This
+  matters most for exactly the effects you can't see: a session boundary is
+  normally where "did I apply the timbre match?" stops being answerable, and now
+  it isn't. Saving is cheap for ordinary edits (moving clips, volumes, renames
+  cost nothing extra, because the audio hasn't changed), but destructive effects
+  leave the previous version of every clip they touched in the history, and that
+  audio has to be stored. If it gets out of hand the older steps are kept **by
+  name only** — still listed, so the record stays complete, just not somewhere
+  you can jump back to — and the save says so. Turn the whole thing off with
+  **File ▸ Store the edit history in project files** for smaller files; projects
+  saved that way are readable by older versions of the app, and older projects
+  open fine either way.
 - **Tracks & timeline.** The timeline sits on top (sized to just fit the current
   number of tracks) with the clip library below it. Start with one track, add as
   many as you like — once there are more tracks than fit, the tracks pane grows a
@@ -230,7 +244,8 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   used floats to the top). Captures live for the session.
 - **Save / load projects.** Projects are saved as a single `.acep` file with the
   whole library and timeline (audio embedded), so a project is fully
-  self-contained. Your **current selection and playhead position are saved too**,
+  self-contained — and, unless you turn it off, the **edit history** as well.
+  Your **current selection and playhead position are saved too**,
   so reopening a project puts you back exactly where you left off (a selection
   whose clip has since gone is quietly dropped). A selection is real work, so
   changing one counts as an unsaved change — you get the `*` and the usual save
@@ -328,7 +343,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Play all tracks | **▶ Play All** (`Space` when nothing is being previewed) |
 | Stop | **■ Stop** |
 | Undo / Redo | `Ctrl+Z` / `Ctrl+Shift+Z` (or the toolbar buttons) |
-| See what's been done, and what's still applied | `Ctrl+H` (Edit ▸ History…) — click a step to jump to it |
+| See what's been done, and what's still applied | `Ctrl+H` (Edit ▸ History…) — click a step to jump to it; kept when the project is reopened |
+| Save projects without their edit history | File ▸ **Store the edit history in project files** (uncheck) |
 | New project | `Ctrl+N` (File ▸ New Project) |
 | Add files / Save project | `Ctrl+O` / `Ctrl+S` |
 | Open / Save / Export | **File** menu |

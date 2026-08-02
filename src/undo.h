@@ -14,6 +14,29 @@ struct UndoNode {
     UndoNode* parent = nullptr;
     std::vector<std::unique_ptr<UndoNode>> children;
     int lastChild = -1;            // most-recently-followed redo branch
+    // False only for steps read back from a project file whose history was too
+    // large to store in full (see the audio budget in document.cpp). The step is
+    // still *listed* -- its name is the whole point of the History window, and a
+    // name costs a few bytes -- but its project state was never written, so it
+    // cannot be undone to. Everything that can reach a node has to check this.
+    bool hasSnapshot = true;
+
+    // Tear the tree down iteratively. Letting unique_ptr do it would recurse once
+    // per node, and a history is one long thin chain -- so that is one stack frame
+    // per edit the project has ever recorded. That was survivable while a history
+    // lasted only as long as the session; now that projects carry theirs across
+    // reopens it grows without bound, and the crash would land on whoever had used
+    // the app the longest.
+    ~UndoNode() {
+        std::vector<std::unique_ptr<UndoNode>> pending;
+        pending.swap(children);
+        while (!pending.empty()) {
+            std::unique_ptr<UndoNode> n = std::move(pending.back());
+            pending.pop_back();
+            for (auto& c : n->children) pending.push_back(std::move(c));
+            n->children.clear();   // so ~UndoNode on `n` finds nothing left to do
+        }
+    }
 };
 
 class UndoTree {
@@ -37,8 +60,14 @@ public:
         current_ = current_->children.back().get();
     }
 
-    bool canUndo() const { return current_ && current_->parent; }
-    bool canRedo() const { return current_ && !current_->children.empty(); }
+    // A step with no stored snapshot is a dead end in both directions: there is
+    // no state to put the project into, so it is listed but not walked to.
+    bool canUndo() const { return current_ && current_->parent && current_->parent->hasSnapshot; }
+    bool canRedo() const { return defaultRedoBranch() >= 0; }
+    bool redoBranchRestorable(int i) const {
+        return current_ && i >= 0 && i < (int)current_->children.size() &&
+               current_->children[(size_t)i]->hasSnapshot;
+    }
 
     // Move to parent; returns the project state to restore. Caller checks canUndo().
     const Project& undo(std::wstring* undoneDesc = nullptr) {
@@ -50,8 +79,11 @@ public:
     int redoBranchCount() const { return current_ ? (int)current_->children.size() : 0; }
     std::wstring redoChildDesc(int i) const { return current_->children[i]->desc; }
     int defaultRedoBranch() const {
-        if (!canRedo()) return -1;
-        return current_->lastChild >= 0 ? current_->lastChild : 0;
+        if (!current_ || current_->children.empty()) return -1;
+        if (redoBranchRestorable(current_->lastChild)) return current_->lastChild;
+        for (int i = 0; i < (int)current_->children.size(); ++i)
+            if (redoBranchRestorable(i)) return i;
+        return -1;
     }
 
     // Follow a specific redo branch; returns the project state to restore.
@@ -100,7 +132,79 @@ public:
         return current_->snapshot;
     }
 
+    // ---- serialisation support (see the .acep v4 trailer in document.cpp) ----
+
+    // The whole tree, not just the walkable chain, flattened parent-before-child.
+    // That ordering is the point: a reader can rebuild the tree from nothing but a
+    // parent index per node, because a node's parent is always already built.
+    // Iterative rather than recursive: a history is usually one long thin chain,
+    // so recursion here would be one stack frame per edit ever made.
+    std::vector<const UndoNode*> allNodes() const {
+        std::vector<const UndoNode*> out;
+        if (!root_) return out;
+        out.push_back(root_.get());
+        for (size_t i = 0; i < out.size(); ++i)             // grows as it walks
+            for (const auto& c : out[i]->children) out.push_back(c.get());
+        return out;
+    }
+    // Position of `n` in allNodes() order, or -1. Used to write the "where are we"
+    // marker, and small enough that a linear scan is not worth avoiding.
+    static int indexOf(const std::vector<const UndoNode*>& nodes, const UndoNode* n) {
+        for (int i = 0; i < (int)nodes.size(); ++i) if (nodes[(size_t)i] == n) return i;
+        return -1;
+    }
+
+    struct FlatNode {
+        int parent = -1;            // index into the flat vector; -1 = root
+        int lastChild = -1;
+        bool hasSnapshot = true;
+        std::wstring desc;
+        Project snapshot;           // ignored when hasSnapshot is false
+    };
+    // Rebuild a tree from the flat form. Rejects anything malformed rather than
+    // building a half-tree: a corrupt history is not worth risking the project for,
+    // and the caller falls back to a fresh one-step history.
+    bool rebuild(const std::vector<FlatNode>& flat, int currentIndex) {
+        if (flat.empty() || flat[0].parent != -1) return false;
+        if (currentIndex < 0 || currentIndex >= (int)flat.size()) return false;
+        if (!flat[(size_t)currentIndex].hasSnapshot) return false;
+        for (size_t i = 1; i < flat.size(); ++i)            // parent-before-child
+            if (flat[i].parent < 0 || flat[i].parent >= (int)i) return false;
+        for (size_t i = 0; i < flat.size(); ++i) {
+            const int lc = flat[i].lastChild;
+            if (lc < -1) return false;
+        }
+
+        std::vector<UndoNode*> built(flat.size(), nullptr);
+        auto newRoot = std::make_unique<UndoNode>();
+        newRoot->desc = flat[0].desc;
+        newRoot->lastChild = flat[0].lastChild;
+        newRoot->hasSnapshot = flat[0].hasSnapshot;
+        if (flat[0].hasSnapshot) newRoot->snapshot = flat[0].snapshot;
+        built[0] = newRoot.get();
+        for (size_t i = 1; i < flat.size(); ++i) {
+            auto node = std::make_unique<UndoNode>();
+            node->desc = flat[i].desc;
+            node->lastChild = flat[i].lastChild;
+            node->hasSnapshot = flat[i].hasSnapshot;
+            if (flat[i].hasSnapshot) node->snapshot = flat[i].snapshot;
+            node->parent = built[(size_t)flat[i].parent];
+            built[i] = node.get();
+            node->parent->children.push_back(std::move(node));
+        }
+        // lastChild was written against the child *order*, which push_back above
+        // reproduces exactly; anything out of range is clamped away rather than
+        // trusted, since it only ever selects a default redo branch.
+        for (size_t i = 0; i < flat.size(); ++i)
+            if (built[i]->lastChild >= (int)built[i]->children.size()) built[i]->lastChild = -1;
+
+        root_ = std::move(newRoot);
+        current_ = built[(size_t)currentIndex];
+        return true;
+    }
+
 private:
+
     std::unique_ptr<UndoNode> root_;
     UndoNode* current_ = nullptr;
 };
