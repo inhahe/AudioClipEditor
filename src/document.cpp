@@ -93,6 +93,35 @@ void Document::removeClip(int id) {
     commit(L"Delete clip '" + nm + L"'");
 }
 
+int Document::replaceClipWithNew(int oldClipId, const std::wstring& name, AudioBufferPtr buf,
+                                 const std::wstring& sourcePath, const std::wstring& undoDesc) {
+    auto& lib = project_.library;
+    int pos = -1;
+    for (int i = 0; i < (int)lib.size(); ++i) if (lib[i].id == oldClipId) { pos = i; break; }
+    if (pos < 0 || !buf) return -1;
+
+    Clip c;
+    c.id = project_.nextClipId++;
+    c.name = name;
+    c.sourcePath = sourcePath;
+    c.buffer = std::move(buf);
+    c.peaks = buildPeaks(c.buffer);
+    // The replacement stands in for the old clip, so it plays at the level the old
+    // one did; the samples are untouched, and gain is applied at playback.
+    c.gain = lib[(size_t)pos].gain;
+    c.timestamp = clipTimestampFor(sourcePath);
+    const int id = c.id;
+
+    for (auto& t : project_.tracks) {
+        auto& v = t.clips;
+        v.erase(std::remove_if(v.begin(), v.end(),
+            [&](const PlacedClip& p) { return p.clipId == oldClipId; }), v.end());
+    }
+    lib[(size_t)pos] = std::move(c);
+    commit(undoDesc);
+    return id;
+}
+
 void Document::moveClipInLibrary(int clipId, int targetIndex) {
     auto& lib = project_.library;
     int from = -1;

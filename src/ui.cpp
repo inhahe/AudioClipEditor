@@ -11,6 +11,7 @@
 #include "selhistory.h"
 #include "snap.h"
 #include <commctrl.h>
+#include <shlobj.h>
 #include <shlwapi.h>
 #include <windowsx.h>
 #include <string>
@@ -57,7 +58,7 @@ enum {
     IDM_VOICEISO, IDM_VOICEISO_SEL, IDM_VOICEISO_ALL,
     IDM_TIMBRE_ALL,
     IDM_EXPORTCLIP, IDM_EXPORTSEL,
-    IDM_SILENCESEL, IDM_DELETESEL,
+    IDM_SILENCESEL, IDM_DELETESEL, IDM_SPLITOUTSEL,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK, IDM_TL_GAP, IDM_TL_CLOSEGAP, IDM_TL_RIPPLE,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE, IDM_TRK_VOICEISO,
@@ -2365,6 +2366,102 @@ struct App {
         if (!ok) MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING);
     }
 
+    static std::wstring parentDir(const std::wstring& path) {
+        const size_t s = path.find_last_of(L"\\/");
+        return s == std::wstring::npos ? std::wstring() : path.substr(0, s);
+    }
+
+    // Where a no-dialog export puts its file: beside the audio the clip came from,
+    // else beside the project, else the user's Music folder. Each is somewhere this
+    // material already lives, so the file lands where it will be looked for --
+    // unlike the process's working directory, which is wherever the .exe was
+    // launched from and means nothing to anyone.
+    std::wstring defaultExportDir(const Clip& c) const {
+        std::wstring d = parentDir(c.sourcePath);
+        if (d.empty()) d = parentDir(projectPath);
+        if (d.empty()) {
+            wchar_t buf[MAX_PATH]{};
+            if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_MYMUSIC, nullptr,
+                                           SHGFP_TYPE_CURRENT, buf)))
+                d = buf;
+        }
+        return d;
+    }
+
+    // Cut the selection out as its own clip, write it to disk, and retire the clip it
+    // came from -- the "keep this part, throw the take away" gesture, which otherwise
+    // takes three menu trips and three dialogs (a name prompt, an export-options
+    // dialog, a Save As, and a delete confirmation) whose answers are the same every
+    // time. So this one asks nothing: the name follows the same convention "Export
+    // selection" already suggests, the file is a WAV at the clip's own rate and
+    // channel count next to where the clip came from, and a name collision steps to
+    // "(2)" rather than prompting -- there is no Save As dialog here to warn about
+    // overwriting, so nothing already on disk is written over.
+    //
+    // The file is written *before* the project changes: a failed encode leaves the
+    // clip exactly where it was, so there is nothing half-done to undo.
+    void splitSelectionOutToFile(int clipId) {
+        if (!selectionCovers(clipId)) return;
+        const Clip* c = doc.project().findClip(clipId);
+        if (!c || !c->buffer) return;
+        auto slice = sliceBuffer(*c->buffer, selStart, selEnd);
+        if (!slice || slice->frames() == 0) {
+            MessageBoxW(hwnd, L"The selection is empty.", L"Split selection out", MB_ICONINFORMATION);
+            return;
+        }
+        // Everything needed after the edit is copied out now: the Clip lives in the
+        // library vector, which replaceClipWithNew writes through.
+        const std::wstring srcName = c->name;
+        const std::wstring newName = srcName + L" (selection)";
+        const std::wstring dir = defaultExportDir(*c);
+
+        // Placements are arrangement work, and they go with the clip. Silent
+        // everywhere else, this is the one thing here the user might not have meant,
+        // so it is the one thing worth a question.
+        int placed = 0;
+        for (const auto& t : doc.project().tracks)
+            for (const auto& pc : t.clips) if (pc.clipId == clipId) ++placed;
+        if (placed > 0) {
+            std::wstring q = L"\u201C" + srcName + L"\u201D is on the timeline " +
+                             std::to_wstring(placed) + (placed == 1 ? L" time." : L" times.") +
+                             L"\nSplitting the selection out removes the clip, and those "
+                             L"placements with it.\n\nGo ahead?";
+            if (MessageBoxW(hwnd, q.c_str(), L"Split selection out",
+                            MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+        }
+
+        mfio::ExportOptions o;
+        o.sampleRate = slice->sampleRate > 0 ? slice->sampleRate : rate;
+        o.channels = slice->channels >= 2 ? 2 : 1;
+        o.format = mfio::ExportFormat::WAV;
+        o.bitsPerSample = 24;
+        const std::wstring path =
+            mfio::uniqueFilePath(dir, newName, mfio::extensionFor(o.format));
+        HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+        std::wstring err;
+        const bool ok = mfio::encodeFile(path, *slice, o, &err);
+        SetCursor(old);
+        if (!ok) {
+            MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING);
+            return;
+        }
+
+        if (previewClipId == clipId) stopAll();
+        // The new clip is backed by the file just written, so it carries that path:
+        // a later "Export clip" defaults to the same folder, and sort-by-time uses
+        // the file's own timestamp.
+        doc.replaceClipWithNew(clipId, newName, slice, path,
+                               L"Split selection out of '" + srcName + L"'");
+        afterHistory();
+        // Compacted from the middle, so the file name -- the part that says whether
+        // the collision counter kicked in -- always survives.
+        wchar_t shown[80] = {};
+        if (!PathCompactPathExW(shown, path.c_str(), 72, 0)) {
+            wcsncpy(shown, path.c_str(), 79); shown[79] = 0;
+        }
+        toast(std::wstring(L"Saved \u2192 ") + shown);
+    }
+
     void showControls() {
         MessageBoxW(hwnd,
             L"Library clips:\n"
@@ -3167,6 +3264,12 @@ struct App {
         AppendMenuW(m, MF_STRING, IDM_EXPORTCLIP, L"Export clip to file\u2026");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_EXPORTSEL,
                     L"Export selection to file\u2026");
+        // The keep-the-good-part gesture in one command: the three entries above and
+        // below it (new clip from selection, export, delete clip) done back to back
+        // without the three dialogs, since the answers are the same every time. No
+        // ellipsis: it asks nothing unless the clip is on the timeline.
+        AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_SPLITOUTSEL,
+                    L"Split selection out to a WAV file (replaces this clip)");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         // add-to-timeline submenu
         HMENU sub = CreatePopupMenu();
@@ -3236,6 +3339,7 @@ struct App {
         }
         else if (cmd == IDM_EXPORTCLIP) exportClipAudio(clipId, false);
         else if (cmd == IDM_EXPORTSEL) exportClipAudio(clipId, true);
+        else if (cmd == IDM_SPLITOUTSEL) { selClipId = clipId; splitSelectionOutToFile(clipId); }
         else if (cmd == IDM_NORM_MATCH) normalizeClip(clipId, false);
         else if (cmd == IDM_NORM_ALL) normalizeClip(clipId, true);
         else if (cmd == IDM_DENOISE) voiceCleanClip(clipId);

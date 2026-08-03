@@ -835,6 +835,48 @@ showed). A name that sanitises away to nothing falls back to `clip`.
 Neither export touches the project: exporting is not a save, and does not clear
 the unsaved-changes flag.
 
+### Split selection out to a file (the one-click variant)
+
+`App::splitSelectionOutToFile(clipId)` (`IDM_SPLITOUTSEL`) is *new clip from
+selection* + *export* + *delete clip* run back to back. It exists because that
+sequence is a single intention — **keep this part of the take, throw the take
+away** — that otherwise costs three menu trips and four dialogs (name prompt,
+export options, Save As, delete confirmation) whose answers are the same every
+time. So the command asks nothing and decides them all:
+
+- **Name:** `<clip> (selection)`, the same convention *Export selection…* already
+  suggests.
+- **Format:** WAV 24-bit at the clip's own rate and channel count — the same
+  "don't resample, don't upmix" defaults `exportClipAudio` uses.
+- **Directory** (`App::defaultExportDir`): the folder the clip's `sourcePath` is
+  in, else the project's folder, else `CSIDL_MYMUSIC`. Each is a place this
+  material already lives; the process's working directory is not (it's wherever
+  the `.exe` was launched from).
+- **Collisions** (`mfio::uniqueFilePath`): steps to `name (2)`, `name (3)`… With
+  no Save As dialog there is no overwrite prompt, so nothing already on disk may
+  be written over — the new name gets out of the way instead. After 999 tries it
+  falls back to a `GetTickCount` suffix.
+
+Ordering is load-bearing: **the file is written before the project changes**, so a
+failed encode leaves the clip exactly where it was and there is nothing half-done
+to undo. The project half is `Document::replaceClipWithNew`, which is one undo
+step rather than an add followed by a remove — the intermediate state (new clip
+present, old clip still there) is one the user never asked for, and stopping there
+on undo would be wrong. The new clip takes the old one's **library slot** (so it
+appears where the eye already is) and its **gain**, and carries the path just
+written as its `sourcePath`, which makes it a normal file-backed clip: a later
+*Export clip* defaults to the same folder, and sort-by-time uses the file's own
+mtime.
+
+Placements of the replaced clip are removed with it — their audio no longer
+exists in the project. That is the one consequence the user might not have
+intended, so it is the one thing the command asks about (a Yes/No naming the
+count), and only when there are any. Afterwards `afterHistory()` runs, which stops
+playback (buffers changed), re-clamps the selection and drops the selection-undo
+stack, and a toast reports the written path through `PathCompactPathExW` so the
+file name — the part that says whether the collision counter kicked in — survives
+the ellipsis.
+
 ## Project view state (selection + playhead persistence)
 
 The waveform selection (`selClipId`/`selStart`/`selEnd`) and the playhead are
@@ -1341,7 +1383,18 @@ correctness of that rewrite is entirely about the column geometry.
 `mfio::safeFileName` is covered directly (clean names untouched, path-illegal
 characters substituted, leading/trailing blanks and trailing dots stripped, and
 the fallback for a name that sanitises away to nothing) — it lives in `encoder.h`
-rather than `ui.cpp` precisely so it can be.
+rather than `ui.cpp` precisely so it can be. `mfio::uniqueFilePath` sits there for
+the same reason and is tested against the real filesystem (the test touches the
+files it expects to collide with): plain name when the slot is free, `(2)` then
+`(3)` as it fills up, a trailing separator on the directory not doubling up, and
+the clip name sanitised on the way in. Its half of *split selection out to a file*
+is what stops that command overwriting an earlier export, and it has no dialog to
+fall back on. The project half, `Document::replaceClipWithNew`, is checked on a
+three-clip library with two placements: the replacement lands in the old clip's
+slot, the neighbours don't move, the gain and the written path come across, the
+placements of the replaced clip go with it, a nonexistent clip id is not an edit
+(it must commit nothing, or the undo check below would land on the wrong state),
+and **one** undo restores both the clip and its placement.
 
 Voice isolation is checked against a synthetic take with a bump **150 ms after
 the speech** as well as an isolated one: both must be removed (measured −21.0 dB

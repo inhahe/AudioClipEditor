@@ -270,6 +270,17 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   clip — its own sample rate, and a mono clip stays mono. (*New clip from
   selection* is the in-project counterpart: it adds a clip to the library rather
   than writing a file.)
+- **Keep just the good part, in one click.** Right-click a clip card →
+  *Split selection out to a WAV file (replaces this clip)*. It slices the
+  selection into a new clip, writes that clip out as a WAV, and retires the clip
+  it came from — the three separate commands above done back to back, with none
+  of their dialogs, because for this gesture the answers are always the same. The
+  new clip is named `<clip> (selection)`, keeps the old clip's slot in the library
+  and its volume, and the file goes **next to the audio the clip came from** (or
+  next to the project, or in your Music folder) under the same name. Nothing on
+  disk is overwritten: a name that's taken steps to `… (2)`, `… (3)`, and a toast
+  shows where the file landed. It's a single undo step, and it only asks a question
+  when the clip is on the timeline — those placements go with it.
 - **Export the mixdown.** *File → Export Mixdown* renders all tracks together and
   saves through the same audio dialog — pick **format, sample rate, bit depth**
   (16/24-bit PCM or 32-bit float for WAV), **bitrate** (compressed formats), and
@@ -315,7 +326,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Close the full-window editor | `Esc` (when no drag is in progress) or the **Done** button |
 | Crop to a selection | **Crop** button on the card while a selection is active |
 | Make a new clip from a selection | **New clip** button on the card, or right-click the card → *New clip from selection* |
-| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, export clip / selection to a file, normalize, voice cleaner, remove non-voice, match timbre, rename, delete, add to a track |
+| Keep only the selection, as a file | right-click the card → *Split selection out to a WAV file (replaces this clip)* — new clip + WAV + the old clip gone, no dialogs, one undo step |
+| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, export clip / selection to a file, split the selection out to a file, normalize, voice cleaner, remove non-voice, match timbre, rename, delete, add to a track |
 | Rename a clip | right-click → Rename |
 | Reorder clips | drag a card by its title bar to a new spot in the library (caret shows the drop point) |
 | Sort clips | right-click the empty library area → *Sort clips by name* / *by time* |

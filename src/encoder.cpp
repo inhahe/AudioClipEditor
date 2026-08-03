@@ -46,6 +46,27 @@ std::wstring safeFileName(const std::wstring& s, const std::wstring& fallback) {
     return out.substr(b);
 }
 
+std::wstring uniqueFilePath(const std::wstring& dir, const std::wstring& baseName,
+                            const std::wstring& ext) {
+    std::wstring d = dir;
+    while (!d.empty() && (d.back() == L'\\' || d.back() == L'/')) d.pop_back();
+    const std::wstring base = safeFileName(baseName);
+    auto join = [&](const std::wstring& stem) {
+        return (d.empty() ? stem : d + L"\\" + stem) + ext;
+    };
+    for (int n = 1; n <= 999; ++n) {
+        std::wstring path = join(n == 1 ? base : base + L" (" + std::to_wstring(n) + L")");
+        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return path;
+    }
+    // A thousand collisions on one name means the counter is not the right
+    // discriminator any more; fall back on the clock, which won't repeat within a
+    // session. Still checked, so the pathological case degrades to an overwrite
+    // rather than to a lie about where the file went.
+    wchar_t stamp[32];
+    swprintf(stamp, 32, L" (%lu)", (unsigned long)GetTickCount());
+    return join(base + stamp);
+}
+
 // Linear-resample a canonical float buffer to dstRate (keeps channel count).
 // Returns the original data unchanged when the rate already matches.
 static AudioBufferPtr resampleTo(const AudioBuffer& buf, int dstRate) {

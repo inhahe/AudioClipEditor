@@ -1133,6 +1133,81 @@ int runSelfTest() {
               L"safeFileName never returns an empty name", sfn(L"..."));
     }
 
+    // "Split selection out to a file" writes without a Save As dialog, so there is
+    // no overwrite prompt standing between it and an earlier export: the name has to
+    // get out of the way by itself.
+    {
+        const std::wstring ext = L".wav";
+        const std::wstring first = mfio::uniqueFilePath(dir, L"split test", ext);
+        check(first == dir + L"\\split test.wav",
+              L"uniqueFilePath uses the plain name when nothing is there", first);
+
+        auto touch = [](const std::wstring& p) {
+            FILE* f = _wfopen(p.c_str(), L"wb"); if (f) fclose(f);
+        };
+        touch(first);
+        const std::wstring second = mfio::uniqueFilePath(dir, L"split test", ext);
+        check(second == dir + L"\\split test (2).wav",
+              L"uniqueFilePath steps past a file that already exists", second);
+        touch(second);
+        check(mfio::uniqueFilePath(dir, L"split test", ext) == dir + L"\\split test (3).wav",
+              L"uniqueFilePath keeps counting",
+              mfio::uniqueFilePath(dir, L"split test", ext));
+        // Same directory, spelled with a trailing separator: one backslash, not two.
+        check(mfio::uniqueFilePath(dir + L"\\", L"split test", ext) ==
+              dir + L"\\split test (3).wav",
+              L"uniqueFilePath tolerates a trailing separator");
+        DeleteFileW(first.c_str()); DeleteFileW(second.c_str());
+
+        // The base name is a clip name -- free text -- so it goes through the same
+        // sanitising the save dialog's suggestion does.
+        check(mfio::uniqueFilePath(dir, L"re: take 2/3", ext) == dir + L"\\re_ take 2_3.wav",
+              L"uniqueFilePath sanitises the clip name",
+              mfio::uniqueFilePath(dir, L"re: take 2/3", ext));
+    }
+
+    // The project half of the same command: the slice replaces the clip it came out
+    // of, in one undo step. Two steps (add, then delete) would leave a state in the
+    // middle -- new clip present, old clip still there -- that nobody asked for.
+    {
+        Document d; d.init(rate);
+        const int a = d.addClip(L"a", makeSine(rate, 1.0, 200.0), L"", L"add a");
+        const int b = d.addClip(L"b", makeSine(rate, 1.0, 300.0), L"", L"add b");
+        const int c = d.addClip(L"c", makeSine(rate, 1.0, 400.0), L"", L"add c");
+        d.setClipGain(b, 0.5f, L"quieter");
+        const int tid = d.project().tracks[0].id;
+        d.placeClip(tid, b, 0, L"place b");
+        d.placeClip(tid, c, rate * 2, L"place c");
+
+        auto slice = makeSine(rate, 0.25, 300.0);
+        const std::wstring wrote = L"D:\\somewhere\\b (selection).wav";
+        const int nb = d.replaceClipWithNew(b, L"b (selection)", slice, wrote,
+                                            L"Split selection out of 'b'");
+        const auto& lib = d.project().library;
+        check(nb > 0 && lib.size() == 3 && lib[1].id == nb && lib[1].name == L"b (selection)",
+              L"split: the new clip takes the old one's slot in the library",
+              L"size=" + std::to_wstring(lib.size()));
+        check(lib[0].id == a && lib[2].id == c, L"split: the other clips stay put");
+        check(lib[1].frames() == slice->frames(), L"split: the new clip holds the slice");
+        check(lib[1].gain == 0.5f, L"split: the new clip inherits the old clip's volume");
+        check(lib[1].sourcePath == wrote,
+              L"split: the new clip is backed by the file just written");
+        const auto& placed = d.project().tracks[0].clips;
+        check(placed.size() == 1 && placed[0].clipId == c,
+              L"split: placements of the replaced clip go with it",
+              L"placements=" + std::to_wstring(placed.size()));
+
+        // A clip that isn't there is not an edit -- if this committed anything, the
+        // undo below would land on the wrong state.
+        check(d.replaceClipWithNew(9999, L"x", slice, L"", L"nope") == -1,
+              L"split: replacing a clip that isn't in the library does nothing");
+
+        d.undo();
+        check(d.project().library.size() == 3 && d.project().library[1].id == b &&
+              d.project().tracks[0].clips.size() == 2,
+              L"split: one undo brings back the clip and its placement");
+    }
+
     // A bump next to speech must be removed just like one in the middle of a
     // silence. The gate's pre-roll / hold / gap-merge used to protect it, so a
     // take whose bumps cluster around the speech -- the normal case, and exactly

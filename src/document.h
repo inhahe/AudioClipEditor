@@ -52,6 +52,17 @@ public:
                  const std::wstring& sourcePath, const std::wstring& undoDesc);
     void renameClip(int id, const std::wstring& name);
     void removeClip(int id);
+    // Swap one library clip out for a brand-new clip, in a *single* undo step: the
+    // new clip takes the old one's slot in the grid (so it lands where the eye is
+    // already looking) and inherits its volume, and the old clip goes away along
+    // with any placements of it — their audio no longer exists in the project.
+    // Returns the new clip's id, or -1 if `oldClipId` isn't in the library.
+    //
+    // One step rather than an add followed by a remove because the two halves are
+    // not separately meaningful: an undo that put the old clip back while leaving
+    // the new one behind would be a state the user never asked for.
+    int  replaceClipWithNew(int oldClipId, const std::wstring& name, AudioBufferPtr buf,
+                            const std::wstring& sourcePath, const std::wstring& undoDesc);
     // Reorder the library: move `clipId` so it lands at `targetIndex` in reading
     // order (as if the item hadn't been removed first). One undo step; no-op if the
     // position doesn't actually change.

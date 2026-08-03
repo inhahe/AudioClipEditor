@@ -30,6 +30,7 @@ target_link_libraries(AudioClipEditor PRIVATE
     mfuuid          # MF GUIDs
     ksuser          # WASAPI KS GUIDs
     winmm
+    shell32         # known-folder lookup (default export directory)
     shlwapi
     avrt            # MMCSS (audio thread priority)
     propsys

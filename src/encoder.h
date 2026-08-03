@@ -24,6 +24,16 @@ const wchar_t* labelFor(ExportFormat f);       // "WAV (PCM)" etc.
 // — a name made entirely of illegal characters falls back to `fallback`.
 std::wstring safeFileName(const std::wstring& s, const std::wstring& fallback = L"clip");
 
+// Build a full path for `baseName` + `ext` inside `dir`, stepping through
+// "name (2)", "name (3)"... until one that doesn't exist yet is found. For the
+// one-click exports that write a file without a Save-As dialog: there is no
+// overwrite prompt to protect an earlier export, so the name gets out of its way
+// instead. `baseName` is run through safeFileName, so callers can pass a clip
+// name straight in. `dir` may be empty (relative to the working directory) and
+// may or may not end in a separator.
+std::wstring uniqueFilePath(const std::wstring& dir, const std::wstring& baseName,
+                            const std::wstring& ext);
+
 // Encode a canonical stereo-float buffer to disk with the given options
 // (downmixing to mono / re-encoding as needed). Returns false + message on error.
 bool encodeFile(const std::wstring& path, const AudioBuffer& buf,
