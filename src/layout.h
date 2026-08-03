@@ -82,6 +82,60 @@ inline FlowedRow flowButtons(const std::vector<int>& widths, int left, int top,
     return f;
 }
 
+// The main transport bar is not a plain flow: it is three groups, and the last
+// one hugs the right edge (Scale slider, Undo, Redo, History), which is where
+// the eye expects it and where it has always been. What it shares with
+// flowButtons is the rule that nothing may run off the edge -- a clipped
+// control is an unusable one, and the position/length readout in the middle
+// group is the one thing on this bar with no menu equivalent, so it may not be
+// the thing that gets cut. (It was: before the History button existed the bar
+// happened to fit, and adding a fourth right-hand button pushed "0:00.00 /
+// 0:20.00" off the edge mid-digit at the default window size.)
+//
+// So the groups are assigned to rows greedily: each one stays on the current
+// row if it fits after what is already there, and drops to a new row if it
+// doesn't. The left group is always first on row 0; the right group is always
+// right-aligned on whatever row it lands on; the middle group starts after the
+// left group when they share a row and at the left margin when it has wrapped.
+struct TransportFlow {
+    int midX = 0;        // left edge of the middle group
+    int midRow = 0;      // 0-based row index of the middle group
+    int rightX = 0;      // left edge of the right-aligned group
+    int rightRow = 0;    // ditto for its row
+    int rows = 1;
+};
+
+inline TransportFlow flowTransport(int width, int margin, int gap,
+                                   int leftW, int midGap, int midW, int rightW) {
+    TransportFlow f;
+    const int limit = width - margin;      // nothing may extend past this
+    int row = 0;
+    int used = margin + leftW;             // rightmost x occupied on the current row
+
+    f.midX = used + midGap;
+    // Never wrap off an empty row: a group wider than the whole bar has to go
+    // somewhere, and a fresh row would not make it fit either.
+    if (f.midX + midW > limit && leftW > 0) {
+        row = 1;
+        f.midX = margin;
+        used = margin + midW;
+    } else {
+        used = f.midX + midW;
+    }
+    f.midRow = row;
+
+    // Right-aligned, but never off the left edge: on an absurdly narrow window
+    // the group starts at the margin and the outermost button is the one that
+    // overhangs, rather than Scale and Undo disappearing past x = 0.
+    f.rightX = limit - rightW;
+    if (f.rightX < margin) f.rightX = margin;
+    if (f.rightX < used + gap) ++row;
+    f.rightRow = row;
+
+    f.rows = row + 1;
+    return f;
+}
+
 // ---------------------------------------------------------------- scrollbars
 //
 // The tracks pane can overflow in both directions at once, and its two

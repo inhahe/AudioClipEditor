@@ -47,7 +47,7 @@ namespace col {
 }
 
 // ----------------------------------------------------------------- transport ids
-enum TB { TB_ADD, TB_TRACK, TB_PLAYALL, TB_STOP, TB_UNDO, TB_REDO, TB_COUNT };
+enum TB { TB_ADD, TB_TRACK, TB_PLAYALL, TB_STOP, TB_UNDO, TB_REDO, TB_HISTORY, TB_COUNT };
 
 // ----------------------------------------------------------------- context menu ids
 enum {
@@ -103,6 +103,8 @@ struct App {
     RECT rcTransport{}, rcLibrary{}, rcTimeline{};
     RECT tbRects[TB_COUNT]{};
     RECT zoomRc{};                 // global time-scale slider (transport bar)
+    RECT timeRc{}, scaleLabRc{};   // position/length readout and the "Scale" caption
+    int transportH = 0;            // laid-out toolbar height (grows when it wraps)
 
     std::wstring projectPath;      // current .acep path (empty = unsaved)
     bool lastTitleDirty = false;   // last unsaved-changes state reflected in the title
@@ -195,7 +197,7 @@ struct App {
     // Ripple: the grabbed clip carries every clip after it on the lane, so the
     // gap in front of it changes and none of the gaps behind it do.
     //
-    // Two ways to ask for it. `rippleMode` (Timeline menu) is the standing
+    // Two ways to ask for it. `rippleMode` (Arrange menu) is the standing
     // choice — every clip drag ripples until you turn it off — and exists
     // because a gesture that depends on a modifier is unusable if the modifier
     // never arrives: a keyboard remapper or low-level hook that swallows Shift,
@@ -519,7 +521,10 @@ struct App {
 
     void computeLayout() {
         RECT rc; GetClientRect(hwnd, &rc);
-        int tH = S(62);
+        // The toolbar sizes itself first: it wraps to a second row on a narrow
+        // window, and everything below starts under whatever height that came to.
+        layoutTransport(rc.right);
+        const int tH = std::max(transportH, S(62));
         rcTransport = { 0, 0, rc.right, tH };
         trackHeaderW = S(128);
         rulerH = S(22);
@@ -546,7 +551,6 @@ struct App {
         rcTimeline = { 0, tH, rc.right, tH + tlH };
         rcLibrary  = { 0, tH + tlH, rc.right, rc.bottom };
 
-        layoutTransport();
         layoutTracks();
         layoutCards();
         if (editorActive()) computeEditorLayout(rc);
@@ -601,21 +605,57 @@ struct App {
         } else { edLeft = edRight = RECT{}; }
     }
 
-    void layoutTransport() {
-        int y = S(12), h = S(38), x = S(12);
-        auto put = [&](TB id, int w) { tbRects[id] = { x, y, x + w, y + h }; x += w + S(8); };
+    // Three groups: transport actions from the left, the time readout in the
+    // middle, and the history group (Scale slider, Undo, Redo, History) pinned to
+    // the right. They no longer *fit* side by side at every window size -- Play
+    // All and the readout are both wide, and History was the addition that tipped
+    // it over at the default size -- so layout::flowTransport drops whichever
+    // group would collide onto a new row and the toolbar grows to match.
+    // Overlapping, or clipping the readout mid-digit (which is what used to
+    // happen once the window got narrow), hides information; a taller toolbar
+    // merely costs pixels. Row assignment lives in layout.h so it can be checked
+    // headlessly -- the failure it guards against is invisible until someone
+    // happens to drag the window narrow enough.
+    //
+    // Takes the width rather than reading rcTransport, because rcTransport's height
+    // is this function's *output*.
+    void layoutTransport(int width) {
+        const int y0 = S(12), h = S(38), gap = S(8), margin = S(12);
+        // Wide enough for "12:34.56  /  12:34.56" at the big font.
+        const int timeW = S(190), timeGap = S(16);
+        const int scaleLabW = S(46), zsW = S(120);
+        const int leftW = S(96) + gap + S(96) + S(16) + S(140) + gap + S(70);
+        const int rightW = scaleLabW + S(4) + zsW + S(12) +
+                           S(70) + gap + S(70) + gap + S(92);
+        const auto f = layout::flowTransport(width, margin, gap,
+                                             leftW, timeGap, timeW, rightW);
+        auto rowY = [&](int row) { return y0 + row * (h + gap); };
+
+        int x = margin;
+        auto put = [&](TB id, int w) { tbRects[id] = { x, y0, x + w, y0 + h }; x += w + gap; };
         put(TB_ADD, S(96));
         put(TB_TRACK, S(96));
         x += S(16);
         put(TB_PLAYALL, S(140));
         put(TB_STOP, S(70));
-        // undo/redo on the right
-        int rx = rcTransport.right - S(12);
-        tbRects[TB_REDO] = { rx - S(70), y, rx, y + h }; rx -= S(78);
-        tbRects[TB_UNDO] = { rx - S(70), y, rx, y + h }; rx -= S(78);
-        // global time-scale slider (with a "Scale" label drawn to its left)
-        int zsW = S(120);
-        zoomRc = { rx - zsW, y + h / 2 - S(7), rx, y + h / 2 + S(7) };
+
+        const int ry = rowY(f.rightRow);
+        int rx = f.rightX + rightW;
+        tbRects[TB_HISTORY] = { rx - S(92), ry, rx, ry + h }; rx -= S(92) + gap;
+        tbRects[TB_REDO] = { rx - S(70), ry, rx, ry + h }; rx -= S(70) + gap;
+        tbRects[TB_UNDO] = { rx - S(70), ry, rx, ry + h }; rx -= S(70) + S(12);
+        zoomRc = { rx - zsW, ry + h / 2 - S(7), rx, ry + h / 2 + S(7) };
+        scaleLabRc = { zoomRc.left - scaleLabW - S(4), ry, zoomRc.left - S(4), ry + h };
+
+        // The readout stretches to fill its row, so a longer arrangement still has
+        // somewhere to put its digits -- up to the Scale caption when the history
+        // group shares the row, and to the window edge when it doesn't.
+        const int ty = rowY(f.midRow);
+        const int timeRight = (f.midRow == f.rightRow) ? scaleLabRc.left - S(8)
+                                                       : width - margin;
+        timeRc = { f.midX, ty, timeRight, ty + h };
+
+        transportH = rowY(f.rows - 1) + h + S(12);
     }
 
     void layoutCards() {
@@ -1034,12 +1074,11 @@ struct App {
             totSec = c ? c->durationSec() : 0;
         } else { posSec = (double)playheadFrame / rate; totSec = (double)doc.project().timelineLengthFrames() / rate; }
         // global time-scale slider ("Scale" label + slider)
-        RECT zlab = { zoomRc.left - S(46), rcTransport.top, zoomRc.left - S(4), rcTransport.bottom };
-        textOut(h, zlab, L"Scale", col::dim, fSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        textOut(h, scaleLabRc, L"Scale", col::dim, fSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         drawSliderFrac(h, zoomRc, zoomToFrac());
 
-        RECT tr = { tbRects[TB_STOP].right + S(16), rcTransport.top, zlab.left - S(8), rcTransport.bottom };
-        textOut(h, tr, fmtTime(posSec) + L"  /  " + fmtTime(totSec), col::text, fBig, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        textOut(h, timeRc, fmtTime(posSec) + L"  /  " + fmtTime(totSec), col::text, fBig,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         // A pending selection undo counts: the buttons are the same action as
         // Ctrl+Z, so greying them while that would still do something would lie.
@@ -1047,6 +1086,12 @@ struct App {
         COLORREF rf = (doc.canRedo() || canSelRedo()) ? col::text : col::dim;
         button(h, tbRects[TB_UNDO], L"\u21B6 Undo", col::btn, uf, hotTB == TB_UNDO, fNorm);
         button(h, tbRects[TB_REDO], L"\u21B7 Redo", col::btn, rf, hotTB == TB_REDO, fNorm);
+        // The list the two buttons above step through. Undo/redo is where you go
+        // looking for "what have I done to this project", so that is where the
+        // answer belongs -- it was previously only under Edit and Ctrl+H, which is
+        // easy to miss entirely (the menu-bar "Timeline" entry got mistaken for it).
+        button(h, tbRects[TB_HISTORY], L"\u2261 History", col::btn,
+               doc.history().empty() ? col::dim : col::text, hotTB == TB_HISTORY, fNorm);
     }
 
     void paintLibrary(HDC h) {
@@ -2487,6 +2532,9 @@ struct App {
             L"    New clip slices the selection out as its own library clip\n"
             L"  \u2022 Double-click a clip (or right-click \u2192 Open in editor) for a full-window editor\n"
             L"  \u2022 Drag a clip up onto a track to place it (drops at any offset)\n"
+            L"  \u2022 Or right-click \u2192 Add to \u201CTrack 1\u201D (with several tracks,\n"
+            L"    Add to track \u25B8 picks one); it goes at the end of that track,\n"
+            L"    and the view scrolls to show where it landed\n"
             L"  \u2022 Right-click for save-selection, crop, normalize, voice cleaner\u2026\n"
             L"  \u2022 Voice cleaner cleans one clip, or all clips in the project\n"
             L"  \u2022 Remove non-voice silences bumps, shuffling and room tone\n"
@@ -2506,7 +2554,7 @@ struct App {
             L"    track, so you change one gap and the rest keep their spacing\n"
             L"    (press Shift after starting the drag and it still counts; the\n"
             L"    dragged clip says whether it will move or ripple)\n"
-            L"  \u2022 Right-click a placed clip (or the Timeline menu) \u2192 Dragging a\n"
+            L"  \u2022 Right-click a placed clip (or the Arrange menu) \u2192 Dragging a\n"
             L"    clip carries the later ones, to make that the standing behaviour\n"
             L"    \u2014 no modifier needed, and Shift then means \"just this clip\"\n"
             L"  \u2022 Right-click a placed clip to set the space before it exactly,\n"
@@ -2519,8 +2567,10 @@ struct App {
             L"    scrollbar along the bottom, and the view follows the playhead\n"
             L"    while playing (scrolling by hand stops it until you play again)\n\n"
             L"Keys:  Space = play/pause   Ctrl+Z = undo   Ctrl+Shift+Z = redo\n"
-            L"       Ctrl+H = history (every step, which are applied, jump to any;\n"
-            L"                kept in the project file, so reopening keeps the list)\n"
+            L"       Ctrl+H = history \u2014 also the History button in the toolbar\n"
+            L"                and Edit \u25B8 History. Every step, which are applied,\n"
+            L"                jump to any; kept in the project file, so reopening\n"
+            L"                keeps the list\n"
             L"       \u2190 \u2192 scroll the timeline (Ctrl or PgUp/PgDn = page)\n"
             L"       Home / End = jump to the start / end of the arrangement",
             L"Controls", MB_ICONINFORMATION);
@@ -3071,7 +3121,7 @@ struct App {
                         // would put it: with directional snapping those can differ.
                         updateDragSnap(p, Mode::CardDrag);
                         int64_t start = dragSnapStart;
-                        if (!doc.placeClip(tid, dragClipId, start, L"Add '" + c->name + L"' to timeline"))
+                        if (!doc.placeClip(tid, dragClipId, start, placeDesc(c->name, tid)))
                             MessageBoxW(hwnd, L"Clips can't overlap on a track.", L"Can't place", MB_ICONINFORMATION);
                         else afterPlaceRefresh();
                     }
@@ -3105,7 +3155,7 @@ struct App {
                     if (!doc.moveClip(moveTrackId, moveIndex, tid, newStart, L"Move clip"))
                         toast(tid == moveTrackId
                               ? L"Won\u2019t fit \u2014 hold Shift while dragging to carry the "
-                                L"later clips along (Timeline \u25B8 Ripple drag makes that standing)"
+                                L"later clips along (Arrange \u25B8 Ripple drag makes that standing)"
                               : L"Won\u2019t fit \u2014 there is already a clip in that spot");
                 }
                 afterPlaceRefresh();
@@ -3119,6 +3169,18 @@ struct App {
         refresh();
     }
     void afterPlaceRefresh() { clampScroll(); refresh(); }
+
+    std::wstring trackNameById(int trackId) const {
+        for (const auto& t : doc.project().tracks) if (t.id == trackId) return t.name;
+        return L"a track";
+    }
+    // The history list is read to answer "what have I done to this project", and
+    // with several tracks "Add 'ref_10s' to timeline" doesn't answer it -- the
+    // whole point of the reworked menu is that the destination is named, so the
+    // record of the action names it too.
+    std::wstring placeDesc(const std::wstring& clipName, int trackId) const {
+        return L"Add '" + clipName + L"' to " + trackNameById(trackId);
+    }
 
     // Scroll the tracks pane so a just-placed clip is actually on screen, in both
     // axes. Placing from the menu appends at the end of the track, which on any
@@ -3325,12 +3387,23 @@ struct App {
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_SPLITOUTSEL,
                     L"Split selection out to a WAV file (replaces this clip)");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-        // add-to-timeline submenu
-        HMENU sub = CreatePopupMenu();
+        // Where the clip goes when you'd rather not drag it: the end of a track.
+        // With a single track that is one destination, and a submenu holding one
+        // item is a second click that asks a question with only one answer -- and
+        // "Add to timeline ▸" gave no hint that the answer inside was a track at
+        // all. So it flattens to a plain item naming the track. With several
+        // tracks the submenu lists them by name, which is the only way to tell
+        // them apart once they have been renamed.
         auto& tracks = doc.project().tracks;
-        for (int i = 0; i < (int)tracks.size(); ++i)
-            AppendMenuW(sub, MF_STRING, IDM_ADDTL_BASE + i, tracks[i].name.c_str());
-        AppendMenuW(m, MF_POPUP, (UINT_PTR)sub, L"Add to timeline");
+        if (tracks.size() == 1) {
+            AppendMenuW(m, MF_STRING, IDM_ADDTL_BASE,
+                        (L"Add to \u201C" + tracks[0].name + L"\u201D").c_str());
+        } else if (!tracks.empty()) {
+            HMENU sub = CreatePopupMenu();
+            for (int i = 0; i < (int)tracks.size(); ++i)
+                AppendMenuW(sub, MF_STRING, IDM_ADDTL_BASE + i, tracks[i].name.c_str());
+            AppendMenuW(m, MF_POPUP, (UINT_PTR)sub, L"Add to track");
+        }
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_NORM_MATCH, L"Normalize to match other clips");
         AppendMenuW(m, MF_STRING, IDM_NORM_ALL, L"Normalize all clips (all tracks)");
@@ -3424,7 +3497,7 @@ struct App {
                     const std::wstring trackName = tracks[idx].name;
                     const std::wstring clipName = c->name;
                     const int64_t len = c->frames();
-                    doc.placeClip(trackId, clipId, start, L"Add '" + clipName + L"' to timeline");
+                    doc.placeClip(trackId, clipId, start, placeDesc(clipName, trackId));
                     // Scroll it into view and say where it went. Appending puts it
                     // past everything already on the track, which on a long
                     // arrangement is somewhere the user isn't looking; without both
@@ -3455,6 +3528,7 @@ struct App {
         case TB_STOP: stopAll(); break;
         case TB_UNDO: doUndo(); break;
         case TB_REDO: doRedo(); break;
+        case TB_HISTORY: showHistory(); break;
         }
     }
 
@@ -3488,10 +3562,15 @@ struct App {
         AppendMenuW(track, MF_STRING, IDC_ADDTRACK, L"Add Track");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)track, L"Track");
 
-        HMENU timeline = CreatePopupMenu();
-        AppendMenuW(timeline, MF_STRING | (rippleMode ? MF_CHECKED : 0), IDC_RIPPLEMODE,
+        // "Arrange", not "Timeline": this menu is about the track lanes, but a
+        // menu-bar entry called Timeline reads as "the timeline of what I have
+        // done to this project" -- i.e. the edit history, which is Edit ▸ History.
+        // One user opened it looking for exactly that. Nothing else in the app is
+        // called Arrange, so there is nothing left to confuse it with.
+        HMENU arrange = CreatePopupMenu();
+        AppendMenuW(arrange, MF_STRING | (rippleMode ? MF_CHECKED : 0), IDC_RIPPLEMODE,
                     L"Ripple drag: a clip carries the later ones\tShift");
-        AppendMenuW(bar, MF_POPUP, (UINT_PTR)timeline, L"Timeline");
+        AppendMenuW(bar, MF_POPUP, (UINT_PTR)arrange, L"Arrange");
 
         HMENU help = CreatePopupMenu();
         AppendMenuW(help, MF_STRING, IDC_CONTROLS, L"Controls\u2026");
@@ -3500,7 +3579,7 @@ struct App {
         SetMenu(hwnd, bar);
     }
 
-    // Reachable from two places (the Timeline menu and a placed clip's right-click
+    // Reachable from two places (the Arrange menu and a placed clip's right-click
     // menu), so the tick on the menu-bar item and the toast both live here rather
     // than at each call site, where they could drift apart. The toast says which way
     // the toggle just went, because a menu that was dismissed to read its own tick
@@ -3804,8 +3883,11 @@ int runApp(HINSTANCE hInst, int nCmdShow) {
     wc.lpszClassName = L"AudioClipEditorMain";
     RegisterClassExW(&wc);
 
+    // Wide enough for the whole transport toolbar on one row at 150% DPI (the
+    // toolbar wraps rather than clipping when it doesn't fit, but the default
+    // window shouldn't be the case that needs wrapping).
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"Audio Clip Editor",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1500, 950,
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1700, 950,
         nullptr, nullptr, hInst, &app);
     g_app = &app;
 

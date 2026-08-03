@@ -72,11 +72,12 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   too: `Ctrl+Z` first walks back through the selections you've made since the last
   edit, so a stray click that wipes a carefully-placed selection costs one
   keystroke, and only once those run out does it undo the edit itself.
-  Undo and redo **say what they just did** in a badge under the toolbar
+  Undo and redo **say what they just did** in a badge under the tracks pane
   (*"Undone: Match timbre of 23 clips to their average"*), including when there
   is nothing left to undo — effects change how clips sound without changing
   anything on screen, so otherwise undoing one looks like a key that did nothing.
-- **History** (`Edit ▸ History…`, `Ctrl+H`) lists every step taken in this
+- **History** — the **≡ History** button in the toolbar right next to Undo and
+  Redo, or `Edit ▸ History…` / `Ctrl+H`. It lists every step taken in this
   project, oldest first, so you can see whether an effect like timbre matching or
   noise reduction is applied right now. Steps in effect are ticked; steps you
   undid stay listed but greyed (Redo brings them back), and the list marks which
@@ -104,9 +105,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   **horizontal scrollbar** to match, and can also be scrolled with the wheel or the
   `←`/`→`/`Home`/`End` keys. Drag a clip card up onto a track to drop it
   at any time offset; drag placed clips to move them. Right-click a card →
-  **Add to timeline ▸** drops it at the end of the chosen track instead — and
-  since the end of a long track is off the right-hand edge, the view scrolls to
-  the new clip and a message says which track it went to and at what time, so the
+  **Add to “Track 1”** drops it at the end of that track instead; with more than
+  one track the item becomes an **Add to track ▸** submenu listing them by name,
+  so you always know where the clip is about to land. Since the end of a long
+  track is off the right-hand edge, the view scrolls to the new clip and a
+  message says which track it went to and at what time, so the
   command can't look like it did nothing. Clips **can't overlap** on a
   track, and they **snap** to butt up flush against a neighbour — but only in the
   direction that doesn't get in your way. Sliding *toward* a neighbour never pulls,
@@ -129,7 +132,7 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   clips` — and an ordinary drag reminds you the other gesture is there. If a drag
   runs into the next clip it says so rather than just going red and springing
   back, and points at Shift as the way through. If you're doing a lot of this,
-  tick **Ripple drag** — in the **Timeline** menu, or in a placed clip's
+  tick **Ripple drag** — in the **Arrange** menu, or in a placed clip's
   right-click menu next to the two space commands — and every clip drag carries
   the later clips with no modifier at all; Shift then means "just this one clip".
 - **The view follows the playhead** while the timeline plays, so a long
@@ -293,7 +296,7 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   or bit depth; each is resampled to the project's internal rate on load. The
   project runs at **≥ 48 kHz internally** and the engine resamples to the audio
   device on playback, so nothing plays back at the wrong pitch.
-- **Menu bar** (File / Edit / Track / Help) mirrors the toolbar and adds project
+- **Menu bar** (File / Edit / Track / Arrange / Help) mirrors the toolbar and adds project
   I/O, mixdown export, and a Controls reference.
 
 ## Building
@@ -346,20 +349,20 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Apply a saved noise capture | right-click a card → *Voice cleaner → Apply noise capture ▸* and pick a recent capture |
 | Track actions | **right-click a track header/lane**: voice-clean the track, remove non-voice, match timbre, rename, remove |
 | Add a track | **+ Add Track** |
-| Place a clip on a track | drag a clip card up into a track lane (drops at any time offset), or right-click → Add to timeline |
+| Place a clip on a track | drag a clip card up into a track lane (drops at any time offset), or right-click → **Add to “Track 1”** (**Add to track ▸** when there are several) |
 | Move a placed clip | drag it along the track — a live ghost shows where it will land (drag vertically to change tracks) |
 | Butt a clip flush against a neighbour | drag it slightly *past* the neighbour's edge — it snaps flush and holds |
 | Leave a tiny gap instead | approach the neighbour without crossing it (no pull that way), or pull clear of a snap and come back |
 | Change one gap and keep the spacing after it | **`Shift`+drag** a placed clip — every clip after it on that track moves with it |
 | Set the space before a clip exactly | right-click it → **Space before this clip…**, type it in seconds |
 | Butt a clip against the one before it | right-click it → **Close the space before this clip** |
-| Make that the standing behaviour | right-click a placed clip (or the **Timeline** menu) → **Dragging a clip carries the later ones**; `Shift` then means "just this one" |
+| Make that the standing behaviour | right-click a placed clip (or the **Arrange** menu) → **Dragging a clip carries the later ones**; `Shift` then means "just this one" |
 | Remove a placed clip | right-click it → Remove |
 | Set the playhead | click a track lane or the ruler |
 | Play all tracks | **▶ Play All** (`Space` when nothing is being previewed) |
 | Stop | **■ Stop** |
 | Undo / Redo | `Ctrl+Z` / `Ctrl+Shift+Z` (or the toolbar buttons) |
-| See what's been done, and what's still applied | `Ctrl+H` (Edit ▸ History…) — click a step to jump to it; kept when the project is reopened |
+| See what's been done, and what's still applied | the **≡ History** button in the toolbar, or `Ctrl+H` / Edit ▸ History… — click a step to jump to it; kept when the project is reopened |
 | Save projects without their edit history | File ▸ **Store the edit history in project files** (uncheck) |
 | New project | `Ctrl+N` (File ▸ New Project) |
 | Add files / Save project | `Ctrl+O` / `Ctrl+S` |

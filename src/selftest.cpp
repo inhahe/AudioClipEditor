@@ -1565,6 +1565,117 @@ int runSelfTest() {
         }
     }
 
+    // ---- main transport toolbar wrapping
+    //
+    // The reported symptom was the position/length readout being cut off
+    // mid-digit ("0:00.00 / 0:2") once the History button joined Undo and Redo
+    // on the right: the bar's groups were placed at fixed positions and simply
+    // overlapped. layoutTransport now asks layout::flowTransport which row each
+    // group belongs on, and the property that matters is that nothing is ever
+    // clipped -- checked here across a sweep of widths, because the failure only
+    // shows up at whatever size the user happens to drag the window to.
+    {
+        // Exactly the widths layoutTransport passes, scaled the way S() would.
+        struct TB3 { layout::TransportFlow f; int margin, timeW, leftW, rightW; };
+        auto bar = [](float sc, int clientW) {
+            auto S = [&](int v) { return (int)(v * sc + 0.5f); };
+            const int gap = S(8), margin = S(12), timeGap = S(16), timeW = S(190);
+            const int leftW = S(96) + gap + S(96) + S(16) + S(140) + gap + S(70);
+            const int rightW = S(46) + S(4) + S(120) + S(12) +
+                               S(70) + gap + S(70) + gap + S(92);
+            TB3 t{ layout::flowTransport(clientW, margin, gap, leftW, timeGap, timeW, rightW),
+                   margin, timeW, leftW, rightW };
+            return t;
+        };
+
+        // The default window is 1700x950, i.e. a 1678 px client at 150% DPI --
+        // deliberately wide enough that the out-of-the-box toolbar is one row.
+        auto def150 = bar(1.5f, 1678);
+        check(def150.f.rows == 1, L"transport bar: one row at the default window, 150% DPI",
+              std::to_wstring(def150.f.rows));
+        // 100% DPI has even more room to spare.
+        check(bar(1.0f, 1478).f.rows == 1, L"transport bar: one row at 100% DPI");
+        // Narrower: the history group drops below, the readout keeps its place.
+        auto mid150 = bar(1.5f, 1178);
+        check(mid150.f.rows == 2 && mid150.f.midRow == 0 && mid150.f.rightRow == 1,
+              L"transport bar: history group wraps first",
+              std::to_wstring(mid150.f.rows) + L" rows, mid on " +
+                  std::to_wstring(mid150.f.midRow));
+        // Narrower still: the readout wraps too rather than being clipped, and
+        // lands at the left margin of its own row.
+        auto narrow = bar(1.5f, 878);
+        check(narrow.f.rows == 3 && narrow.f.midRow == 1 && narrow.f.rightRow == 2,
+              L"transport bar: readout wraps rather than being cut off",
+              std::to_wstring(narrow.f.rows) + L" rows, mid on " +
+                  std::to_wstring(narrow.f.midRow));
+        check(narrow.f.midX == (int)(12 * 1.5f + 0.5f),
+              L"transport bar: a wrapped readout starts at the left margin",
+              std::to_wstring(narrow.f.midX));
+
+        // The property, over every width the window can plausibly take: the
+        // readout always has its full width available, and the history group
+        // never starts left of the margin.
+        bool readoutFits = true, rightOnScreen = true, sane = true;
+        int worstW = 0;
+        for (float sc : { 1.0f, 1.25f, 1.5f, 2.0f }) {
+            for (int w = 420; w <= 2600; w += 7) {
+                auto t = bar(sc, w);
+                const int limit = w - t.margin;
+                if (t.f.midX + t.timeW > limit && limit - t.margin >= t.timeW) {
+                    readoutFits = false; worstW = w;
+                }
+                if (t.f.rightX < t.margin) rightOnScreen = false;
+                if (t.f.rows < 1 || t.f.rows > 3) sane = false;
+            }
+        }
+        check(readoutFits, L"transport bar: the readout is never clipped at any width",
+              L"failed at client width " + std::to_wstring(worstW));
+        check(rightOnScreen, L"transport bar: the history group never starts off the left edge");
+        check(sane, L"transport bar: never needs more than three rows");
+
+        // The transport buttons draw centred with no ellipsis, so a label wider
+        // than its button is clipped at both ends. Same drift risk as the editor
+        // toolbar above; History is the newest and the tightest.
+        for (float sc : { 1.0f, 1.5f }) {
+            auto S = [&](int v) { return (int)(v * sc + 0.5f); };
+            HDC sdc = GetDC(nullptr);
+            HFONT f = CreateFontW(-S(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                                  OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                  VARIABLE_PITCH, L"Segoe UI");
+            HGDIOBJ of = SelectObject(sdc, f);
+            struct TL { const wchar_t* text; int w; };
+            const TL tls[] = {
+                { L"+ Add Files", S(96) }, { L"+ Add Track", S(96) },
+                { L"\u25A0 Stop", S(70) },
+                { L"\u21B6 Undo", S(70) }, { L"\u21B7 Redo", S(70) },
+                { L"\u2261 History", S(92) },
+            };
+            std::wstring worst; int worstOver = -100000;
+            for (const TL& b : tls) {
+                SIZE sz{}; GetTextExtentPoint32W(sdc, b.text, (int)wcslen(b.text), &sz);
+                const int over = sz.cx - b.w;
+                if (over > worstOver) { worstOver = over; worst = b.text; }
+            }
+            // Play All is the one drawn with the big semibold font, and like the
+            // editor's transport buttons it is sized for its widest alternate so
+            // that starting playback doesn't re-flow the bar under the cursor.
+            HFONT fb = CreateFontW(-S(17), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+                                   OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                   VARIABLE_PITCH, L"Segoe UI");
+            SelectObject(sdc, fb);
+            for (const wchar_t* t : { L"\u25B6  Play All", L"\u275A\u275A  Pause" }) {
+                SIZE sz{}; GetTextExtentPoint32W(sdc, t, (int)wcslen(t), &sz);
+                const int over = sz.cx - S(140);
+                if (over > worstOver) { worstOver = over; worst = t; }
+            }
+            SelectObject(sdc, of); DeleteObject(fb); DeleteObject(f); ReleaseDC(nullptr, sdc);
+            check(worstOver <= -6,
+                  std::wstring(L"transport bar: every button label fits at ") +
+                      (sc == 1.0f ? L"100%" : L"150%") + L" DPI",
+                  L"tightest \"" + worst + L"\" with " + std::to_wstring(-worstOver) + L" px spare");
+        }
+    }
+
     // ---- preview transport (which control does what to the engine)
     //
     // transport::decide is what stands behind the play/pause buttons. The reported

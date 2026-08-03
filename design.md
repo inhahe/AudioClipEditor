@@ -20,7 +20,7 @@ sync with behavior changes.
 | `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms, voice isolation, LTAS timbre matching, manual region edits (see below) |
 | `waveform.{h,cpp}` | GDI oscilloscope: per-column min/max envelope (one `PolyPolyline`) zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, history list, file/project pickers |
-| `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`), toolbar row wrapping (`flowButtons`), and scrollbar sizing (`scrollBarsNeeded`, `scrollThumb`, `scrollFromThumb`) |
+| `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`), toolbar row wrapping (`flowButtons` for the editor toolbar, `flowTransport` for the main transport bar), scrollbar sizing (`scrollBarsNeeded`, `scrollThumb`, `scrollFromThumb`), and `scrollToReveal` |
 | `transport.h` | Pure play/pause decision logic, likewise split out to be testable: `decide(State, Press)` → pause / resume / restart-from-where, for both the single combined control and the editor's labelled button pair |
 | `selhistory.h` | Pure undo/redo state machine for the waveform selection, kept out of the document's snapshot tree; a `base` token ties the stack to a point in the document history |
 | `snap.h` | Pure directional-snapping state machine for dragging clips along a lane: pulls only when moving *away* from a target, so snapping stays convenient without making near-miss positions unreachable |
@@ -521,6 +521,43 @@ message would quote whole-clip numbers for a selection-sized edit. The undo
 label and the summary message both say "the selection" / "(within the
 selection)" when the run was narrowed.
 
+## Transport bar layout (`App::layoutTransport`, `layout::flowTransport`)
+
+The bar is three groups: transport actions from the left (**+ Add Files**,
+**+ Add Track**, **▶ Play All**, **■ Stop**), the position/length readout in the
+middle, and the history group pinned to the right (**Scale** slider, **Undo**,
+**Redo**, **≡ History**). Their positions used to be computed independently from
+the two edges, which works only as long as they happen not to meet. Adding the
+History button broke that: at the old default 1500 px window on a 150% DPI
+display the client is 1478 px while the content wants ≈1653, and the readout —
+drawn with `DT_LEFT` and no ellipsis — was silently cut off mid-digit
+(`0:00.00 / 0:2`). Nothing else on the bar has that failure mode, because
+everything else is a button whose label fits its own box.
+
+`layout::flowTransport` assigns each group a **row** greedily: the left group is
+always first on row 0; the middle group stays on the current row if it fits after
+it and drops to a new row at the left margin if it doesn't; the right group is
+right-aligned on whatever row it lands on, dropping again if that would collide.
+`layoutTransport` turns those rows into rects and publishes the total height as
+`App::transportH`, which `computeLayout()` reads **before** sizing anything else
+— the tracks pane and library start under whatever height the bar came to. The
+readout stretches to fill its row (up to the *Scale* caption when it shares one),
+so a longer arrangement has somewhere to put its digits.
+
+This is the same principle as the editor toolbar's `flowButtons`: a control that
+runs off the edge is unreachable, and a number that runs off the edge is
+misinformation, so the bar grows downwards instead. It costs pixels; clipping
+costs meaning. Keeping the row assignment in `layout.h` lets the selftest sweep
+every plausible client width at 100/125/150/200% DPI and assert that the readout
+is never clipped, the history group never starts off the left edge, and three
+rows is the worst case.
+
+The **default window is 1700×950** (`WinMain`) rather than 1500×950 so that the
+out-of-the-box toolbar is one row at 150% DPI — wrapping is the fallback, not the
+normal state. (Window size and position are persisted in
+`HKCU\Software\AudioClipEditor\WindowPlacement`, so the default only applies on a
+first run.)
+
 ## Timeline: scrolling a long arrangement
 
 An arrangement longer than the window used to be reachable only by rolling the
@@ -581,7 +618,8 @@ scrollbars.
 ### Revealing a clip that was added off-screen
 
 `revealPlacement(trackId, startFrame, endFrame)` scrolls the tracks pane in both
-axes so a just-placed clip is on screen. "Add to timeline ▸ Track N" appends at
+axes so a just-placed clip is on screen. The clip context menu's *Add to…*
+(below) appends at
 the end of the track, which on any arrangement longer than the window is past the
 right-hand edge — and on a project with more tracks than fit, the target lane can
 be past the bottom edge too. Without this the command looks like it did nothing,
@@ -593,6 +631,22 @@ lines up its *start* (no scroll position shows all of it). Like any deliberate
 view move it clears `followPlayhead`. Dropping a card by hand deliberately does
 *not* call it: the drop lands under the cursor, which is on screen by
 construction.
+
+### Naming the destination — `IDM_ADDTL_BASE`
+
+The item used to be an unconditional **Add to timeline ▸** submenu, which was
+wrong twice over: "timeline" is not a place a clip can go (a *track* is), and
+with a single track it made you open a submenu to choose from one entry. The menu
+is now built from the track list — one track gives a flat `Add to “Track 1”`,
+several give an `Add to track ▸` submenu of names — so the command always says
+where the clip is about to land. Command ids stay `IDM_ADDTL_BASE + trackIndex`
+either way, so the handler is unchanged.
+
+That handler is also where the dangling-reference rule bites: `tracks` refers
+into `doc.project().tracks` and the `Clip` lives in the library vector, both of
+which `placeClip` can reallocate, so the track id, track name, clip name and clip
+length are copied out *before* the edit and only the copies are used for
+`revealPlacement` and the toast.
 
 There is one more coupling, in `computeLayout()`: the tracks pane is sized *to
 just fit* its tracks, so introducing a horizontal bar would push the bottom lane
@@ -758,9 +812,12 @@ moment of failure:
 - **The same toggle in a placed clip's right-click menu**, next to *Space before
   this clip…* and *Close the space before this clip* — because that is the menu
   someone spacing out an arrangement actually opens, and those two neighbours are
-  what brought them there. The menu-bar Timeline popup has nothing else in it, so
-  it is a menu with no reason to be opened; a feature reachable only from there is
-  a feature nobody finds. Both routes go through `App::toggleRippleMode`, which
+  what brought them there. The menu-bar **Arrange** popup has nothing else in it,
+  so it is a menu with no reason to be opened; a feature reachable only from there
+  is a feature nobody finds. (It was called *Timeline* until a user opened it
+  looking for the edit history — "the timeline of what I've done to this
+  project" — which is the History window; see below.) Both routes go through
+  `App::toggleRippleMode`, which
   owns the menu-bar tick and a toast naming the direction the toggle just went (a
   menu you dismissed to read its own tick is a poor way to learn what you did).
 - **The plain-move badge names the other gesture**: `move • +0.42 s • Shift:
@@ -1374,7 +1431,19 @@ the next row's head share an index but must draw different carets), the **editor
 toolbar wrapping** also in `layout.h` (one row when it fits with the height
 unchanged, two rows at 150% DPI on the default window, no button ever past the
 window edge, wrapped rows restarting at the left margin, and every button still
-placed at an absurd 300 px width),
+placed at an absurd 300 px width), **`layout::scrollToReveal`** (a span already
+in view doesn't move the position, one past either edge comes in with its margin,
+one too wide to fit lines up its start, both ends clamp to the scroll range, and
+a viewport of zero or one smaller than two margins degrades sanely), the
+**transport bar wrapping**
+(`layout::flowTransport`: one row at the default window at both 100% and 150%
+DPI, the history group wrapping first, the readout wrapping rather than being
+cut off and restarting at the left margin — plus a sweep of every client width
+from 420 to 2600 px at 100/125/150/200% DPI asserting the readout is never
+clipped, the history group never starts off the left edge, and three rows is the
+worst case — and a text-measurement check that every transport button label fits
+its hand-sized box, including *≡ History* and both *Play All* / *Pause*
+alternates),
 **`clampSelection`** (a selection survives removing an unrelated placement or
 deleting a different clip — the reported bug — is clamped rather than dropped
 when it merely runs past a shortened buffer, and is dropped only when its clip is
@@ -1543,7 +1612,19 @@ out the saved state ("the saved file holds this") and fork points. The window
 `std::function<int(int)> jump` callback that returns the new current index rather
 than the dialog closing with a choice — because answering "was the timbre match
 undone?" usually means trying two positions and *listening*, not making one
-decision. Reached from `Edit ▸ History…` or `Ctrl+H`.
+decision. Reached from the **≡ History** button in the transport bar
+(`TB_HISTORY`), from `Edit ▸ History…`, or with `Ctrl+H`.
+
+**Why there is a toolbar button.** The window is where you go to answer "what
+have I done to this project", and the two controls that step through that same
+list — Undo and Redo — are on the toolbar, so the list itself belongs beside
+them. Before, it lived only under `Edit` and `Ctrl+H`, and a user hunting for it
+opened the menu-bar **Timeline** entry instead (that menu is about the track
+lanes, but its name reads as "the timeline of what I've done"). That menu is now
+called **Arrange** for the same reason. The button is dimmed while
+`doc.history()` is empty, and the history *description* for placing a clip names
+its destination track (`App::placeDesc`) so the list answers the question the
+same way the menu asks it: *Add 'ref_10s' to Track 2*, not "to timeline".
 
 ### Persisting the history — `.acep` v4 and the buffer pool
 
