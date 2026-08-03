@@ -103,7 +103,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   adding a track scrolls it into view. An arrangement wider than the window grows a
   **horizontal scrollbar** to match, and can also be scrolled with the wheel or the
   `←`/`→`/`Home`/`End` keys. Drag a clip card up onto a track to drop it
-  at any time offset; drag placed clips to move them. Clips **can't overlap** on a
+  at any time offset; drag placed clips to move them. Right-click a card →
+  **Add to timeline ▸** drops it at the end of the chosen track instead — and
+  since the end of a long track is off the right-hand edge, the view scrolls to
+  the new clip and a message says which track it went to and at what time, so the
+  command can't look like it did nothing. Clips **can't overlap** on a
   track, and they **snap** to butt up flush against a neighbour — but only in the
   direction that doesn't get in your way. Sliding *toward* a neighbour never pulls,
   so you can leave a gap as small as you like; nudge *past* it and the clip lands

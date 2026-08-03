@@ -1718,6 +1718,35 @@ int runSelfTest() {
           check(t.length == 0 && t.offset == 0, L"scrollbars: an empty viewport yields no thumb");
           check(scrollFromThumb(50, 100, 100, 0) == 0,
                 L"scrollbars: a full-length thumb cannot scroll"); }
+
+        // ---- scrollToReveal: bringing a just-placed clip into view.
+        // Viewport 500 wide showing content up to 5000, margin 20.
+        { using layout::scrollToReveal;
+          const int vis = 500, mg = 20, maxS = 4500;
+          check(scrollToReveal(0, vis, 100, 300, mg, maxS) == 0,
+                L"reveal: a span already in view does not move the scroll");
+          check(scrollToReveal(0, vis, 600, 800, mg, maxS) == 320,
+                L"reveal: a span past the right edge scrolls just far enough",
+                std::to_wstring(scrollToReveal(0, vis, 600, 800, mg, maxS)));
+          check(scrollToReveal(1000, vis, 600, 800, mg, maxS) == 580,
+                L"reveal: a span past the left edge scrolls back to it",
+                std::to_wstring(scrollToReveal(1000, vis, 600, 800, mg, maxS)));
+          // Wider than the viewport: no position shows all of it, so show the start.
+          check(scrollToReveal(0, vis, 1000, 3000, mg, maxS) == 980,
+                L"reveal: a span too wide to fit lines up its start",
+                std::to_wstring(scrollToReveal(0, vis, 1000, 3000, mg, maxS)));
+          // The margin must not push the scroll negative at the very start...
+          check(scrollToReveal(300, vis, 0, 200, mg, maxS) == 0,
+                L"reveal: revealing the content start clamps at zero");
+          // ...nor past the end of the content.
+          check(scrollToReveal(0, vis, 4900, 5000, mg, maxS) == 4500,
+                L"reveal: revealing the content end clamps at the last scroll");
+          // Degenerate viewports: no crash, no nonsense.
+          check(scrollToReveal(700, 0, 0, 100, mg, maxS) == 700,
+                L"reveal: a zero-height viewport leaves the scroll alone");
+          check(scrollToReveal(0, 30, 100, 120, mg, maxS) == 90,
+                L"reveal: a viewport smaller than two margins drops the margin",
+                std::to_wstring(scrollToReveal(0, 30, 100, 120, mg, maxS))); }
     }
 
     // ---- sticky snapping (dragging a clip along a lane)

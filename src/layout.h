@@ -141,4 +141,29 @@ inline int scrollFromThumb(int thumbOffset, int trackLen, int thumbLen, int maxS
     return (int)(frac * maxScroll);
 }
 
+// Scroll position that brings the span [x0, x1) into view, keeping `margin` of
+// clear space at whichever edge it had to come in from, and leaving the position
+// alone when the span is already comfortably inside the viewport -- a jump the
+// user did not need is its own kind of confusing.
+//
+// A span too long to fit lines up its *start*: no scroll position shows all of
+// it, and the start is where it begins and where the next edit will be. Both
+// coordinates are in content space (0 = start of the content, not of the
+// viewport), which is what `scrollPos` measures too.
+inline int scrollToReveal(int scrollPos, int visLen, int x0, int x1,
+                          int margin, int maxScroll) {
+    if (visLen <= 0) return scrollPos;
+    // A viewport too small for two margins would keep re-centring on nothing;
+    // drop the margin rather than the reveal.
+    if (margin * 2 >= visLen) margin = 0;
+    int want = scrollPos;
+    if (x1 - x0 > visLen - margin * 2)      want = x0 - margin;
+    else if (x0 < scrollPos + margin)       want = x0 - margin;
+    else if (x1 > scrollPos + visLen - margin) want = x1 - visLen + margin;
+    else return scrollPos;
+    if (want < 0) want = 0;
+    if (want > maxScroll) want = maxScroll;
+    return want;
+}
+
 }  // namespace layout

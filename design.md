@@ -569,6 +569,31 @@ is released (drawing them inside it would clip the horizontal one away). Hit
 testing checks both bars before the lanes, since the lane rects extend underneath
 them.
 
+`paintTimeline` uses a **second, nested clip region** for everything that lives in
+lane coordinates — placed clips, both kinds of drag ghost, the playhead — set to
+start at `trackHeaderW` rather than at the pane's left edge. Scrolling right puts
+the start of an already-started clip at a negative lane x, and without the inner
+clip that block paints straight across the fixed track-header column, swallowing
+the track's name and volume slider. The headers and lane backgrounds are drawn
+first, under the outer (whole-pane) clip, and the inner one is released before the
+scrollbars.
+
+### Revealing a clip that was added off-screen
+
+`revealPlacement(trackId, startFrame, endFrame)` scrolls the tracks pane in both
+axes so a just-placed clip is on screen. "Add to timeline ▸ Track N" appends at
+the end of the track, which on any arrangement longer than the window is past the
+right-hand edge — and on a project with more tracks than fit, the target lane can
+be past the bottom edge too. Without this the command looks like it did nothing,
+which reads as "adding to the timeline is broken" rather than "the clip is over
+there"; a toast naming the track and the time it landed at says the same thing in
+words. A clip already fully visible does not move the view at all, since a jump
+you did not need is its own kind of confusing, and a clip wider than the lane
+lines up its *start* (no scroll position shows all of it). Like any deliberate
+view move it clears `followPlayhead`. Dropping a card by hand deliberately does
+*not* call it: the drop lands under the cursor, which is on screen by
+construction.
+
 There is one more coupling, in `computeLayout()`: the tracks pane is sized *to
 just fit* its tracks, so introducing a horizontal bar would push the bottom lane
 under it and — correctly, per the two-pass rule — summon a vertical bar as well.
@@ -1587,7 +1612,7 @@ selftest builds a 20 000-step history and destroys it; without the iterative
 destructor that test kills the process (verified).
 
 **Undo/redo toast** (`App::toast`, `paintToast`, expiry in `onTimer`): a
-transient badge, centred under the toolbar, naming what just moved — *"Undone:
+transient badge, centred under the *tracks pane*, naming what just moved — *"Undone:
 Match timbre of 23 clips to their average"*. It fires on **every** undo and redo
 rather than trying to classify which edits are visible: a heuristic for "was that
 change on screen?" would be wrong sometimes, and always-accurate feedback beats
@@ -1600,6 +1625,17 @@ undo) says *"Undone: selection change"*. The badge is measured with
 `GetTextExtentPoint32` — the two disagree by a pixel or two on overhang, and a
 box one pixel short makes `DT_END_ELLIPSIS` eat the last word, which turns
 "Nothing left to undo" into a different message.
+
+**Where it sits.** Below the toolbar, so it never covers the Undo button being
+clicked repeatedly — and below the *tracks pane* as well (`rcTimeline.bottom`),
+because that pane is only as tall as its tracks: with one track it is a thin strip
+directly under the toolbar, and a badge placed at `rcTransport.bottom` covered the
+ruler and the whole lane. Most toasts are *about* the timeline ("won't fit — hold
+Shift…", "Added 'x' to Track 1 at 0:10.00"), so landing on top of the clip they
+are explaining is the one place they must not be. Floating over the top of the
+library instead costs nothing: it is a scrolling grid and the badge is gone in a
+couple of seconds. In the full-window editor it stays at `edToolbarH`, which is
+that view's toolbar.
 
 ## Unsaved-changes guard
 

@@ -884,10 +884,16 @@ struct App {
         return !toastText.empty() && (int)(GetTickCount() - toastUntil) >= 0;
     }
 
-    // Drawn floating over everything, centred just under the toolbar, because the
-    // message is about the whole project rather than about any one panel. Under the
-    // toolbar rather than over it so it never hides the very Undo button that is
-    // probably being clicked repeatedly.
+    // Drawn floating over everything, centred near the top, because the message is
+    // about the whole project rather than about any one panel. Below the toolbar,
+    // so it never hides the very Undo button that is probably being clicked
+    // repeatedly -- and below the *tracks pane* as well, because that pane is only
+    // as tall as its tracks: with one track it is a thin strip right under the
+    // toolbar, and a toast there covers the ruler and the lane. Most toasts are
+    // about the timeline ("won't fit -- hold Shift..."), so landing on top of the
+    // clip they are explaining is exactly the wrong place for them. Floating over
+    // the top of the library instead costs nothing: it is a scrolling grid, and
+    // the toast is gone in a couple of seconds.
     void paintToast(HDC h, const RECT& client) {
         if (toastText.empty()) return;
         // Measured with DrawText, not GetTextExtentPoint32, and with the same flags
@@ -903,7 +909,7 @@ struct App {
         int w = std::min<int>(tw + padX * 2, std::max<int>(S(120), client.right - S(40)));
         int ht = th + padY * 2;
         int cx = client.right / 2;
-        int top = (editorActive() ? edToolbarH : rcTransport.bottom) + S(10);
+        int top = (editorActive() ? edToolbarH : rcTimeline.bottom) + S(10);
         RECT box = { cx - w / 2, top, cx + w / 2, top + ht };
         roundFill(h, box, col::transport, col::accent, S(8));
         RECT tr = { box.left + padX, box.top, box.right - padX, box.bottom };
@@ -1204,6 +1210,15 @@ struct App {
             RECT laneln = { tl.lane.left, tl.lane.bottom - 1, tl.lane.right, tl.lane.bottom };
             fill(h, laneln, col::bg);
         }
+        // Everything from here to the matching RestoreDC lives in *lane* space, so
+        // it is clipped to the right of the fixed track-header column as well. A
+        // clip that starts before the scrolled-to time extends off the left of the
+        // lane, and without this it paints straight over the header -- swallowing
+        // the track's name and volume slider, which are supposed to stay put no
+        // matter where the view is scrolled to.
+        SaveDC(h);
+        IntersectClipRect(h, rcTimeline.left + trackHeaderW, rcTimeline.top + rulerH,
+                          rcTimeline.right, laneClipBottom());
         // placed clips
         for (const auto& pl : placed) {
             const Clip* c = doc.project().findClip(pl.clipId);
@@ -1312,6 +1327,7 @@ struct App {
                 SelectObject(h, op); DeleteObject(pen);
             }
         }
+        RestoreDC(h, -1);   // out of lane space, back to the whole tracks pane
         RestoreDC(h, -1);
 
         // Scrollbars last and outside the lane clip, which now stops above the
@@ -3103,6 +3119,44 @@ struct App {
         refresh();
     }
     void afterPlaceRefresh() { clampScroll(); refresh(); }
+
+    // Scroll the tracks pane so a just-placed clip is actually on screen, in both
+    // axes. Placing from the menu appends at the end of the track, which on any
+    // arrangement longer than the window is off the right-hand edge -- and a lane
+    // several tracks down can be off the bottom edge as well. Without this the
+    // command silently does nothing visible, which reads as "adding to the
+    // timeline is broken" rather than "the clip is over there".
+    //
+    // A clip that is already fully visible does not move the view at all: a jump
+    // the user didn't need is its own kind of confusing. Dropping a clip by hand
+    // therefore doesn't call this -- the drop lands under the cursor, which is on
+    // screen by construction.
+    void revealPlacement(int trackId, int64_t startFrame, int64_t endFrame) {
+        clampScroll();       // re-lays out for the new content size before measuring
+        const int wanted = layout::scrollToReveal(
+            tlScrollX, tlLaneVisW(), (int)(startFrame * pxPerFrame()),
+            (int)(endFrame * pxPerFrame()), S(24), maxScrollX());
+        if (wanted != tlScrollX) {
+            tlScrollX = wanted;
+            // A deliberate view move; let the playhead have it back only when
+            // playback is (re)started, the same rule as scrolling by hand.
+            followPlayhead = false;
+        }
+
+        // Vertically the lane either fits or it doesn't, so no margin: a whole
+        // extra lane's worth of slack is not on offer.
+        const auto& tracks = doc.project().tracks;
+        int ti = -1;
+        for (int i = 0; i < (int)tracks.size(); ++i) if (tracks[i].id == trackId) { ti = i; break; }
+        if (ti >= 0) {
+            const int laneH = trackLaneH(), top = ti * (laneH + trackGap());
+            tlScrollY = layout::scrollToReveal(tlScrollY, tlLaneVisH(), top, top + laneH,
+                                               0, maxScrollY());
+        }
+        clampScroll();
+        refresh();
+    }
+
     // Add a track and scroll the tracks pane so the new (bottom) track is visible.
     void addTrackAndReveal() { doc.addTrack(); tlScrollY = INT_MAX; clampScroll(); refresh(); }
 
@@ -3362,7 +3416,23 @@ struct App {
                 // place at end of the track (no overlap)
                 int64_t start = 0;
                 for (auto& pc : tracks[idx].clips) start = std::max(start, pc.endFrame());
-                if (c) { doc.placeClip(tracks[idx].id, clipId, start, L"Add '" + c->name + L"' to timeline"); afterPlaceRefresh(); }
+                if (c) {
+                    // Everything needed after the edit is copied out first: placing
+                    // writes through the tracks vector `tracks` refers to, and the
+                    // Clip lives in the library vector, which can reallocate.
+                    const int trackId = tracks[idx].id;
+                    const std::wstring trackName = tracks[idx].name;
+                    const std::wstring clipName = c->name;
+                    const int64_t len = c->frames();
+                    doc.placeClip(trackId, clipId, start, L"Add '" + clipName + L"' to timeline");
+                    // Scroll it into view and say where it went. Appending puts it
+                    // past everything already on the track, which on a long
+                    // arrangement is somewhere the user isn't looking; without both
+                    // of these the command appears to have done nothing at all.
+                    revealPlacement(trackId, start, start + len);
+                    toast(L"Added \u2018" + clipName + L"\u2019 to " + trackName +
+                          L" at " + fmtTime((double)start / (rate > 0 ? rate : 48000)));
+                }
             }
         }
     }
