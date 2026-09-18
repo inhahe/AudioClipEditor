@@ -7,3 +7,13 @@
 *.exe
 *.dll
 *.zip
+
+# Local-only. We now publish straight from this directory rather than copying an
+# allowlisted subset into D:\github, so what copy-to-github.bat used to filter
+# has to be excluded here instead. These were also purged from history.
+CLAUDE.md
+todo.txt
+done.txt
+go.bat
+build-and-copy.bat
+release.bat

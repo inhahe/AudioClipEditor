@@ -396,3 +396,9 @@ rate)**) as stereo float, so clips of any source rate/bit depth are unified. Whe
 the device mix rate is below the internal rate, the engine linear-resamples on
 the audio thread during playback. Sample-rate / bit-depth / channel / container
 conversion for output happens at export time.
+
+
+## License
+
+MIT - see [LICENSE](LICENSE). Free to use, modify and redistribute; provided
+as-is, with no warranty.
