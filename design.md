@@ -167,10 +167,14 @@ any file that won't decode — several can arrive at once.
   opened; after the window is gone, a fresh copy is started with it
   (`launch::commandLine` quotes it so `CommandLineToArgvW` splits it back exactly)
   rather than the double-click being lost. With several, each copy is started only
-  once the one before is ready for input (`WaitForInputIdle`) — by then it holds the
-  startup lock or has its window — so the next hands its files to it and they open in
-  the order asked, the last one left open, as they would have here; started back to
-  back, they raced for the lock and could open in either order. Their senders have
+  once the one before has its window, or has handed its files to another copy and
+  gone (`hasMainWindow`, a minute at most), so the next hands its files on after it
+  and they open in the order asked, the last one left open, as they would have here.
+  Started back to back, they raced for the startup lock. Waiting until the copy was
+  ready for input (`WaitForInputIdle`) wasn't enough either: a copy that has to wait
+  for yet another one to finish starting is ready for input in its waiting window,
+  before it holds the lock (seen live, with the lock held from outside: the first
+  request was left open 3 times out of 3; now the last, 4 out of 4). Their senders have
   exited believing the files taken, so a copy that can't be started (the exe moved
   while the app ran) is reported in a message box naming the files.
 - **Projects are tried in order** until one opens, so a missing first project doesn't

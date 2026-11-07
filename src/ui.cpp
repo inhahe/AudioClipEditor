@@ -4686,10 +4686,22 @@ static HandOff handToRunningCopy(const std::vector<std::wstring>& files, Startup
     }
 }
 
-// Start another copy of the app to open `files`, and wait until it is ready for input:
-// by then it holds the startup lock or has its window (or has handed the files on), so
-// copies started one after another take their turns in that order. False if it
-// couldn't be started.
+// Whether process `pid` has a main window of the app.
+static bool hasMainWindow(DWORD pid) {
+    for (HWND w : runningCopies()) {
+        DWORD owner = 0;
+        GetWindowThreadProcessId(w, &owner);
+        if (owner == pid) return true;
+    }
+    return false;
+}
+
+// Start another copy of the app to open `files`, and wait until it has its window or
+// has handed the files to another copy and gone (a minute at most), so that copies
+// started one after another hand their files on in that order. Merely ready for
+// input isn't enough: a copy waiting for another to finish starting is ready for
+// input in its waiting window, before it holds the startup lock, and the next copy
+// started would then race it for the lock. False if it couldn't be started.
 static bool startCopy(const std::vector<std::wstring>& files) {
     const std::wstring exe = exePath();
     std::wstring cmd = L"\"" + exe + L"\" " + launch::commandLine(files);
@@ -4697,7 +4709,8 @@ static bool startCopy(const std::vector<std::wstring>& files) {
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
         return false;
-    WaitForInputIdle(pi.hProcess, 30000);
+    for (int waited = 0; waited < 60000; waited += 50)
+        if (WaitForSingleObject(pi.hProcess, 50) != WAIT_TIMEOUT || hasMainWindow(pi.dwProcessId)) break;
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     return true;
