@@ -60,6 +60,11 @@ bool projectsOpenWith(const std::wstring& root, const std::wstring& exe) {
 }
 
 std::wstring effectiveOpenCommand() {
+    // The "open" verb by name. A double-click runs the handler's default verb, but
+    // given no verb AssocQueryString finds no command at all (ERROR_NO_ASSOCIATION,
+    // even for .txt). The two agree wherever our command can be found: this app's
+    // ProgID, and the one Windows makes when the exe is picked under "Open with", each
+    // have "open" as their only verb.
     DWORD n = 0;
     if (AssocQueryStringW(ASSOCF_NOTRUNCATE | ASSOCF_INIT_IGNOREUNKNOWN, ASSOCSTR_COMMAND, L".acep",
                           L"open", nullptr, &n) != S_FALSE || n == 0) return std::wstring();

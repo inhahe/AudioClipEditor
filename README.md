@@ -327,7 +327,8 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   app — if you move the app, tick it again from the new copy. Unticking hands `.acep`
   files back to whatever opened them before. If you once told Windows to *Always*
   open `.acep` files with something else, that choice comes first; the app tells you
-  when this happens and how to switch it. You can also open a
+  when this happens and how to switch it, and clicking the item again then offers to
+  remove the app's registration instead. You can also open a
   project, or add audio files as clips, from the command line or by dropping them
   onto `AudioClipEditor.exe`: `AudioClipEditor.exe "My show.acep" "pickup 3.wav"`
   opens the project and adds the WAV to it. If the app is already running, the files

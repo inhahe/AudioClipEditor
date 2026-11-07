@@ -139,10 +139,21 @@ they are empty. Writes go through `RegSetKeyValueW`, which creates the key as ne
 legitimately set) ahead of any registration. When such a choice stands in the way,
 ticking says so and how to change it (*Open with ▸ Choose another app ▸ Audio Clip
 Editor*, *Always*) instead of claiming success; unticking while that choice points
-here says the same about *Settings ▸ Default apps*. The tick is re-read every time the
-File menu opens (`WM_INITMENUPOPUP`), since another copy of the app or Windows' own
-settings can change it while this window is open. A copy moved elsewhere shows
-unticked and can register itself. The selftest drives the registration against a
+here says the same about *Settings ▸ Default apps*. Clicking the item while it shows
+unticked *because* such a choice comes first — the app is registered, but overridden —
+can't usefully register again, so it says the same and offers to remove the
+registration instead (*No* is the default); without that, nothing in the app could
+take it back out, say before deleting the app. The tick is read when the File menu
+opens (`WM_INITMENUPOPUP` for that menu only — every context menu and the system menu
+send it too, and the lookup goes through the shell — and not when the menu is built,
+since that message always comes first), because another copy of the app or Windows'
+own settings can change it while this window is open. The exe's path is looked up
+once (`App::exe`). A copy moved elsewhere shows unticked and can register itself. The
+lookup asks for the `open` verb by name: a double-click runs the default verb, but
+given no verb `AssocQueryString` finds no command at all (`ERROR_NO_ASSOCIATION`, even
+for `.txt`), and wherever our command can be found — our ProgID, or the
+`Applications\AudioClipEditor.exe` one Windows makes when the exe is picked under
+*Open with* — `open` is the only verb. The selftest drives the registration against a
 scratch root (`assoc::kClassesRoot` is a parameter) and deletes it after; the
 `UserChoice` path can't be tested without changing the user's own settings.
 

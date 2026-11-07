@@ -234,6 +234,10 @@ struct App {
     // A launch message reached the window from inside a modal loop, so the main loop
     // has to post it again once that loop is over.
     bool launchDeferred = false;
+    // Where this copy of the program is (exepath.h), looked up once: the association
+    // names it, and is checked against it each time the File menu opens.
+    const std::wstring exe = exePath();
+    HMENU fileMenu = nullptr;   // the menu bar's File menu (buildMenu)
 
     // The clip last set as the standard to match to, by either matcher; -1 = the
     // average. Shared, because choosing a standard is a statement about the take
@@ -2666,38 +2670,49 @@ struct App {
     // set that choice for the user, so when it stands in the way the message says how
     // to change it rather than claiming success.
     void toggleProjectAssociation() {
-        const std::wstring exe = exePath();
+        const wchar_t* title = L"Open projects with this app";
+        const std::wstring overridden =
+            L"This app is set up to open .acep projects, but Windows has been told to open "
+            L"them with something else (\u201CAlways use this app\u201D), and that comes first."
+            L"\n\nTo switch: right-click a .acep file \u25B8 Open with \u25B8 Choose another app "
+            L"\u25B8 Audio Clip Editor, and tick \u201CAlways\u201D.";
         const bool wasHere = assoc::projectsOpenHere(exe);
-        const bool ok = wasHere ? assoc::unregisterProjects(assoc::kClassesRoot)
-                                : assoc::registerProjects(assoc::kClassesRoot, exe);
+        bool unregister = wasHere;
+        if (!wasHere && assoc::projectsOpenWith(assoc::kClassesRoot, exe)) {
+            // Registered, but that choice comes first, so the item shows unticked.
+            // Registering again would change nothing; this is the way to take the
+            // registration back out (before deleting the app, say).
+            if (MessageBoxW(hwnd, (overridden + L"\n\nRemove this app's registration instead?").c_str(),
+                            title, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
+                return;
+            unregister = true;
+        }
+        const bool ok = unregister ? assoc::unregisterProjects(assoc::kClassesRoot)
+                                   : assoc::registerProjects(assoc::kClassesRoot, exe);
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
         const bool here = assoc::projectsOpenHere(exe);
-        refreshAssocCheck();
-        const wchar_t* title = L"Open projects with this app";
+        setAssocCheck(here);
         if (!ok)
             MessageBoxW(hwnd, L"Windows didn't accept the change to how .acep files open.", title,
                         MB_ICONWARNING);
-        else if (!wasHere && !here)
-            MessageBoxW(hwnd,
-                L"This app is set up to open .acep projects, but Windows has been told to open "
-                L"them with something else (\u201CAlways use this app\u201D), and that comes first."
-                L"\n\nTo switch: right-click a .acep file \u25B8 Open with \u25B8 Choose another app "
-                L"\u25B8 Audio Clip Editor, and tick \u201CAlways\u201D.", title, MB_ICONINFORMATION);
-        else if (wasHere && here)
+        else if (!unregister && !here)
+            MessageBoxW(hwnd, overridden.c_str(), title, MB_ICONINFORMATION);
+        else if (unregister && here)
             MessageBoxW(hwnd,
                 L"Removed this app's registration, but Windows still opens .acep projects here "
                 L"because it was chosen with \u201CAlways use this app\u201D. Change that in "
                 L"Settings \u25B8 Apps \u25B8 Default apps.", title, MB_ICONINFORMATION);
+        else if (unregister && !wasHere)
+            toast(L"Removed this app's registration for .acep projects");
         else
             toast(here ? L"Double-clicking a .acep project now opens it here"
                        : L"Double-clicking a .acep project no longer opens it here");
     }
-    // The tick follows what a double-click does now, which can change outside this
-    // window (another copy of the app, Windows' own settings) -- so it is checked each
-    // time the File menu opens, not just when this window changed it.
-    void refreshAssocCheck() {
-        CheckMenuItem(GetMenu(hwnd), IDC_ASSOC,
-                      MF_BYCOMMAND | (assoc::projectsOpenHere(exePath()) ? MF_CHECKED : MF_UNCHECKED));
+    // The tick shows whether a double-click opens projects here. That can change
+    // outside this window (another copy of the app, Windows' own settings), so it is
+    // read each time the File menu opens (WM_INITMENUPOPUP), not when the menu is built.
+    void setAssocCheck(bool here) {
+        CheckMenuItem(fileMenu, IDC_ASSOC, MF_BYCOMMAND | (here ? MF_CHECKED : MF_UNCHECKED));
     }
     // The waveform selection and playhead ride along in the .acep file; they are
     // UI state, so they live in App and are pushed into Document whenever the
@@ -4135,9 +4150,9 @@ struct App {
         AppendMenuW(file, MF_STRING, IDC_OPENPROJ, L"Open Project\u2026");
         AppendMenuW(file, MF_STRING, IDC_SAVEPROJ, L"Save Project\tCtrl+S");
         AppendMenuW(file, MF_STRING, IDC_SAVEPROJAS, L"Save Project As\u2026");
-        // Ticked while double-clicking a .acep file opens it with this copy of the app.
-        AppendMenuW(file, MF_STRING | (assoc::projectsOpenHere(exePath()) ? MF_CHECKED : 0),
-                    IDC_ASSOC, L"Open .acep projects with this app when double-clicked");
+        // Ticked while double-clicking a .acep file opens it with this copy of the app
+        // (setAssocCheck, as the menu opens).
+        AppendMenuW(file, MF_STRING, IDC_ASSOC, L"Open .acep projects with this app when double-clicked");
         AppendMenuW(file, MF_STRING | (saveHistory ? MF_CHECKED : 0), IDC_SAVEHISTORY,
                     L"Store the edit history in project files");
         AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
@@ -4145,6 +4160,7 @@ struct App {
         AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(file, MF_STRING, IDC_EXIT, L"Exit");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)file, L"File");
+        fileMenu = file;
 
         HMENU edit = CreatePopupMenu();
         AppendMenuW(edit, MF_STRING, IDC_UNDO, L"Undo\tCtrl+Z");
@@ -4430,7 +4446,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // The main loop opens launch requests itself (runApp), so one that arrives here was
     // dispatched by a modal loop, and waits until that is over (openLaunchRequests).
     case WM_APP_LAUNCH: if (a) a->launchDeferred = true; return 0;
-    case WM_INITMENUPOPUP: if (a) a->refreshAssocCheck(); break;
+    // Only for the File menu: every context menu and the system menu come here too,
+    // and the shell's association lookup isn't free.
+    case WM_INITMENUPOPUP:
+        if (a && (HMENU)wp == a->fileMenu && !HIWORD(lp)) a->setAssocCheck(assoc::projectsOpenHere(a->exe));
+        break;
     case WM_COPYDATA: {
         const auto* cds = (const COPYDATASTRUCT*)lp;
         if (a && cds && cds->dwData == kLaunchCopyData && cds->lpData) {
