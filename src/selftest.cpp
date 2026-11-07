@@ -1442,10 +1442,11 @@ int runSelfTest() {
               std::to_wstring(p.sourceAt(720)));
     }
 
-    // ---- an engine with no device: never opened, or init failed (no output device).
-    // The app keeps running with it ("Playback will be silent"), and its timer asks
-    // isPlaying() every 33 ms from the moment the window exists, so every call has to
-    // be a quiet no-op.
+    // ---- an engine that isn't running: never started, or init failed because it can't
+    // run at all (COM, device enumeration). The app keeps running with it ("Playback
+    // will be silent"), and its timer asks isPlaying() every 33 ms from the moment the
+    // window exists, so every call has to be a quiet no-op. (A running engine without
+    // a device is something else: it takes play() and waits for one.)
     {
         PlaybackEngine idle;
         auto tone = makeSine(48000, 0.1, 440.0);
@@ -1454,10 +1455,10 @@ int runSelfTest() {
         idle.pause(); idle.resume(); idle.seek(100);
         const bool quiet = !idle.isPlaying() && !idle.isPaused() && !idle.hasSource() &&
                            idle.position() == 0 && idle.total() == 0 && idle.posDiag().recCount == 0 &&
-                           !idle.hasDevice() && idle.deviceName().empty();
+                           !idle.hasDevice() && !idle.deviceStatus().open && idle.deviceStatus().name.empty();
         idle.stop();
         idle.shutdown();
-        check(quiet, L"playback engine without a device: every call is a quiet no-op");
+        check(quiet, L"playback engine that isn't running: every call is a quiet no-op");
     }
 
     // ---- playback position, end to end through a real device
@@ -1475,15 +1476,21 @@ int runSelfTest() {
             LARGE_INTEGER q; QueryPerformanceCounter(&q);
             return (double)q.QuadPart / (double)qf.QuadPart;
         };
-        // init fails only when the engine can't run at all; without an output device it
-        // runs and waits for one, and only then are these skipped.
-        if (!eng.init(&engErr)) {
+        // init fails only when the engine can't run at all. Without an output device it
+        // runs and waits for one, and only then are these skipped: a device that is
+        // there but didn't open is the engine's failure.
+        const PlaybackEngine::DeviceStatus started =
+            eng.init(&engErr) ? eng.deviceStatus() : PlaybackEngine::DeviceStatus{};
+        if (!engErr.empty()) {
             check(false, L"playback engine starts", engErr);
-        } else if (!eng.hasDevice()) {
+        } else if (!started.open && started.none) {
             out(L"[SKIP] playback engine: no audio output device");
             eng.shutdown();
+        } else if (!started.open) {
+            check(false, L"playback engine opens the default output device", started.problem);
+            eng.shutdown();
         } else {
-            check(!eng.deviceName().empty(), L"playback engine names the device it plays to", eng.deviceName());
+            check(!started.name.empty(), L"playback engine names the device it plays to", started.name);
             // init() is what calls IAudioClient::Start(), so this is the moment
             // the device clock starts running -- the anchor the startup settling
             // window below is measured from.
@@ -1597,7 +1604,8 @@ int runSelfTest() {
             //    further on than the time since the move allows;
             //  - once it moves again it keeps real time, however long the device took to
             //    open (Bluetooth can take a second);
-            //  - the tone still reaches the mixer, and the device callback hears of it once.
+            //  - the tone still reaches the mixer; and since the device is the same one, the
+            //    device callback, which is for a change of device, doesn't hear of it.
             std::atomic<int> moves{ 0 };
             eng.setDeviceCallback([&moves] { ++moves; });
             eng.play(faint(), 0);
@@ -1653,8 +1661,10 @@ int runSelfTest() {
             check(stillPlaying && forward && ticksSince >= 30 && rateAfter > 0.8 && rateAfter < 1.2,
                   L"playback moves to the default device: it carries on forward, at real time once it moves again",
                   std::to_wstring(rateAfter) + L"x, moving again " +
-                      std::to_wstring((int)((resumedAt - tReopen) * 1000.0)) + L" ms after");
-            check(moves == 1, L"playback moves to the default device: the device callback hears of it once",
+                      (ticksSince < 0 ? std::wstring(L"never")
+                                      : std::to_wstring((int)((resumedAt - tReopen) * 1000.0)) + L" ms after"));
+            check(moves == 0,
+                  L"playback moves to the default device: reopening the same one isn't told as a change",
                   std::to_wstring(moves.load()));
             if (after.meter && !after.atFullVolume)
                 out(L"[SKIP] playback moves to the default device: the mixer check needs this program "
@@ -1663,6 +1673,25 @@ int runSelfTest() {
                 check(peakAfter > kFaint * 0.1f && peakAfter < kFaint * 10.0f,
                       L"playback moves to the default device: the tone still reaches the mixer",
                       L"peak " + std::to_wstring(peakAfter));
+
+            // Windows saying the default output changed while it is still the device in
+            // use -- as it does when the one in use goes away and the loop has already
+            // moved -- moves nothing: the stream goes on (its device frames keep counting)
+            // and no change is told.
+            eng.setDeviceCallback([&moves] { ++moves; });
+            eng.play(faint(), 0);
+            Sleep(300);
+            eng.position();
+            const PlaybackEngine::PosDiag beforeNote = eng.posDiag();
+            eng.noteDefaultChanged();
+            Sleep(400);
+            eng.position();
+            const PlaybackEngine::PosDiag afterNote = eng.posDiag();
+            eng.stop();
+            eng.setDeviceCallback(nullptr);
+            check(afterNote.devEnd >= beforeNote.devEnd + (int64_t)(0.25 * rate) && moves == 0,
+                  L"playback stays put when the default output 'changes' to the device in use",
+                  std::to_wstring(beforeNote.devEnd) + L" -> " + std::to_wstring(afterNote.devEnd));
             eng.shutdown();
         }
     }

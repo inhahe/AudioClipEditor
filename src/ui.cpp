@@ -4394,7 +4394,8 @@ struct App {
         if (projectModified() != lastTitleDirty) { lastTitleDirty = projectModified(); setTitle(); }
         if (toastExpired()) { toastText.clear(); refresh(); }
         const bool playing = engine.isPlaying();
-        setTimerRate(playing);
+        // Without a device playback waits where it is: nothing moves, so no fast ticks.
+        setTimerRate(playing && engine.hasDevice());
         if (playing) {
             syncTimelineSource();
             if (timelinePlaying) { playheadFrame = engine.position(); followPlayheadIfPlaying(); }
@@ -4402,14 +4403,27 @@ struct App {
             refresh();
         }
     }
-    // Where the sound goes now: another device (headphones plugged in or unplugged, a
-    // choice in Settings), or none, in which case playback carries on, unheard, until
-    // one is connected (WM_APP_DEVICE).
-    void onDeviceChanged() {
-        if (engine.hasDevice())
-            toast(L"Audio output: " + engine.deviceName());
+    // Where the sound goes, as last told the user (onDeviceChanged), so each change is
+    // told once: two messages handled after the second change say the same thing.
+    PlaybackEngine::DeviceStatus outputShown;
+    bool outputTold = false;
+    // Tell the user where the sound goes now (WM_APP_DEVICE): another device
+    // (headphones plugged in or unplugged, a choice in Settings), none -- playback then
+    // waits where it is and carries on once one is connected -- or one that won't open.
+    // At startup only a missing or unusable device is worth a word.
+    void onDeviceChanged(bool atStartup = false) {
+        const PlaybackEngine::DeviceStatus s = engine.deviceStatus();
+        const bool same = outputTold && s.open == outputShown.open && s.name == outputShown.name &&
+                          s.none == outputShown.none && s.problem == outputShown.problem;
+        outputTold = true;
+        outputShown = s;
+        if (same || (atStartup && s.open)) return;
+        if (s.open)
+            toast(L"Audio output: " + (s.name.empty() ? std::wstring(L"the default device") : s.name));
+        else if (s.none)
+            toast(L"No audio output device", L"Playback waits until one is connected, then carries on");
         else
-            toast(L"Audio output lost", L"Playback carries on once a device is connected");
+            toast(L"Audio output unavailable", s.problem);
     }
     void onPlayEnd() {
         // source drained
@@ -4816,8 +4830,8 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
     if (!engineOk)
         MessageBoxW(hwnd, (L"Audio output unavailable: " + engErr + L"\nPlayback will be silent.").c_str(),
                     L"Audio warning", MB_ICONWARNING);
-    else if (!app.engine.hasDevice())   // not an error: the engine waits for one
-        app.toast(L"No audio output device", L"Playback will be heard once one is connected");
+    else   // the engine waits for a device it doesn't have yet: say so
+        app.onDeviceChanged(true);
     // After the window is up, so a project that fails to load is reported over it.
     PostMessageW(hwnd, WM_APP_LAUNCH, 0, 0);
 

@@ -140,15 +140,17 @@ struct PlaybackEngine::Impl {
 
     std::thread thread;
     std::atomic<bool> running{ false };
-    // Set once by the audio thread when it has tried to open the device: empty if it
-    // did, else why not. init waits on it.
+    // Set once by the audio thread when it has started: empty if it runs (with a device
+    // or waiting for one), else why it can't. init waits on it.
     std::promise<std::wstring> opened;
 
     std::mutex mtx;
-    // Under the lock, for hasDevice() and deviceName(): whether a stream is open, and
-    // on what.
-    bool deviceOpen = false;
-    std::wstring deviceName;
+    // Under the lock, for deviceStatus(): whether a stream is open and on what, or why
+    // not.
+    PlaybackEngine::DeviceStatus status;
+    // The audio thread's own copy of status.none: renderLoop waits longer for a device
+    // when there is none at all, since Windows' notification says when one appears.
+    bool waitingForAny = false;
     std::shared_ptr<IPlaybackSource> source;
     bool paused = true;
     bool drained = false;
@@ -284,9 +286,13 @@ std::wstring PlaybackEngine::openEnumerator() {
     return std::wstring();
 }
 
-std::wstring PlaybackEngine::openStream() {
+std::wstring PlaybackEngine::openStream(bool& none) {
+    none = false;
     HRESULT hr = d_->enumr->GetDefaultAudioEndpoint(eRender, eConsole, &d_->device);
-    if (FAILED(hr)) return L"No default audio output device.";
+    if (FAILED(hr)) {
+        none = hr == E_NOTFOUND;
+        return L"No default audio output device.";
+    }
 
     hr = d_->device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
         (void**)d_->client.GetAddressOf());
@@ -334,9 +340,19 @@ std::wstring PlaybackEngine::openStream() {
     }
 
     d_->mixbuf.resize((size_t)d_->bufferFrames * 2);
+    std::wstring name;
+    ComPtr<IPropertyStore> props;
+    if (SUCCEEDED(d_->device->OpenPropertyStore(STGM_READ, props.GetAddressOf()))) {
+        PROPVARIANT v;
+        PropVariantInit(&v);
+        if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &v)) && v.vt == VT_LPWSTR && v.pwszVal)
+            name = v.pwszVal;
+        PropVariantClear(&v);
+    }
     {
-        // What the UI thread reads as well -- the rate, the resampler, the clock and the
-        // heard timeline -- under the lock: on a reopen it may be asking right now.
+        // What the UI thread reads as well -- the rate, the resampler, the clock, the
+        // heard timeline and where the sound goes -- under the lock: on a reopen it may
+        // be asking right now.
         std::lock_guard<std::mutex> lk(d_->mtx);
         sampleRate_ = rate;
         d_->rsActive = (srcRate_ > 0 && srcRate_ != rate);
@@ -347,21 +363,41 @@ std::wstring PlaybackEngine::openStream() {
         // This device's clock starts from 0; what plays next carries on from where the
         // source is.
         d_->heard.restartDevice(d_->source ? d_->source->position() : 0);
+        d_->status.open = true;
+        d_->status.name = name;
     }
     if (FAILED(d_->client->Start())) return L"Could not start the audio stream.";
-    std::wstring name;
-    ComPtr<IPropertyStore> props;
-    if (SUCCEEDED(d_->device->OpenPropertyStore(STGM_READ, props.GetAddressOf()))) {
-        PROPVARIANT v;
-        PropVariantInit(&v);
-        if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &v)) && v.vt == VT_LPWSTR && v.pwszVal)
-            name = v.pwszVal;
-        PropVariantClear(&v);
-    }
-    std::lock_guard<std::mutex> lk(d_->mtx);
-    d_->deviceOpen = true;
-    d_->deviceName = name;
     return std::wstring();
+}
+
+// What the last attempt to open a stream came to, for deviceStatus(): opened, no device
+// at all, or a problem with the one there is.
+void PlaybackEngine::noteOpen(const std::wstring& why, bool none) {
+    d_->waitingForAny = !why.empty() && none;
+    std::lock_guard<std::mutex> lk(d_->mtx);
+    d_->status.none = d_->waitingForAny;
+    d_->status.problem = why.empty() || none ? std::wstring() : why;
+}
+
+// The endpoint id of the device a stream is open on; empty when none is.
+std::wstring PlaybackEngine::currentDeviceId() {
+    if (!d_->client || !d_->device) return std::wstring();
+    LPWSTR id = nullptr;
+    std::wstring s;
+    if (SUCCEEDED(d_->device->GetId(&id)) && id) s = id;
+    CoTaskMemFree(id);
+    return s;
+}
+
+// Calls a callback outside the lock that guards it: it posts to the UI thread, which may
+// be setting one right now.
+void PlaybackEngine::fire(std::function<void()> PlaybackEngine::* which) {
+    std::function<void()> cb;
+    {
+        std::lock_guard<std::mutex> lk(cbMtx_);
+        cb = this->*which;
+    }
+    if (cb) cb();
 }
 
 // Undoes openStream, however far it got.
@@ -371,8 +407,8 @@ void PlaybackEngine::closeStream() {
         // the render position) until another is open.
         std::lock_guard<std::mutex> lk(d_->mtx);
         d_->clockFreq = 0;
-        d_->deviceOpen = false;
-        d_->deviceName.clear();
+        d_->status.open = false;
+        d_->status.name.clear();
     }
     if (d_->client) d_->client->Stop();
     d_->clock.Reset();
@@ -389,33 +425,36 @@ void PlaybackEngine::closeEnumerator() {
 }
 
 // Play on whatever the default output is now. If there is none (the last device just
-// went away, or there was none to begin with), the stream stays closed and renderLoop
-// tries again when it next wakes, at most its 200 ms timeout later. The device callback
-// hears of a move, a loss and a return -- not of each retry while there is nothing.
+// went away, or there was none to begin with), or it won't open, the stream stays closed
+// and renderLoop tries again when it next wakes. The device callback hears only of a
+// change of device: another, none, or one again -- not of the same one reopened (a
+// format change, the audio service restarting), nor of each retry while there is none.
 void PlaybackEngine::reopenStream() {
-    const bool had = d_->client != nullptr;
-    if (had) keepHeardPosition();
+    const std::wstring before = currentDeviceId();
+    if (d_->client) keepHeardPosition();
     closeStream();
-    const bool opened = openStream().empty();
-    if (!opened) closeStream();
-    if (opened || had) {
-        std::function<void()> cb;
-        {
-            std::lock_guard<std::mutex> lk(cbMtx_);
-            cb = deviceCb_;
-        }
-        if (cb) cb();
-    }
+    bool none = false;
+    const std::wstring why = openStream(none);
+    if (!why.empty()) closeStream();
+    noteOpen(why, none);
+    if (currentDeviceId() != before) fire(&PlaybackEngine::deviceCb_);
 }
 
 // Before the stream goes: put the source back to what has actually been heard. The
-// audio still queued in the old device's buffer (up to one 30 ms buffer) is then played
-// on the new one instead of being skipped, and the playhead doesn't jump ahead by it.
+// audio still queued in the old device's buffer (up to a buffer's worth; the selftest
+// measures about 50 ms) is then played on the new one instead of being skipped, and the
+// playhead doesn't jump ahead by it. Where the old device has got to is asked fresh if it
+// still answers (a new default, reopenDevice); if it has gone, its last reading is taken
+// as it stands -- it stopped playing when it went, so extrapolating past that reading
+// would overshoot the queued audio and skip it after all.
 void PlaybackEngine::keepHeardPosition() {
+    UINT64 cp = 0, cq = 0;
+    const bool fresh = d_->clock && SUCCEEDED(d_->clock->GetPosition(&cp, &cq));
     std::lock_guard<std::mutex> lk(d_->mtx);
-    if (!d_->source || d_->drained) return;
-    int64_t devPlayed = 0;
-    if (!d_->devicePlayed(sampleRate_, devPlayed)) return;
+    if (!d_->source || d_->drained || d_->clockFreq == 0) return;
+    if (!fresh && d_->clkQpc == 0) return;   // no reading at all
+    const UINT64 played = fresh ? cp : d_->clkPos;
+    const int64_t devPlayed = (int64_t)((double)played / (double)d_->clockFreq * (double)sampleRate_);
     const int64_t heardPos =
         std::max<int64_t>(0, std::min(d_->heard.sourceAt(devPlayed), d_->source->position()));
     d_->source->seek(heardPos);
@@ -441,16 +480,22 @@ void PlaybackEngine::reopenDevice() {
     SetEvent(d_->hEvent);
 }
 
+void PlaybackEngine::noteDefaultChanged() {
+    if (!d_) return;
+    d_->defaultChanged = true;
+    SetEvent(d_->hEvent);
+}
+
+PlaybackEngine::DeviceStatus PlaybackEngine::deviceStatus() const {
+    if (!d_) return DeviceStatus{};
+    std::lock_guard<std::mutex> lk(d_->mtx);
+    return d_->status;
+}
+
 bool PlaybackEngine::hasDevice() const {
     if (!d_) return false;
     std::lock_guard<std::mutex> lk(d_->mtx);
-    return d_->deviceOpen;
-}
-
-std::wstring PlaybackEngine::deviceName() const {
-    if (!d_) return std::wstring();
-    std::lock_guard<std::mutex> lk(d_->mtx);
-    return d_->deviceName;
+    return d_->status.open;
 }
 
 void PlaybackEngine::setEndCallback(std::function<void()> cb) {
@@ -517,9 +562,14 @@ void PlaybackEngine::writeFrames(void* dst, const float* stereo, int frames) {
 void PlaybackEngine::threadMain() {
     const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const std::wstring why = SUCCEEDED(co) ? openEnumerator() : L"COM could not start on the audio thread.";
-    // No output device isn't fatal: renderLoop waits for one (and the notifier says
-    // when it appears).
-    if (why.empty() && !openStream().empty()) closeStream();
+    // No output device, or one that won't open, isn't fatal: renderLoop waits for one
+    // (and the notifier says when a new one appears). deviceStatus() tells which.
+    if (why.empty()) {
+        bool none = false;
+        const std::wstring failed = openStream(none);
+        if (!failed.empty()) closeStream();
+        noteOpen(failed, none);
+    }
     const bool started = why.empty();
     d_->opened.set_value(why);   // init returns now
     if (started) {
@@ -546,8 +596,12 @@ static bool streamLost(HRESULT hr) {
 void PlaybackEngine::renderLoop() {
     while (d_->running) {
         // A timeout isn't skipped: a device that has gone away stops signalling, and
-        // asking the client is how that is found out.
-        WaitForSingleObject(d_->hEvent, 200);
+        // asking the client is how that is found out. Without a stream, the wait is for a
+        // device: with none at all, Windows' notification wakes the loop when one
+        // appears, so it only checks every 5 s; one that is there but won't open
+        // (another program holding it exclusively) is tried every second.
+        const DWORD wait = d_->client ? 200 : (d_->waitingForAny && d_->notifier ? 5000 : 1000);
+        WaitForSingleObject(d_->hEvent, wait);
         if (!d_->running) break;
         const bool asked = d_->reopenAsked.exchange(false);
         const bool changed = d_->defaultChanged.exchange(false);
@@ -595,14 +649,7 @@ void PlaybackEngine::renderLoop() {
         }
         d_->render->ReleaseBuffer(avail, 0);
 
-        if (endReached) {
-            std::function<void()> cb;
-            {
-                std::lock_guard<std::mutex> lk(cbMtx_);
-                cb = endCb_;
-            }
-            if (cb) cb();
-        }
+        if (endReached) fire(&PlaybackEngine::endCb_);
     }
 }
 

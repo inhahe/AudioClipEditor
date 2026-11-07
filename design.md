@@ -310,7 +310,7 @@ came back normal-sized.) The saved size and position always apply.
   `PlaybackEngine::init` therefore creates nothing: it starts the audio thread, which
   joins the MTA, creates the device enumerator (`openEnumerator`) and opens a stream on
   the default device (`openStream`: device, `IAudioClient`, render client, clock),
-  reports how that went through a promise that `init` waits on (which also publishes
+  reports through a promise that `init` waits on whether it runs (which also publishes
   the sample rate and format it found), renders until `shutdown`, then stops the stream
   and releases every object itself (`closeStream`, `closeEnumerator`) before leaving the
   apartment. Objects created on the STA and used from the audio thread would have
@@ -334,8 +334,12 @@ came back normal-sized.) The saved size and position always apply.
     selftest's) sets `reopenAsked`, which always reopens.
   - **Where it carries on from.** Before the old stream goes, the source is put back to
     what had been heard (`keepHeardPosition`: the heard timeline at the device's played
-    position), so the audio still queued for the old device — up to a buffer, 30 ms — is
-    played on the new one instead of skipped, and the playhead doesn't jump ahead by it;
+    position), so the audio still queued for the old device — up to a buffer's worth,
+    about 50 ms measured — is played on the new one instead of skipped, and the playhead
+    doesn't jump ahead by it. The played position is asked of the device fresh while it
+    still answers; one that has gone stopped playing when it went, so its last reading is
+    taken as it stands — extrapolating past it would overshoot the queued audio and skip
+    it after all;
     it holds still while the new one opens (`closeStream` drops the clock, and
     `position()` falls back to the render position, which is now the heard one). The new
     device's clock starts from 0 (`RenderTimeline::restartDevice`), and until its first
@@ -343,26 +347,40 @@ came back normal-sized.) The saved size and position always apply.
     run 100 ms ahead). The rate, resampler ratio and clock frequency — which the UI
     thread reads — are published under the lock, as the new device may run at another
     rate (`sampleRate_` is atomic for that reason).
-  - **No device.** With none to open (the last one just went away, or there was none
-    when the app started) the stream stays closed and the loop tries again on each
-    wake-up, at most 200 ms apart, so a device connected later is used. `init` succeeds
-    without one; it fails only when the engine can't run at all (COM, the enumerator).
-    Playback goes on, unheard, meanwhile.
-  - **Telling the user.** `hasDevice()` and `deviceName()` (the endpoint's friendly name)
-    say where the sound goes, and the device callback is called on a move, a loss and a
-    return — not on each retry while there is nothing. The window turns it into a toast
-    (`WM_APP_DEVICE`, `onDeviceChanged`): "Audio output: Speakers (…)", or "Audio output
-    lost — playback carries on once a device is connected"; with no device at startup, a
-    toast says so instead of the error box.
+  - **No device, or one that won't open.** The stream stays closed and the loop tries
+    again when it wakes, so a device connected later is used. With none at all
+    (`E_NOTFOUND`) Windows' notification wakes it when one appears, so it only checks
+    every 5 s besides; one that is there but won't open (another program holding it
+    exclusively, say) is tried every second. `init` succeeds either way; it fails only
+    when the engine can't run at all (COM, the enumerator). Meanwhile nothing renders,
+    so playback waits where it is — `isPlaying()` stays true, the playhead still — and
+    carries on from there once a device opens; the window drops to its slow timer
+    instead of repainting 66 times a second at a playhead that doesn't move.
+  - **Telling the user.** `deviceStatus()` says where the sound goes, in one snapshot:
+    open and on what (the endpoint's friendly name), or no device at all, or what went
+    wrong with the one there is (each open's outcome is kept: `noteOpen`); `hasDevice()`
+    is the cheap part the window asks every tick. The device callback is called when the
+    device changes — another one, none, or one again, by comparing endpoint ids before
+    and after — not when the same one is reopened (a format change, the audio service
+    restarting) nor on each retry. The window turns it into a toast (`WM_APP_DEVICE`,
+    `onDeviceChanged`): "Audio output: Speakers (…)", "No audio output device —
+    playback waits until one is connected", or "Audio output unavailable" with the
+    reason; it remembers what it last said, so two messages handled after the second
+    change don't say the same thing twice. At startup only a missing or unusable device
+    is worth a word, as a toast; the error box is kept for an engine that can't run.
   - **Checked** in the selftest on the real device, mid-tone, with `reopenDevice`: a new
     stream (its device frames counted from 0); the playhead just after the move no
-    further on than the time since allows (measured: 29 ms behind it, with 49 ms queued
+    further on than the time since allows (measured: 26 ms behind it, with 46 ms queued
     for the old device — without `keepHeardPosition` it stood 20 ms ahead, and the check
     fails); real time once it moves again (measured from that moment, so a device slow
-    to open doesn't fail it), the tone at the mixer, and the callback called once. The
-    engine names the device it plays to. An unplugged device, a change of default and a
-    device appearing after startup can't be produced here without changing the user's
-    settings or hardware.
+    to open doesn't fail it); the tone at the mixer; and no change told, the device
+    being the same (always telling fails it). `noteDefaultChanged` — what the
+    notification does — with the default still the device in use moves nothing: the
+    stream's frames keep counting (moving on every notice fails it). The engine names
+    the device it plays to, and a device that is there but won't open fails the
+    selftest with the reason rather than skipping it. An unplugged device, a real change
+    of default and a device appearing after startup can't be produced here without
+    changing the user's settings or hardware.
 - **No device is not a crash**: after a failed `init` (or before one, or after
   `shutdown`) every engine call is a quiet no-op, since the app goes on, silently, and
   its timer asks `isPlaying()` from the start.

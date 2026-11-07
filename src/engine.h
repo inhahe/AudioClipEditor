@@ -146,15 +146,27 @@ public:
     // audio thread does the work.
     void reopenDevice();
 
-    // Whether there is an output device to play to now, and its name ("Speakers
-    // (Realtek Audio)"); empty when there is none.
+    // Where the sound goes now, as one consistent snapshot.
+    struct DeviceStatus {
+        bool open = false;       // playing to a device...
+        std::wstring name;       // ...this one ("Speakers (Realtek Audio)"; empty if Windows gives no name)
+        bool none = false;       // not open because there is no output device at all
+        std::wstring problem;    // not open for another reason: what went wrong (another
+                                 // program holding it exclusively, say); retried every second
+    };
+    DeviceStatus deviceStatus() const;
+    // deviceStatus().open, without copying strings: the window asks on every tick.
     bool hasDevice() const;
-    std::wstring deviceName() const;
+
+    // What Windows' notification of a new default output does: the engine moves there,
+    // if it is another device than the one in use. Returns at once.
+    void noteDefaultChanged();
 
     // Called (from the audio thread) when the active source drains fully.
     void setEndCallback(std::function<void()> cb);
-    // Called (from the audio thread) when the engine has moved to another output device
-    // or lost the last one: ask hasDevice() and deviceName() which.
+    // Called (from the audio thread) when the device the sound goes to changes: another
+    // one, none (the last went away), or one again -- not when the same device is
+    // reopened. Ask deviceStatus() where it goes now.
     void setDeviceCallback(std::function<void()> cb);
 
     void play(std::shared_ptr<IPlaybackSource> src, int64_t startFrame = 0);
@@ -194,8 +206,11 @@ private:
     // the default device each time it is (re)opened. Each open returns an empty string
     // if it worked, else why not.
     std::wstring openEnumerator();
-    std::wstring openStream();
+    std::wstring openStream(bool& none);   // `none`: it failed because there is no device at all
     void closeStream();
+    void noteOpen(const std::wstring& why, bool none);
+    std::wstring currentDeviceId();
+    void fire(std::function<void()> PlaybackEngine::* which);
     void closeEnumerator();
     void reopenStream();
     void keepHeardPosition();

@@ -32,8 +32,8 @@ of clips, audition them, trim/crop, and arrange them on tracks.
 - **Playback follows your output device.** Unplug the headphones and it carries on
   through the speakers; plug them in, or pick another output in Windows' settings, and
   it moves there — from what you last heard, without stopping. A note says where the
-  sound now goes. With no output device at all the app still runs, and playback is heard
-  as soon as one is connected.
+  sound now goes. With no output device at all the app still runs: playback waits where
+  it is until one is connected, then carries on from there.
 - **Select a section** of any clip by dragging across its waveform. While a
   selection is active the card shows **Crop** and **New clip** buttons, and the
   card's play button auditions **only the selected part** (so you can preview
