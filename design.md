@@ -123,6 +123,14 @@ any file that won't decode — several can arrive at once.
     the window up for the network's timeout before anything was asked. A file changed
     on disk by something else since then reads as a different file, so the request
     asks about unsaved changes and reloads it, which is what that change calls for.
+  - **Reached by another name, it takes that name** (`setProjectPath`). A project
+    renamed or moved on its volume since it was opened keeps its id, time and size,
+    so it is rightly "already open" — but the app would then have gone on saving to
+    the name it no longer has, making that file again beside the moved one, two
+    copies drifting apart (seen live: rename, double-click, save, and both names
+    existed). The new name is the one the user just used, and for a hard link, an 8.3
+    name or a UNC path it is the same file anyway. `fullPath` spells out 8.3 short
+    names (`GetLongPathNameW`), so the title never shows `SHOW~1.ACE`.
 - **Only the main message loop opens them, and only when nothing holds them up**
   (`openLaunchRequests`, called by `runApp`'s loop after every message;
   `readyForLaunch`). A hand-off can arrive while a dialog, a message box or a context
@@ -2113,7 +2121,9 @@ the button to come up, and only then asks whether to save the changed selection
 while the window asks *Save changes?* on close, it opens in a
 fresh copy once the window is gone; with two handed over that way, the one copy left
 has the second open; with the exe renamed while the app ran, the closing copy says it
-couldn't start a new window for them. With the running copy frozen (its process
+couldn't start a new window for them. With the open project renamed on disk and the new
+name double-clicked, the window says it is already open and takes the new name, and a
+save writes only that file. With the running copy frozen (its process
 suspended) for 9 s, a copy given another project waited without a window, and once
 the first was thawed it opened the project there and exited — before, it opened the
 project itself; with the frozen copy killed instead, the waiting one opened it.

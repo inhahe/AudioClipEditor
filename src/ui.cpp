@@ -33,20 +33,28 @@
 #define WM_APP_LAUNCH (WM_APP + 2)
 
 // A path given on a command line, made absolute against this process's working
-// directory: the project path is kept (title, Save, where exports default to), and
-// a copy handing files over runs in a different directory from the one receiving.
+// directory -- the project path is kept (title, Save, where exports default to), and
+// a copy handing files over runs in a different directory from the one receiving --
+// and with any 8.3 short names in it spelt out, so the title shows the real name.
 static std::wstring fullPath(const std::wstring& p) {
     const DWORD need = GetFullPathNameW(p.c_str(), 0, nullptr, nullptr);
     if (need == 0) return p;
     std::wstring out(need, L'\0');
     const DWORD n = GetFullPathNameW(p.c_str(), need, &out[0], nullptr);
     out.resize(n < need ? n : 0);
-    return out.empty() ? p : out;
+    if (out.empty()) return p;
+    const DWORD longNeed = GetLongPathNameW(out.c_str(), nullptr, 0);   // 0 if it doesn't exist
+    if (longNeed == 0) return out;
+    std::wstring longer(longNeed, L'\0');
+    const DWORD m = GetLongPathNameW(out.c_str(), &longer[0], longNeed);
+    if (m == 0 || m >= longNeed) return out;
+    longer.resize(m);
+    return longer;
 }
 
-// The files a command line names (launch::isFileArg), each made absolute. A request is
-// kept in this form from the moment it arrives: it may be opened only after a file
-// dialog has moved the working directory, or by another copy of the app.
+// The files a command line names (launch::isFileArg), each made absolute (fullPath). A
+// request is kept in this form from the moment it arrives: it may be opened only after
+// a file dialog has moved the working directory, or by another copy of the app.
 static std::vector<std::wstring> launchFiles(const std::vector<std::wstring>& args) {
     std::vector<std::wstring> files;
     for (const std::wstring& a : args)
@@ -2656,7 +2664,16 @@ struct App {
             if (!projectPath.empty() &&
                 launch::sameFile(first, launch::fileIdentity(first), projectPath, projectIdentity)) {
                 // Double-clicking the project that is already open: this window coming
-                // forward is the answer, not a reload over the work in it.
+                // forward is the answer, not a reload over the work in it. Reached by
+                // another name -- renamed or moved since it was opened, a hard link, the
+                // UNC path of a mapped drive -- it is saved under that name from now on:
+                // the old one may no longer exist, and Save would make it again beside
+                // the file the user moved, two copies drifting apart.
+                if (CompareStringOrdinal(first.c_str(), (int)first.size(), projectPath.c_str(),
+                                         (int)projectPath.size(), TRUE) != CSTR_EQUAL) {
+                    setProjectPath(first);
+                    setTitle();
+                }
                 toast(L"'" + std::wstring(PathFindFileNameW(first.c_str())) + L"' is already open");
             } else {
                 if (!confirmDiscardChanges()) return;   // kept what they have: nothing else either
