@@ -1,4 +1,5 @@
 #include "app.h"
+#include "assoc.h"
 #include "document.h"
 #include "engine.h"
 #include "decoder.h"
@@ -6,6 +7,7 @@
 #include "waveform.h"
 #include "dialogs.h"
 #include "dsp.h"
+#include "launch.h"
 #include "layout.h"
 #include "match.h"
 #include "transport.h"
@@ -21,6 +23,8 @@
 #include <climits>
 
 #define WM_APP_PLAYEND (WM_APP + 1)
+// Posted once the window is up: open what the command line asked for.
+#define WM_APP_LAUNCH (WM_APP + 2)
 
 // ----------------------------------------------------------------- theme colors
 namespace col {
@@ -78,7 +82,7 @@ enum {
     IDC_ADDFILES = 1000, IDC_NEWPROJ, IDC_OPENPROJ, IDC_SAVEPROJ, IDC_SAVEPROJAS,
     IDC_EXPORTMIX, IDC_EXIT,
     IDC_UNDO, IDC_REDO, IDC_HISTORY, IDC_ADDTRACK, IDC_CONTROLS, IDC_RIPPLEMODE,
-    IDC_SAVEHISTORY
+    IDC_SAVEHISTORY, IDC_ASSOC
 };
 
 struct CardLayout { int clipId; RECT card, top, play, del, wave, vol, crop, savesel; };
@@ -195,6 +199,10 @@ struct App {
     // Whether the timbre dialog also matches volume, in the same step. Session-scoped,
     // like the rest of the dialog's settings.
     bool tmAlsoVolume = false;
+    // The command-line arguments after the program name (see launch.h), opened once
+    // the window exists.
+    std::vector<std::wstring> launchArgs;
+
     // The clip last set as the standard to match to, by either matcher; -1 = the
     // average. Shared, because choosing a standard is a statement about the take
     // ("this one sounds right"), so matching tone and then volume to it shouldn't
@@ -1583,8 +1591,9 @@ struct App {
     }
 
     // --------------------------------------------------------- actions
-    void addFiles() {
-        auto paths = dlg::openAudioFiles(hwnd);
+    void addFiles() { addAudioPaths(dlg::openAudioFiles(hwnd)); }
+    // Decode each file and add it to the library as a clip, as Add Files does.
+    void addAudioPaths(const std::vector<std::wstring>& paths) {
         int lastId = -1;
         for (auto& p : paths) {
             std::wstring err;
@@ -2541,7 +2550,16 @@ struct App {
         if (!confirmDiscardChanges()) return;
         std::wstring path = dlg::openProject(hwnd);
         if (path.empty()) return;
-        if (!doc.loadProject(path)) { MessageBoxW(hwnd, L"Could not open project.", L"Open", MB_ICONWARNING); return; }
+        openProjectPath(path);
+    }
+    // Load `path` as the project. The caller has already dealt with unsaved changes.
+    bool openProjectPath(const std::wstring& path) {
+        if (!doc.loadProject(path)) {
+            const bool exists = GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+            MessageBoxW(hwnd, ((exists ? L"Could not open project:\n" : L"There is no project at:\n")
+                               + path).c_str(), L"Open", MB_ICONWARNING);
+            return false;
+        }
         stopAll();
         // Follow the loaded project's internal rate so playback resamples correctly.
         rate = doc.project().sampleRate > 0 ? doc.project().sampleRate : rate;
@@ -2552,6 +2570,56 @@ struct App {
         libScroll = tlScrollX = tlScrollY = 0;
         restoreViewState();   // selection + playhead saved with the project
         setTitle(); clampScroll(); refresh();
+        return true;
+    }
+
+    // What the app was started with: a project to open (double-clicking a .acep file,
+    // "Open with", dropping it on the exe) and audio files to add as clips -- to the
+    // project just opened, if there was one. Paths are made absolute first, since the
+    // project path is kept (title, Save, where exports default to) and a relative one
+    // would mean something else once anything changed the working directory.
+    void openLaunchRequest() {
+        const launch::Request req = launch::parse(launchArgs);
+        auto full = [](const std::wstring& p) {
+            wchar_t buf[MAX_PATH * 4];
+            const DWORD n = GetFullPathNameW(p.c_str(), (DWORD)std::size(buf), buf, nullptr);
+            return n > 0 && n < std::size(buf) ? std::wstring(buf) : p;
+        };
+        if (!req.project.empty()) openProjectPath(full(req.project));
+        if (!req.audio.empty()) {
+            std::vector<std::wstring> paths;
+            for (const std::wstring& a : req.audio) paths.push_back(full(a));
+            addAudioPaths(paths);
+        }
+        if (req.extraProjects > 0)
+            toast(L"Only one project can be open at a time \u2014 opened the first of "
+                  + std::to_wstring(req.extraProjects + 1));
+    }
+
+    // This copy of the app, for the file association.
+    static std::wstring exePath() {
+        std::wstring p(32768, L'\0');
+        const DWORD n = GetModuleFileNameW(nullptr, &p[0], (DWORD)p.size());
+        p.resize(n < p.size() ? n : 0);
+        return p;
+    }
+    // File menu: make double-clicking a .acep project open it with this copy of the
+    // app, or stop doing so. Per user (HKEY_CURRENT_USER), no admin rights, and only
+    // on request -- it changes how Windows behaves outside the app.
+    void toggleProjectAssociation() {
+        const std::wstring exe = exePath();
+        const bool on = assoc::projectsOpenWith(assoc::kClassesRoot, exe);
+        const bool ok = on ? assoc::unregisterProjects(assoc::kClassesRoot)
+                           : assoc::registerProjects(assoc::kClassesRoot, exe);
+        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+        const bool now = assoc::projectsOpenWith(assoc::kClassesRoot, exe);
+        CheckMenuItem(GetMenu(hwnd), IDC_ASSOC, MF_BYCOMMAND | (now ? MF_CHECKED : MF_UNCHECKED));
+        if (!ok)
+            MessageBoxW(hwnd, L"Windows didn't accept the change to how .acep files open.",
+                        L"Open projects with this app", MB_ICONWARNING);
+        else
+            toast(now ? L"Double-clicking a .acep project now opens it here"
+                      : L"Double-clicking a .acep project no longer opens it here");
     }
     // The waveform selection and playhead ride along in the .acep file; they are
     // UI state, so they live in App and are pushed into Document whenever the
@@ -3989,6 +4057,10 @@ struct App {
         AppendMenuW(file, MF_STRING, IDC_OPENPROJ, L"Open Project\u2026");
         AppendMenuW(file, MF_STRING, IDC_SAVEPROJ, L"Save Project\tCtrl+S");
         AppendMenuW(file, MF_STRING, IDC_SAVEPROJAS, L"Save Project As\u2026");
+        // Ticked while double-clicking a .acep file opens it with this copy of the app.
+        AppendMenuW(file, MF_STRING |
+                    (assoc::projectsOpenWith(assoc::kClassesRoot, exePath()) ? MF_CHECKED : 0),
+                    IDC_ASSOC, L"Open .acep projects with this app when double-clicked");
         AppendMenuW(file, MF_STRING | (saveHistory ? MF_CHECKED : 0), IDC_SAVEHISTORY,
                     L"Store the edit history in project files");
         AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
@@ -4055,6 +4127,7 @@ struct App {
         case IDC_CONTROLS: showControls(); break;
         case IDC_RIPPLEMODE: toggleRippleMode(); break;
         case IDC_SAVEHISTORY: toggleSaveHistory(); break;
+        case IDC_ASSOC: toggleProjectAssociation(); break;
         }
     }
 
@@ -4277,6 +4350,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         a->onKey(wp); return 0;
     case WM_COMMAND: if (HIWORD(wp) == 0 && lp == 0) { a->onCommand(LOWORD(wp)); return 0; } break;
     case WM_TIMER: a->onTimer(); return 0;
+    case WM_APP_LAUNCH: if (a) a->openLaunchRequest(); return 0;
     case WM_APP_PLAYEND: a->onPlayEnd(); return 0;
     case WM_CLOSE:
         if (a && !a->confirmDiscardChanges()) return 0;  // user cancelled exit
@@ -4313,13 +4387,14 @@ static void saveWindowPlacement(HWND hwnd) {
     RegCloseKey(k);
 }
 
-int runApp(HINSTANCE hInst, int nCmdShow) {
+int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args) {
     // Tooltips are a "bar" class; the matching dialogs' track list a list view.
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_LISTVIEW_CLASSES };
     InitCommonControlsEx(&icc);
     if (!mfio::startup()) { MessageBoxW(nullptr, L"Media Foundation failed to start.", L"Error", MB_ICONERROR); return 1; }
 
     App app;
+    app.launchArgs = args;
     std::wstring engErr;
     if (!app.engine.init(&engErr))
         MessageBoxW(nullptr, (L"Audio output unavailable: " + engErr + L"\nPlayback will be silent.").c_str(),
@@ -4353,9 +4428,20 @@ int runApp(HINSTANCE hInst, int nCmdShow) {
 
     // Restore the last window size/position/maximized state if we have one.
     WINDOWPLACEMENT wp{};
-    if (loadWindowPlacement(wp)) SetWindowPlacement(hwnd, &wp);
-    else ShowWindow(hwnd, nCmdShow);
+    if (loadWindowPlacement(wp)) {
+        // The saved size and place, but shown the way the launcher asked when it
+        // asked for something particular: a shortcut set to "Run: Minimized", or a
+        // launch that mustn't take the focus.
+        if (nCmdShow == SW_SHOWMINIMIZED || nCmdShow == SW_MINIMIZE ||
+            nCmdShow == SW_SHOWMINNOACTIVE || nCmdShow == SW_SHOWNOACTIVATE)
+            wp.showCmd = (UINT)nCmdShow;
+        SetWindowPlacement(hwnd, &wp);
+    } else {
+        ShowWindow(hwnd, nCmdShow);
+    }
     UpdateWindow(hwnd);
+    // After the window is up, so a project that fails to load is reported over it.
+    PostMessageW(hwnd, WM_APP_LAUNCH, 0, 0);
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

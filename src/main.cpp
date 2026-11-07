@@ -1,5 +1,8 @@
 #include "app.h"
 #include "dialogs.h"
+#include <shellapi.h>
+#include <string>
+#include <vector>
 #include <cwchar>
 #include <cstdlib>
 
@@ -83,10 +86,20 @@ static int runDialogTest(HINSTANCE hInst, int which, bool withSelection) {
     return 0;
 }
 
-int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR cmdLine, int nCmdShow) {
-    if (cmdLine && wcsstr(cmdLine, L"--selftest"))
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
+    // Split properly (quotes and all), so a file whose path merely contains
+    // "--selftest" is a file to open, not a switch.
+    std::vector<std::wstring> args;
+    int argc = 0;
+    if (LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
+        for (int i = 1; i < argc; ++i) args.push_back(argv[i]);
+        LocalFree(argv);
+    }
+    if (!args.empty() && args[0] == L"--selftest")
         return runSelfTest();
-    if (const wchar_t* d = cmdLine ? wcsstr(cmdLine, L"--dialogtest") : nullptr)
-        return runDialogTest(hInst, _wtoi(d + 12), wcsstr(d, L"sel") != nullptr);
-    return runApp(hInst, nCmdShow);
+    if (!args.empty() && args[0] == L"--dialogtest") {
+        const std::wstring which = args.size() > 1 ? args[1] : std::wstring();
+        return runDialogTest(hInst, _wtoi(which.c_str()), which.find(L"sel") != std::wstring::npos);
+    }
+    return runApp(hInst, nCmdShow, args);
 }

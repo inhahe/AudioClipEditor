@@ -320,6 +320,14 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   clip's right-click *Voice cleaner → Apply noise capture ▸* lists the recent
   captures; pick one to clean that clip with it in a single click (most-recently
   used floats to the top). Captures live for the session.
+- **Open a project by double-clicking it.** Tick **File ▸ Open .acep projects with
+  this app when double-clicked** once, and from then on double-clicking a `.acep`
+  file in Explorer opens it here (untick it to stop). It's set up for your Windows
+  account only, needs no administrator rights, and points at *this* copy of the
+  app — if you move the app, tick it again from the new copy. You can also open a
+  project, or add audio files as clips, from the command line or by dropping them
+  onto `AudioClipEditor.exe`: `AudioClipEditor.exe "My show.acep" "pickup 3.wav"`
+  opens the project and adds the WAV to it.
 - **Save / load projects.** Projects are saved as a single `.acep` file with the
   whole library and timeline (audio embedded), so a project is fully
   self-contained — and, unless you turn it off, the **edit history** as well.
@@ -444,6 +452,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | New project | `Ctrl+N` (File ▸ New Project) |
 | Add files / Save project | `Ctrl+O` / `Ctrl+S` |
 | Open / Save / Export | **File** menu |
+| Double-click a `.acep` to open it | **File ▸ Open .acep projects with this app when double-clicked** (once) |
+| Open a project or add files from the command line | `AudioClipEditor.exe project.acep [audio files…]` |
 | Scroll library | mouse wheel over the clip area |
 | Scroll the timeline sideways | drag the **horizontal scrollbar** along the bottom, roll the wheel over the lanes, or `←` / `→` (`Ctrl`+`←`/`→` or `PgUp`/`PgDn` to page) |
 | Jump to the start / end of the arrangement | `Home` / `End` |
@@ -467,6 +477,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `match.{h,cpp}` | Making clips alike, shared by *Match timbre* and *Match volume*: which clips a command covers, what they're matched to, and the before/after measurements |
 | `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, remove-non-voice options, match-timbre and match-volume options, history list, open/save file & project dialogs |
 | `ui.cpp` | Main window: menu bar, layout, painting, hit-testing, all interaction |
+| `launch.h` | What a command line asks to open: the project, and audio files to add |
+| `assoc.{h,cpp}` | The per-user `.acep` file association (File ▸ Open .acep projects with this app…) |
 | `selftest.cpp` | `--selftest` backend round-trip checks (decode/encode/peaks/DSP) |
 
 All audio is decoded to the project's internal rate (**max(48 kHz, device mix

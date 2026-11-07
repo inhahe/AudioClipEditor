@@ -7,6 +7,8 @@
 #include "dsp.h"
 #include "document.h"
 #include "engine.h"
+#include "assoc.h"
+#include "launch.h"
 #include "layout.h"
 #include "match.h"
 #include "transport.h"
@@ -3388,6 +3390,66 @@ int runSelfTest() {
         check(steps == hp.steps && undone == hp.undone && undone == 1,
               L"history position: the cheap counts agree with the full position",
               std::to_wstring(steps) + L" / " + std::to_wstring(undone));
+    }
+
+    // ---- what the app opens when started with files (launch.h)
+    {
+        const launch::Request r = launch::parse({ L"take 1.wav", L"--selftest", L"Show.ACEP",
+                                                  L"b.mp3", L"other.acep", L"" });
+        check(r.project == L"Show.ACEP" && r.audio.size() == 2 && r.audio[0] == L"take 1.wav" &&
+              r.audio[1] == L"b.mp3" && r.extraProjects == 1,
+              L"launch: the first .acep (any case) is the project, other files are clips, switches skipped");
+        check(!launch::isProjectPath(L".acep.wav") && launch::isProjectPath(L"x.acep") &&
+              !launch::isProjectPath(L"acep") && launch::parse({}).project.empty(),
+              L"launch: a project is told by its extension alone");
+    }
+
+    // ---- double-click opens projects here (assoc.h), against a scratch registry
+    // root so the test never touches the user's real file associations
+    {
+        const std::wstring top = L"Software\\AudioClipEditorSelftest";
+        const std::wstring root = top + L"\\Classes";
+        RegDeleteTreeW(HKEY_CURRENT_USER, top.c_str());
+        const std::wstring exe = L"C:\\Apps\\Audio Clip Editor\\AudioClipEditor.exe";
+        check(!assoc::projectsOpenWith(root, exe), L"assoc: nothing registered to begin with");
+        check(assoc::registerProjects(root, exe) && assoc::projectsOpenWith(root, exe) &&
+                  !assoc::projectsOpenWith(root, L"D:\\elsewhere\\AudioClipEditor.exe"),
+              L"assoc: registering makes .acep open with this copy, and only this copy");
+        check(assoc::openCommand(exe) == L"\"" + exe + L"\" \"%1\"",
+              L"assoc: the open command quotes the program and the file", assoc::openCommand(exe));
+        check(assoc::unregisterProjects(root) && !assoc::projectsOpenWith(root, exe),
+              L"assoc: unregistering stops it");
+        HKEY k = nullptr;
+        const bool extGone = RegOpenKeyExW(HKEY_CURRENT_USER, (root + L"\\.acep").c_str(), 0,
+                                           KEY_READ, &k) == ERROR_FILE_NOT_FOUND;
+        if (k) RegCloseKey(k);
+        check(extGone, L"assoc: ...and leaves no empty keys behind");
+
+        // Another app claims .acep after we registered: unregistering must not undo
+        // its claim.
+        assoc::registerProjects(root, exe);
+        HKEY e = nullptr;
+        RegCreateKeyExW(HKEY_CURRENT_USER, (root + L"\\.acep").c_str(), 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &e, nullptr);
+        const std::wstring theirs = L"SomeOtherApp.Document";
+        if (e) {
+            RegSetValueExW(e, nullptr, 0, REG_SZ, (const BYTE*)theirs.c_str(),
+                           (DWORD)((theirs.size() + 1) * sizeof(wchar_t)));
+            RegCloseKey(e);
+        }
+        assoc::unregisterProjects(root);
+        wchar_t buf[256]{}; DWORD size = sizeof(buf);
+        const bool kept = RegGetValueW(HKEY_CURRENT_USER, (root + L"\\.acep").c_str(), nullptr,
+                                       RRF_RT_REG_SZ, nullptr, buf, &size) == ERROR_SUCCESS &&
+                          theirs == buf;
+        HKEY pk = nullptr;
+        const bool progGone = RegOpenKeyExW(HKEY_CURRENT_USER,
+                                            (root + L"\\" + assoc::kProgId).c_str(), 0,
+                                            KEY_READ, &pk) == ERROR_FILE_NOT_FOUND;
+        if (pk) RegCloseKey(pk);
+        check(kept && progGone,
+              L"assoc: unregistering leaves another app's claim on .acep alone, and removes ours");
+        RegDeleteTreeW(HKEY_CURRENT_USER, top.c_str());
     }
 
     out(L"");

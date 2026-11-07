@@ -26,8 +26,45 @@ sync with behavior changes.
 | `selhistory.h` | Pure undo/redo state machine for the waveform selection, kept out of the document's snapshot tree; a `base` token ties the stack to a point in the document history |
 | `snap.h` | Pure directional-snapping state machine for dragging clips along a lane: pulls only when moving *away* from a target, so snapping stays convenient without making near-miss positions unreachable |
 | `ui.cpp` | The whole main window: `App` struct, layout, painting, hit-testing, menus, drag/drop, full-window clip editor |
-| `main.cpp` | `wWinMain` → `--selftest` or `runApp()` |
+| `main.cpp` | `wWinMain`: splits the command line (`CommandLineToArgvW`) → `--selftest`, `--dialogtest N`, or `runApp(args)` |
+| `launch.h` | Pure: what a command line asks to open — the first `.acep` is the project, other files are clips to add, `--` switches are skipped |
+| `assoc.{h,cpp}` | The per-user `.acep` file association under `HKEY_CURRENT_USER\Software\Classes`: register / unregister / "is it this copy?" |
 | `selftest.cpp` | Headless `--selftest`: decode/encode round-trips, DSP checks, writes `bin/selftest.log` |
+
+## Starting with files
+
+`AudioClipEditor.exe "show.acep" "pickup.wav"` — what Explorer runs on a double-click,
+"Open with" or a drop onto the exe — opens the project and adds the audio files to it
+as clips (`App::openLaunchRequest`, via `launch::parse`). It runs from a message
+posted after the window is shown, so a project that fails to load is reported over the
+app rather than before it exists, and paths are made absolute first: the project path
+is kept (title, Save, where exports default to) and a relative one would change
+meaning with the working directory. Only one project can be open: further `.acep`
+arguments are counted and the toast says the first was opened. Opening shares
+`openProjectPath` with *File ▸ Open Project*, and adding shares `addAudioPaths` with
+*Add Files*.
+
+`main.cpp` splits the command line with `CommandLineToArgvW` and matches switches
+exactly. It used to look for "--selftest" *anywhere* in the raw command line, so a
+project whose path merely contained that text would have run the test suite instead.
+
+**The association is opt-in** — *File ▸ Open .acep projects with this app when
+double-clicked*, ticked while `.acep` opens with this copy — because it changes how
+Windows behaves outside the app. `assoc::registerProjects` writes a ProgID
+(`AudioClipEditor.Project`: description, icon, `shell\open\command` = `"exe" "%1"`),
+points `.acep` at it, and lists it under `.acep\OpenWithProgids`, all under
+`HKEY_CURRENT_USER`: no administrator rights, no other user affected.
+`unregisterProjects` removes the ProgID, but `.acep`'s default only if it still names
+the ProgID — another app that has claimed `.acep` since keeps its claim — and removes
+keys only once they are empty. The tick compares the registered command with *this*
+exe, so a copy moved elsewhere shows unticked and can re-register. The selftest
+drives the same functions against a scratch root (`assoc::kClassesRoot` is a
+parameter), so it never touches the user's real associations, and deletes it after.
+
+**Shown the way the launcher asked.** The saved window placement used to override
+`nCmdShow` entirely, so a shortcut set to *Run: Minimized* opened normally; a
+minimise or don't-activate request now wins over the saved show state (the saved size
+and position still apply).
 
 ## Core invariants
 
@@ -1889,6 +1926,17 @@ no correction — the assertion is under 3 dB anywhere, and that the largest
 correction lands between 60 Hz and 14 kHz. It measured **1.4 dB at 70 Hz**;
 before the weights, over 20 dB at 30 Hz. DC and Nyquist are separately asserted
 to come out at exactly 0 dB.
+
+**Starting with files** (8 checks): `launch::parse` takes the first `.acep` (in any
+case) as the project and other files as clips, skips switches and counts further
+projects; a project is told by its extension alone. `assoc`, against a scratch
+registry root: nothing registered to begin with; registering makes `.acep` open with
+this copy and not another; the open command quotes program and file; unregistering
+stops it and leaves no empty keys; and with another app's claim on `.acep` made after
+ours, unregistering removes our ProgID but leaves its claim. The main window opened
+from a command line was checked by rendering it (`PrintWindow`, launched without
+activation): the project's EQ tags, and after an undo the two-line message and the
+History badge.
 
 **History position** (5 checks): the cheap counts the toolbar repaints with
 (`historyCounts`, pointer hops only) agree with the full position; a new project has no steps; at the latest step undo
