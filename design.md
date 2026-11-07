@@ -225,8 +225,9 @@ hold 16–256 px, each rendered from the vector artwork (`art/make_icon.py`): 32
 bitmaps below 256, PNG at 256. The project icon's microphone takes a larger share of
 the page below 32 px, where the page's edges take up more of it.
 
-**Recent projects** (`SHAddToRecentDocs`, from `App::setProjectPath`, so on every
-open and save). That one call feeds Explorer's recent files and the *Recent* category of
+**Recent projects** (`SHAddToRecentDocs`, from `App::setProjectPath` whenever the
+project's path changes: opened, saved under a new name — not on every save, since each
+call writes a shortcut on the UI thread). That one call feeds Explorer's recent files and the *Recent* category of
 the taskbar button's jump list; the jump list shows only file types the app is a
 registered handler for, which is what the association below makes it (its ProgID in
 `.acep\OpenWithProgids`, its command naming this exe), so with the item unticked the
