@@ -27,7 +27,8 @@ sync with behavior changes.
 | `snap.h` | Pure directional-snapping state machine for dragging clips along a lane: pulls only when moving *away* from a target, so snapping stays convenient without making near-miss positions unreachable |
 | `ui.cpp` | The whole main window: `App` struct, layout, painting, hit-testing, menus, drag/drop, full-window clip editor |
 | `main.cpp` | `wWinMain`: splits the command line (`CommandLineToArgvW`) → `--selftest`, `--dialogtest N`, or `runApp(args)` |
-| `launch.h` | Pure: what a command line asks to open — the first `.acep` is the project, other files are clips to add, `--` switches are skipped |
+| `launch.h` | What a command line asks to open — `.acep` files are projects, tried in order, other files are clips to add, `--` switches are skipped — and the helpers around it: whether two paths are the same file (`sameFile`), and a list of files written back out as a command line (`commandLine`) |
+| `placement.h` | Pure: how the main window first appears — the placement saved when it last closed, shown the way the launcher's `nCmdShow` asks (`startupPlacement`) |
 | `assoc.{h,cpp}` | The per-user `.acep` file association under `HKEY_CURRENT_USER\Software\Classes`: register / unregister / "is it this copy?" |
 | `selftest.cpp` | Headless `--selftest`: decode/encode round-trips, DSP checks, writes `bin/selftest.log` |
 
@@ -145,13 +146,20 @@ unticked and can register itself. The selftest drives the registration against a
 scratch root (`assoc::kClassesRoot` is a parameter) and deletes it after; the
 `UserChoice` path can't be tested without changing the user's own settings.
 
-**Shown the way the launcher asked.** The saved window placement used to override
-`nCmdShow` entirely, so a shortcut set to *Run: Minimized* opened normally. Now a
-minimise request wins over the saved show state but restores to it — maximized
-included (`WPF_RESTORETOMAXIMIZED`) — and a don't-activate request (`SW_SHOWNOACTIVATE`,
-`SW_SHOWNA`) shows a saved normal window without taking the focus. A saved maximized
-window stays maximized, since Windows can't show one maximized without activating it.
-The saved size and position always apply.
+**Shown the way the launcher asked** (`startupPlacement`, in `placement.h` so the
+selftest reaches it). The window opens with the placement saved when it last closed —
+size, position and show state — unless the launcher asks for something in particular.
+*Run: Minimized* (`SW_SHOWMINIMIZED`, `SW_MINIMIZE`, `SW_SHOWMINNOACTIVE`) minimizes,
+restoring to the saved state, maximized included (`WPF_RESTORETOMAXIMIZED`). *Run:
+Maximized* (`SW_SHOWMAXIMIZED`) maximizes. A don't-activate request
+(`SW_SHOWNOACTIVATE`, `SW_SHOWNA`) shows a saved normal window without taking the
+focus, and leaves a saved maximized one maximized, since Windows can't show a window
+maximized without activating it. Anything else (`SW_SHOWNORMAL`, `SW_SHOWDEFAULT`)
+means "as saved". A window closed while minimized was saved that way, with
+`WPF_RESTORETOMAXIMIZED` if it had been maximized; it opens as it would have been
+restored — maximized in that case. (The saved state used to be read as normal
+whenever it was minimized, flag or not, so a maximized window closed from the taskbar
+came back normal-sized.) The saved size and position always apply.
 
 ## Core invariants
 
@@ -2042,6 +2050,14 @@ fresh copy once the window is gone. With the running copy frozen (its process
 suspended) for 9 s, a copy given another project waited without a window, and once
 the first was thawed it opened the project there and exited — before, it opened the
 project itself; with the frozen copy killed instead, the waiting one opened it.
+
+**Window placement** (5 checks, `startupPlacement`): asked for nothing in particular,
+the window opens as saved; closed while minimized, it opens as it would have been
+restored, maximized included; *Run: Maximized* maximizes a window saved normal; *Run:
+Minimized* minimizes and restores to the saved state, also when the saved state is
+itself a minimized maximized window; not to be activated, a normal window shows
+without the focus and a maximized one stays maximized. The size and place carry
+through every case. 0.41.4's logic fails the second and third.
 
 **History position** (5 checks): the cheap counts the toolbar repaints with
 (`historyCounts`, pointer hops only) agree with the full position; a new project has no steps; at the latest step undo

@@ -486,6 +486,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, remove-non-voice options, match-timbre and match-volume options, history list, open/save file & project dialogs |
 | `ui.cpp` | Main window: menu bar, layout, painting, hit-testing, all interaction |
 | `launch.h` | What a command line asks to open: the project, and audio files to add |
+| `placement.h` | How the main window first appears: as it was when last closed, or as a shortcut's *Run* setting asks |
 | `assoc.{h,cpp}` | The per-user `.acep` file association (File ▸ Open .acep projects with this app…) |
 | `selftest.cpp` | `--selftest` backend round-trip checks (decode/encode/peaks/DSP) |
 

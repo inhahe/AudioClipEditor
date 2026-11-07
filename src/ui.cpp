@@ -11,6 +11,7 @@
 #include "launch.h"
 #include "layout.h"
 #include "match.h"
+#include "placement.h"
 #include "transport.h"
 #include "selhistory.h"
 #include "snap.h"
@@ -4472,10 +4473,7 @@ static bool loadWindowPlacement(WINDOWPLACEMENT& wp) {
     LONG r = RegQueryValueExW(k, L"WindowPlacement", nullptr, &type, (LPBYTE)&tmp, &sz);
     RegCloseKey(k);
     if (r != ERROR_SUCCESS || type != REG_BINARY || sz != sizeof(WINDOWPLACEMENT)) return false;
-    // Don't restore into a minimized state; open normally (or maximized) instead.
-    if (tmp.showCmd == SW_SHOWMINIMIZED || tmp.showCmd == SW_MINIMIZE)
-        tmp.showCmd = SW_SHOWNORMAL;
-    wp = tmp; wp.length = sizeof(wp);
+    wp = tmp; wp.length = sizeof(wp);   // as saved: startupPlacement decides how to show it
     return true;
 }
 
@@ -4613,19 +4611,7 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
     // Restore the last window size/position/maximized state if we have one.
     WINDOWPLACEMENT wp{};
     if (loadWindowPlacement(wp)) {
-        // The saved size, place and maximized state, shown the way the launcher asked
-        // when it asked for something particular. Minimized ("Run: Minimized"):
-        // restores to how it was saved, maximized included. Not to be activated: a
-        // saved normal window shows without taking the focus; a saved maximized one
-        // stays maximized, which Windows can't show without activating it.
-        const bool savedMax = wp.showCmd == SW_SHOWMAXIMIZED;
-        if (nCmdShow == SW_SHOWMINIMIZED || nCmdShow == SW_MINIMIZE ||
-            nCmdShow == SW_SHOWMINNOACTIVE) {
-            wp.showCmd = (UINT)nCmdShow;
-            if (savedMax) wp.flags |= WPF_RESTORETOMAXIMIZED;
-        } else if ((nCmdShow == SW_SHOWNOACTIVATE || nCmdShow == SW_SHOWNA) && !savedMax) {
-            wp.showCmd = SW_SHOWNOACTIVATE;
-        }
+        wp = startupPlacement(wp, nCmdShow);
         SetWindowPlacement(hwnd, &wp);
     } else {
         ShowWindow(hwnd, nCmdShow);

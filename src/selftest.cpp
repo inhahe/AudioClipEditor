@@ -12,6 +12,7 @@
 #include "launch.h"
 #include "layout.h"
 #include "match.h"
+#include "placement.h"
 #include "transport.h"
 #include "selhistory.h"
 #include "snap.h"
@@ -3516,6 +3517,40 @@ int runSelfTest() {
               L"assoc: unregistering hands .acep back to what it opened with before", back);
         check(noIcon, L"assoc: no icon is registered (the program has none to point at)");
         RegDeleteTreeW(HKEY_CURRENT_USER, top.c_str());
+    }
+
+    // ---- how the main window first appears (placement.h): as saved, unless the
+    // launcher asked for something in particular
+    {
+        auto saved = [](UINT show, UINT flags) {
+            WINDOWPLACEMENT wp{};
+            wp.length = sizeof(wp); wp.showCmd = show; wp.flags = flags;
+            wp.rcNormalPosition = { 10, 20, 810, 620 };
+            return wp;
+        };
+        // Shown as `show`, restoring to maximized or not, at the saved size and place.
+        auto is = [](const WINDOWPLACEMENT& wp, UINT show, bool restoresMaximized) {
+            return wp.showCmd == show && ((wp.flags & WPF_RESTORETOMAXIMIZED) != 0) == restoresMaximized &&
+                   wp.rcNormalPosition.left == 10 && wp.rcNormalPosition.bottom == 620;
+        };
+        const WINDOWPLACEMENT maxed = saved(SW_SHOWMAXIMIZED, 0), normal = saved(SW_SHOWNORMAL, 0);
+        const WINDOWPLACEMENT minOfMax = saved(SW_SHOWMINIMIZED, WPF_RESTORETOMAXIMIZED);
+        const WINDOWPLACEMENT minOfNormal = saved(SW_SHOWMINIMIZED, 0);
+        check(is(startupPlacement(maxed, SW_SHOWNORMAL), SW_SHOWMAXIMIZED, false) &&
+                  is(startupPlacement(normal, SW_SHOWDEFAULT), SW_SHOWNORMAL, false),
+              L"placement: asked for nothing in particular, the window opens as it was saved");
+        check(is(startupPlacement(minOfMax, SW_SHOWNORMAL), SW_SHOWMAXIMIZED, false) &&
+                  is(startupPlacement(minOfNormal, SW_SHOWNORMAL), SW_SHOWNORMAL, false),
+              L"placement: closed while minimized, it opens as it would have been restored, maximized included");
+        check(is(startupPlacement(normal, SW_SHOWMAXIMIZED), SW_SHOWMAXIMIZED, false),
+              L"placement: 'Run: Maximized' maximizes a window saved normal");
+        check(is(startupPlacement(maxed, SW_SHOWMINNOACTIVE), SW_SHOWMINNOACTIVE, true) &&
+                  is(startupPlacement(normal, SW_SHOWMINIMIZED), SW_SHOWMINIMIZED, false) &&
+                  is(startupPlacement(minOfMax, SW_SHOWMINIMIZED), SW_SHOWMINIMIZED, true),
+              L"placement: 'Run: Minimized' minimizes, restoring to the saved state, even run minimized twice");
+        check(is(startupPlacement(normal, SW_SHOWNOACTIVATE), SW_SHOWNOACTIVATE, false) &&
+                  is(startupPlacement(maxed, SW_SHOWNA), SW_SHOWMAXIMIZED, false),
+              L"placement: not to be activated, a normal window shows without the focus; a maximized one stays so");
     }
 
     out(L"");
