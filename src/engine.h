@@ -114,6 +114,11 @@ public:
     ~PlaybackEngine();
     PlaybackEngine(const PlaybackEngine&) = delete;
     PlaybackEngine& operator=(const PlaybackEngine&) = delete;
+    // Open the default output device and start playing silence. Every WASAPI object
+    // lives on the engine's own audio thread, in COM's multithreaded apartment: the
+    // calling (UI) thread is a single-threaded one, and objects created there could
+    // not be used from the audio thread without marshalling. Waits until the device
+    // is open; false (with the reason in `err`) if it couldn't be.
     bool init(std::wstring* err = nullptr);
     void shutdown();
 
@@ -155,7 +160,12 @@ public:
     PosDiag posDiag() const;
 
 private:
+    // The audio thread: openDevice, then (once init has been told how that went)
+    // renderLoop until shutdown, then closeDevice -- all on that thread.
     void threadMain();
+    std::wstring openDevice();   // empty if it opened, else why not
+    void renderLoop();
+    void closeDevice();
     void writeFrames(void* dst, const float* stereo, int frames);
 
     struct Impl;

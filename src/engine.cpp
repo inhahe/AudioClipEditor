@@ -6,6 +6,7 @@
 #include <mmreg.h>
 #include <ksmedia.h>
 #include <wrl/client.h>
+#include <future>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -78,6 +79,8 @@ int TimelineSource::render(float* out, int frames) {
 
 // ---------------- PlaybackEngine ----------------
 struct PlaybackEngine::Impl {
+    // The device's COM objects (and `clock` below): created, used and released on the
+    // audio thread only (threadMain), which is in the multithreaded apartment.
     ComPtr<IMMDeviceEnumerator> enumr;
     ComPtr<IMMDevice> device;
     ComPtr<IAudioClient> client;
@@ -88,6 +91,9 @@ struct PlaybackEngine::Impl {
 
     std::thread thread;
     std::atomic<bool> running{ false };
+    // Set once by the audio thread when it has tried to open the device: empty if it
+    // did, else why not. init waits on it.
+    std::promise<std::wstring> opened;
 
     std::mutex mtx;
     std::shared_ptr<IPlaybackSource> source;
@@ -193,21 +199,38 @@ PlaybackEngine::~PlaybackEngine() { shutdown(); }
 
 bool PlaybackEngine::init(std::wstring* err) {
     d_ = std::make_unique<Impl>();
-    auto fail = [&](const wchar_t* m) { if (err) *err = m; shutdown(); return false; };
+    d_->hEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!d_->hEvent) {
+        if (err) *err = L"Could not create the audio event.";
+        d_.reset();
+        return false;
+    }
+    std::future<std::wstring> opened = d_->opened.get_future();
+    d_->running = true;
+    d_->thread = std::thread([this] { threadMain(); });
+    // Waiting here also publishes what the thread set up (sampleRate_, the format)
+    // to this one.
+    const std::wstring why = opened.get();
+    if (why.empty()) return true;
+    if (err) *err = why;
+    shutdown();
+    return false;
+}
 
+std::wstring PlaybackEngine::openDevice() {
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
         __uuidof(IMMDeviceEnumerator), (void**)d_->enumr.GetAddressOf());
-    if (FAILED(hr)) return fail(L"No audio device enumerator.");
+    if (FAILED(hr)) return L"No audio device enumerator.";
 
     hr = d_->enumr->GetDefaultAudioEndpoint(eRender, eConsole, &d_->device);
-    if (FAILED(hr)) return fail(L"No default audio output device.");
+    if (FAILED(hr)) return L"No default audio output device.";
 
     hr = d_->device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
         (void**)d_->client.GetAddressOf());
-    if (FAILED(hr)) return fail(L"Could not activate audio client.");
+    if (FAILED(hr)) return L"Could not activate audio client.";
 
     hr = d_->client->GetMixFormat(&d_->mix);
-    if (FAILED(hr)) return fail(L"Could not get device mix format.");
+    if (FAILED(hr)) return L"Could not get device mix format.";
 
     WAVEFORMATEX* wf = d_->mix;
     d_->dchannels = wf->nChannels;
@@ -225,17 +248,16 @@ bool PlaybackEngine::init(std::wstring* err) {
     REFERENCE_TIME dur = 30 * 10000; // 30 ms
     hr = d_->client->Initialize(AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK, dur, 0, wf, nullptr);
-    if (FAILED(hr)) return fail(L"Could not initialize audio client.");
+    if (FAILED(hr)) return L"Could not initialize audio client.";
 
-    d_->hEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     d_->client->SetEventHandle(d_->hEvent);
 
     hr = d_->client->GetBufferSize(&d_->bufferFrames);
-    if (FAILED(hr)) return fail(L"Could not get buffer size.");
+    if (FAILED(hr)) return L"Could not get buffer size.";
 
     hr = d_->client->GetService(__uuidof(IAudioRenderClient),
         (void**)d_->render.GetAddressOf());
-    if (FAILED(hr)) return fail(L"Could not get render client.");
+    if (FAILED(hr)) return L"Could not get render client.";
 
     // Optional: without it position() falls back to the render position, which
     // is what it always used to report -- less smooth, but playback still works.
@@ -248,10 +270,19 @@ bool PlaybackEngine::init(std::wstring* err) {
     // apply any source rate requested before init()
     d_->rsActive = (srcRate_ > 0 && srcRate_ != sampleRate_);
     d_->rsRatio = (srcRate_ > 0) ? (double)srcRate_ / (double)sampleRate_ : 1.0;
-    d_->running = true;
-    d_->client->Start();
-    d_->thread = std::thread([this] { threadMain(); });
-    return true;
+    if (FAILED(d_->client->Start())) return L"Could not start the audio stream.";
+    return std::wstring();
+}
+
+// Undoes openDevice, however far it got.
+void PlaybackEngine::closeDevice() {
+    if (d_->client) d_->client->Stop();
+    d_->clock.Reset();
+    d_->render.Reset();
+    d_->client.Reset();
+    d_->device.Reset();
+    d_->enumr.Reset();
+    if (d_->mix) { CoTaskMemFree(d_->mix); d_->mix = nullptr; }
 }
 
 void PlaybackEngine::setSourceRate(int rate) {
@@ -267,10 +298,8 @@ void PlaybackEngine::shutdown() {
     if (!d_) return;
     d_->running = false;
     if (d_->hEvent) SetEvent(d_->hEvent);
-    if (d_->thread.joinable()) d_->thread.join();
-    if (d_->client) d_->client->Stop();
+    if (d_->thread.joinable()) d_->thread.join();   // which closes the device, on that thread
     if (d_->hEvent) CloseHandle(d_->hEvent);
-    if (d_->mix) CoTaskMemFree(d_->mix);
     d_.reset();
 }
 
@@ -307,10 +336,21 @@ void PlaybackEngine::writeFrames(void* dst, const float* stereo, int frames) {
 }
 
 void PlaybackEngine::threadMain() {
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    DWORD taskIndex = 0;
-    HANDLE hTask = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const std::wstring why = SUCCEEDED(co) ? openDevice() : L"COM could not start on the audio thread.";
+    const bool opened = why.empty();
+    d_->opened.set_value(why);   // init returns now
+    if (opened) {
+        DWORD taskIndex = 0;
+        HANDLE hTask = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
+        renderLoop();
+        if (hTask) AvRevertMmThreadCharacteristics(hTask);
+    }
+    closeDevice();
+    if (SUCCEEDED(co)) CoUninitialize();
+}
 
+void PlaybackEngine::renderLoop() {
     while (d_->running) {
         DWORD w = WaitForSingleObject(d_->hEvent, 200);
         if (!d_->running) break;
@@ -356,9 +396,6 @@ void PlaybackEngine::threadMain() {
 
         if (endReached && endCb_) endCb_();
     }
-
-    if (hTask) AvRevertMmThreadCharacteristics(hTask);
-    CoUninitialize();
 }
 
 void PlaybackEngine::play(std::shared_ptr<IPlaybackSource> src, int64_t startFrame) {

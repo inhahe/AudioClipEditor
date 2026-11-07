@@ -14,7 +14,7 @@ sync with behavior changes.
 | `model.h` | `Clip` (id, name, `buffer` = its own audio, `eq` = its timbre EQ curve and `eqBuffer` the audio through it, `heard()`, peaks of what is heard, gain, **timestamp**), `ClipEq`, `Track` (id, name, gain, placed clips, plus the pure lane arithmetic `gapBefore`/`ripple`/`overlaps`), `PlacedClip` (clipId + start frame), `Project` (library order = display order) |
 | `decoder.{h,cpp}` | MF Source Reader → stereo float at the project rate |
 | `encoder.{h,cpp}` | WAV writer (manual RIFF; 16/24-bit PCM, 32-bit float) + MF Sink Writer (MP3/AAC/WMA); output-rate resampling |
-| `engine.{h,cpp}` | WASAPI shared-mode render thread; `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
+| `engine.{h,cpp}` | WASAPI shared-mode render thread, which owns the device's COM objects in its own apartment (opens, renders, closes); `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
 | `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker; `chain()` flattens the walkable line for the History window and `gotoNode()` jumps to any point on it; `allNodes()`/`rebuild()` round-trip the whole tree through the project file, `hasSnapshot` marks steps stored by name only, and `~UndoNode` tears down iteratively so a long history can't overflow the stack |
 | `document.{h,cpp}` | Owns `Project` + undo tree + `ViewState`; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`); `history()`/`gotoHistory()` expose the step list |
 | `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware K-weighted loudness, three noise-reduction algorithms, voice isolation, LTAS timbre matching, manual region edits (see below) |
@@ -298,6 +298,22 @@ came back normal-sized.) The saved size and position always apply.
   (`App::matchRefClipId`) — silently comes to mean an unrelated clip.
 - **UI thread owns everything except the WASAPI render callback**, which only
   reads through the engine's source objects (swapped under a lock).
+- **The UI thread is a single-threaded COM apartment; the audio thread a
+  multithreaded one, and it owns every WASAPI object.** `mfio::startup` initialises
+  the UI thread as an STA, as Windows expects of a thread with windows: the shell calls
+  it makes (`GetOpenFileName`/`GetSaveFileName`, `SHAddToRecentDocs`) assume one, and
+  OLE drag and drop or the clipboard would need it. Media Foundation's Source Reader and
+  Sink Writer, which decode and encode synchronously on that thread, work in either.
+  `PlaybackEngine::init` therefore creates nothing: it starts the audio thread, which
+  joins the MTA, opens the device (`openDevice`: enumerator, `IAudioClient`, render
+  client, clock), reports how that went through a promise that `init` waits on (which
+  also publishes the sample rate and format it found), renders until `shutdown`, then
+  stops the stream and releases every object itself (`closeDevice`) before leaving the
+  apartment. Objects created on the STA and used from the audio thread would have
+  crossed apartments unmarshalled. The UI thread used to be in the MTA too, which is how
+  that worked before. The selftest checks the UI thread's apartment, and that the
+  engine's output reaches Windows' mixer: it plays a 440 Hz tone at −80 dBFS, far below
+  hearing, and reads this process's audio-session peak meter.
 
 ## DSP: noise reduction (`dsp.{h,cpp}`)
 

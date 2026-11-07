@@ -20,13 +20,49 @@
 #include "snap.h"
 #include "waveform.h"
 #include <windows.h>
+#include <objbase.h>
+#include <mmdeviceapi.h>
+#include <audiopolicy.h>
+#include <endpointvolume.h>
 #include <shellapi.h>
 #include <shlwapi.h>
+#include <wrl/client.h>
 #include <string>
 #include <cmath>
 #include <cstdio>
 #include <vector>
 #include <algorithm>
+
+// The peak meter of this process's audio session on the default output device -- the
+// one the engine plays to -- which shows what the process actually hands Windows'
+// mixer. Null if there is none (no device, or no session yet).
+static Microsoft::WRL::ComPtr<IAudioMeterInformation> ownSessionMeter() {
+    using Microsoft::WRL::ComPtr;
+    ComPtr<IMMDeviceEnumerator> devices;
+    ComPtr<IMMDevice> device;
+    ComPtr<IAudioSessionManager2> manager;
+    ComPtr<IAudioSessionEnumerator> sessions;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                IID_PPV_ARGS(devices.GetAddressOf()))) ||
+        FAILED(devices->GetDefaultAudioEndpoint(eRender, eConsole, device.GetAddressOf())) ||
+        FAILED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
+                                (void**)manager.GetAddressOf())) ||
+        FAILED(manager->GetSessionEnumerator(sessions.GetAddressOf())))
+        return nullptr;
+    int count = 0;
+    sessions->GetCount(&count);
+    for (int i = 0; i < count; ++i) {
+        ComPtr<IAudioSessionControl> control;
+        ComPtr<IAudioSessionControl2> control2;
+        ComPtr<IAudioMeterInformation> meter;
+        DWORD pid = 0;
+        if (SUCCEEDED(sessions->GetSession(i, control.GetAddressOf())) && SUCCEEDED(control.As(&control2)) &&
+            SUCCEEDED(control2->GetProcessId(&pid)) && pid == GetCurrentProcessId() &&
+            SUCCEEDED(control.As(&meter)))
+            return meter;
+    }
+    return nullptr;
+}
 
 static AudioBufferPtr makeSine(int rate, double seconds, double freq) {
     auto b = std::make_shared<AudioBuffer>();
@@ -91,6 +127,18 @@ int runSelfTest() {
 
     if (!mfio::startup()) { out(L"[FAIL] MFStartup"); if (log) fclose(log); return 2; }
     out(L"Media Foundation started.");
+
+    // The thread mfio::startup sets up is the one that runs the window (here, the one
+    // the tests run on), and Windows expects a UI thread to be a single-threaded
+    // apartment: the shell calls it makes (file dialogs, recent documents) assume it.
+    {
+        APTTYPE type = APTTYPE_CURRENT;
+        APTTYPEQUALIFIER qual = APTTYPEQUALIFIER_NONE;
+        const bool known = SUCCEEDED(CoGetApartmentType(&type, &qual));
+        check(known && (type == APTTYPE_STA || type == APTTYPE_MAINSTA),
+              L"COM: the UI thread is a single-threaded apartment",
+              known ? L"apartment type " + std::to_wstring((int)type) : L"unknown");
+    }
 
     const int rate = 48000;
     auto sine = makeSine(rate, 1.0, 440.0);
@@ -1381,8 +1429,10 @@ int runSelfTest() {
     // ---- playback position, end to end through a real device
     // RenderTimeline above covers the arithmetic; this covers the wiring that
     // feeds it -- the audio clock's frequency units and the QPC extrapolation,
-    // which are exactly the parts that would silently report nonsense. Plays one
-    // second of digital silence, so it is inaudible.
+    // which are exactly the parts that would silently report nonsense. Plays a
+    // 440 Hz tone at -80 dBFS: far below hearing (the smallest step of a 16-bit
+    // sample is -96 dBFS), but this process's audio-session peak meter sees it,
+    // which shows the samples really reach Windows' mixer from the audio thread.
     {
         PlaybackEngine eng;
         std::wstring engErr;
@@ -1398,11 +1448,17 @@ int runSelfTest() {
             // the device clock starts running -- the anchor the startup settling
             // window below is measured from.
             const double tStreamStart = nowSec();
-            auto silence = std::make_shared<AudioBuffer>();
-            silence->sampleRate = eng.sampleRate(); silence->channels = 2;
-            silence->samples.assign((size_t)eng.sampleRate() * 2 * 2, 0.0f);   // 2 s
-            eng.setSourceRate(silence->sampleRate);
-            eng.play(std::make_shared<BufferSource>(silence, 0, silence->frames()), 0);
+            auto faint = std::make_shared<AudioBuffer>();
+            faint->sampleRate = eng.sampleRate(); faint->channels = 2;
+            faint->samples.resize((size_t)eng.sampleRate() * 2 * 2);   // 2 s
+            const float kFaint = 1e-4f;                                 // -80 dBFS
+            for (size_t f = 0; f < faint->samples.size() / 2; ++f)
+                faint->samples[f * 2] = faint->samples[f * 2 + 1] =
+                    kFaint * (float)std::sin(2.0 * 3.14159265358979 * 440.0 * (double)f / eng.sampleRate());
+            eng.setSourceRate(faint->sampleRate);
+            eng.play(std::make_shared<BufferSource>(faint, 0, faint->frames()), 0);
+            const Microsoft::WRL::ComPtr<IAudioMeterInformation> meter = ownSessionMeter();
+            float peak = 0.0f;
 
             // Sample the position repeatedly, timing each sample with QPC --
             // Sleep(20) really sleeps ~30 ms at the default timer resolution, so
@@ -1413,8 +1469,14 @@ int runSelfTest() {
             for (int i = 0; i < 35; ++i) {
                 Sleep(20);
                 pos.push_back(eng.position()); dg.push_back(eng.posDiag()); at.push_back(nowSec());
+                float p = 0.0f;
+                if (meter && SUCCEEDED(meter->GetPeakValue(&p))) peak = std::max(peak, p);
             }
             eng.stop();
+            // Something, and nothing louder than the tone itself: it is this tone.
+            check(meter && peak > kFaint * 0.1f && peak < kFaint * 10.0f,
+                  L"playback reaches Windows' mixer (this process's session peak meter sees the tone)",
+                  meter ? L"peak " + std::to_wstring(peak) : L"no session meter");
 
             bool monotonic = true;
             double worstRate = 0.0, bestRate = 1e9;

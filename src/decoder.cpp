@@ -12,7 +12,12 @@ using Microsoft::WRL::ComPtr;
 namespace mfio {
 
 bool startup() {
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // A single-threaded apartment: this is the thread that runs the window, and
+    // Windows expects that of a UI thread -- the shell calls it makes (file dialogs,
+    // recent documents) assume it. Media Foundation's Source Reader and Sink Writer,
+    // used here synchronously, work in either. The audio engine keeps its WASAPI
+    // objects on its own thread, in the multithreaded apartment (engine.cpp).
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return false;
     return SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE));
 }

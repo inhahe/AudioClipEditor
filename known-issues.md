@@ -71,27 +71,3 @@ fix belongs in `design.md`.
   side branches hanging off the dropped prefix (drop with it) and a decision on
   whether the dropped steps should survive as name-only entries, which would
   defeat the point unless the cap is on *snapshots* rather than on nodes.
-
-### The UI thread is in COM's multithreaded apartment
-
-- **Where:** `decoder.cpp`, `mfio::startup` — `CoInitializeEx(COINIT_MULTITHREADED)`,
-  called on the UI thread by `runApp`. `engine.cpp`, `PlaybackEngine::init` creates
-  the WASAPI objects (device enumerator, `IAudioClient`, `IAudioRenderClient`,
-  `IAudioClock`) on that thread, and the render thread (`threadMain`, also MTA) uses
-  them.
-- **Symptom:** none seen. But Windows expects a UI thread to be single-threaded
-  (STA): the shell calls made from it (`GetOpenFileName`/`GetSaveFileName`,
-  `SHAddToRecentDocs` for the jump list, `SHChangeNotify`) can meet shell extensions
-  that misbehave in an MTA, and OLE drag and drop or the clipboard couldn't be added
-  without it. `SHAddToRecentDocs` was checked from an MTA thread and still wrote the
-  recent entry; the jump list itself can't be checked without registering `.acep` in
-  the user's settings.
-- **Proper fix:** initialise the UI thread as an STA, and create the WASAPI objects on
-  the render thread (which stays MTA), handing `init`'s result back to the caller,
-  rather than creating them on the UI thread and using them on another apartment's
-  thread. Media Foundation's Source Reader and Sink Writer, which run on the UI
-  thread, work in an STA. Then check playback, device loss and export by ear, not
-  just by the selftest.
-- **Why it isn't done yet:** it reworks how the audio engine starts, for a problem
-  nobody has hit; raised in the review of `ea7d653..267f9fa` and kept here for a
-  decision.
