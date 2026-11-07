@@ -2534,9 +2534,6 @@ struct App {
     // an empty one, which is exactly what this does.
     void newProject() {
         if (!confirmDiscardChanges()) return;
-        stopAll();
-        closeClipEditor();
-        cancelDrag();
         // Back to the device's rate. A project loaded earlier may have pulled the
         // engine to a rate of its own, and an empty project has no reason to keep
         // it -- the next file added should be decoded at the native rate, as it
@@ -2545,10 +2542,21 @@ struct App {
         engine.setSourceRate(rate);
         doc.init(rate);
         projectPath.clear();
-        // Every one of these referred to a clip in the project that just went
-        // away, so they have to go with it or they name something that no longer
-        // exists. Session *preferences* (effect options, ripple mode) deliberately
-        // survive: they are about how the user works, not about this project.
+        resetForAnotherProject();
+        setTitle(); clampScroll(); refresh();
+    }
+    // Everything in App that points into the project just replaced, put back for the
+    // new one. Shared by New and Open so the two can't drift apart: Open used to skip
+    // closing the full-window editor, which then showed whichever clip of the new
+    // project had the same id -- ids start at 1 in every project. Every one of these
+    // referred to a clip of the old project, so they have to go with it or they name
+    // something that no longer exists (or, for an id, something else). Session
+    // *preferences* (effect options, ripple mode) deliberately survive: they are about
+    // how the user works, not about this project.
+    void resetForAnotherProject() {
+        stopAll();
+        closeClipEditor();
+        cancelDrag();
         previewClipId = -1; previewIsSel = false; previewSeekPending = false;
         previewCursor = previewBegin = previewEnd = 0;
         timelinePlaying = false; playheadFrame = 0;
@@ -2565,7 +2573,6 @@ struct App {
         noiseProfileDesc.clear();
         noiseCaptures.clear();
         resetSelHistory();
-        setTitle(); clampScroll(); refresh();
     }
     void openProjectFile() {
         if (!confirmDiscardChanges()) return;
@@ -2581,14 +2588,11 @@ struct App {
                                + path).c_str(), L"Open", MB_ICONWARNING);
             return false;
         }
-        stopAll();
+        resetForAnotherProject();
         // Follow the loaded project's internal rate so playback resamples correctly.
         rate = doc.project().sampleRate > 0 ? doc.project().sampleRate : rate;
         engine.setSourceRate(rate);
         projectPath = path;
-        previewClipId = -1; timelinePlaying = false;
-        matchRefClipId = -1;   // a clip id from the old project (see matchRefClipId)
-        libScroll = tlScrollX = tlScrollY = 0;
         restoreViewState();   // selection + playhead saved with the project
         setTitle(); clampScroll(); refresh();
         return true;

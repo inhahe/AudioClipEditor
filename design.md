@@ -2189,10 +2189,15 @@ would resurrect clips the user just threw away), and `markSaved` so a new projec
 doesn't start dirty. The UI half is everything in `App` that *pointed into* the
 old project and would otherwise name something that no longer exists: preview and
 playback state, both selections and the selection-save, the hover ids, scroll
-offsets, the clip-editor overlay, any drag in progress, `matchRefClipId` (also
-reset on Open: it is a clip id, and ids only mean something within one project), and
-the noise captures. Session **preferences** deliberately survive — effect options,
-ripple mode — because they describe how the user works rather than this project.
+offsets, the clip-editor overlay, any drag in progress, `matchRefClipId` (a clip id,
+and ids only mean something within one project), and the noise captures. It is one
+routine, `App::resetForAnotherProject`, shared by New and Open: Open used to reset its
+own shorter list and skipped closing the full-window editor, which then showed
+whichever clip of the opened project had the same id — ids start at 1 in every
+project. Open resets after a successful load (a failed one changes nothing) and then
+restores the selection and playhead the file saved. Session **preferences**
+deliberately survive — effect options, ripple mode — because they describe how the
+user works rather than this project.
 
 `rate` is restored from `App::nativeRate` (the device rate, floored at 48 kHz,
 captured at startup). `rate` follows whatever project is open, so without that a
