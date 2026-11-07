@@ -4,6 +4,11 @@
 #include <vector>
 #include <algorithm>
 
+// The most any clip or track volume can be (+24 dB). One constant, because the
+// volume matcher reports when a clip was held at this limit, and that report is only
+// true if it is the same limit Document enforces.
+constexpr float kMaxClipGain = 16.0f;
+
 // A named piece of audio in the clip library. Each clip owns its own AudioBuffer
 // (shared_ptr, immutable once created). Derived clips (from a selection/crop) get
 // their own trimmed copy so they're fully independent.

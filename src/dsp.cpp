@@ -779,7 +779,7 @@ TimbreProfile averageTimbre(const std::vector<TimbreProfile>& profiles) {
     if (n == 0) return avg;
     // The mean of the log spectra, i.e. the geometric mean of the power. This is
     // the target that moves every clip the least and favours none of them -- the
-    // same reasoning as normalizeClips using the geometric mean of loudness.
+    // same reasoning as match::matchVolume using the geometric mean of loudness.
     avg.logPower.resize(acc.size());
     for (size_t k = 0; k < acc.size(); ++k) avg.logPower[k] = (float)(acc[k] / n);
     avg.count = n;

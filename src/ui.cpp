@@ -7,6 +7,7 @@
 #include "dialogs.h"
 #include "dsp.h"
 #include "layout.h"
+#include "match.h"
 #include "transport.h"
 #include "selhistory.h"
 #include "snap.h"
@@ -53,16 +54,19 @@ enum TB { TB_ADD, TB_TRACK, TB_PLAYALL, TB_STOP, TB_UNDO, TB_REDO, TB_HISTORY, T
 enum {
     IDM_PLAY = 100, IDM_PLAYSEL, IDM_CLEARSEL, IDM_SAVESEL, IDM_CROP,
     IDM_EDIT, IDM_RENAME, IDM_DELETE,
-    IDM_NORM_MATCH, IDM_NORM_ALL, IDM_DENOISE, IDM_DENOISE_SEL, IDM_DENOISE_ALL,
+    IDM_DENOISE, IDM_DENOISE_SEL, IDM_DENOISE_ALL,
     IDM_GETPROFILE, IDM_GETPROFILE_CLIP,
     IDM_VOICEISO, IDM_VOICEISO_SEL, IDM_VOICEISO_ALL,
-    IDM_TIMBRE_ALL,
+    // Matching, each as this clip to the others / the timeline / the library.
+    IDM_TIMBRE_ONE, IDM_TIMBRE_TL, IDM_TIMBRE_LIB,
+    IDM_VOL_ONE, IDM_VOL_TL, IDM_VOL_LIB,
     IDM_EXPORTCLIP, IDM_EXPORTSEL,
     IDM_SILENCESEL, IDM_DELETESEL, IDM_SPLITOUTSEL,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK, IDM_TL_GAP, IDM_TL_CLOSEGAP, IDM_TL_RIPPLE,
+    IDM_TL_TIMBRE, IDM_TL_VOLUME,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE, IDM_TRK_VOICEISO,
-    IDM_TRK_TIMBRE,
+    IDM_TRK_TIMBRE, IDM_TRK_VOLUME, IDM_TRK_TIMBRE_ALL, IDM_TRK_VOLUME_ALL,
     IDM_SORT_NAME = 340, IDM_SORT_TIME,
     IDM_REDO_BASE = 400,
     IDM_APPLYCAP_BASE = 500   // + recent-capture index (apply to the clicked clip)
@@ -178,13 +182,17 @@ struct App {
     // "Remove non-voice" (voice isolation) options, persisted for the session
     dsp::VoiceIsolateOptions viOpts;
 
-    // Timbre matching options, persisted for the session. `tmReference` is the
-    // *name* of the reference clip rather than an index, because the choice
-    // outlives the dialog that made it and the set it was chosen from changes
-    // (a different track, a clip renamed or deleted); an index into last time's
-    // list would silently come to mean a different clip. Empty = the average.
+    // Timbre matching options, persisted for the session.
     dsp::TimbreMatchOptions tmOpts;
-    std::wstring tmReference;
+    // The clip last set as the standard to match to, by either matcher; -1 = the
+    // average. Shared, because choosing a standard is a statement about the take
+    // ("this one sounds right"), so matching tone and then volume to it shouldn't
+    // mean choosing it twice. An id rather than a name or a list position: the
+    // choice outlives the dialog that made it, and the lists change between commands
+    // (another track, a clip renamed or deleted) -- a position would silently come to
+    // mean another clip, and a name is ambiguous whenever two clips share one. Ids
+    // are only unique within a project, so this is forgotten on New and Open.
+    int matchRefClipId = -1;
 
     // interaction
     Mode mode = Mode::None;
@@ -1694,14 +1702,6 @@ struct App {
         if (dlg::promptText(hwnd, L"Rename clip", L"Clip name:", name)) { doc.renameClip(id, name); refresh(); }
     }
 
-    void normalizeClip(int clipId, bool all) {
-        int n = doc.normalizeClips(all ? -1 : clipId, all);
-        refresh();
-        if (n == 0)
-            MessageBoxW(hwnd, L"Nothing to normalize \u2014 clips are silent or already matched.",
-                        L"Normalize", MB_ICONINFORMATION);
-    }
-
     // Run the voice cleaner over one clip.
     void voiceCleanClip(int clipId) {
         const Clip* c = doc.project().findClip(clipId);
@@ -1893,179 +1893,231 @@ struct App {
         MessageBoxW(hwnd, msg, L"Remove non-voice", MB_ICONINFORMATION);
     }
 
-    // ---- Match timbre (make separately-recorded clips sound alike) ----
-    // Unlike the other two effects this one is inherently about a *set*: there
-    // is nothing to match a lone clip to, so there is no "this clip" entry and
-    // no selection-only variant (a tone colour is a property of a whole take,
-    // and EQ'ing half a clip differently from the other half would create
-    // exactly the audible seam this is meant to remove).
-    void matchTimbreAllClips() {
-        std::vector<int> ids;
-        for (auto& c : doc.project().library) ids.push_back(c.id);
-        matchTimbreClips(ids, L"all clips");
-    }
-    void matchTimbreTrack(int trackId) {
-        const Track* t = doc.project().findTrack(trackId);
-        if (!t) return;
-        std::vector<int> ids;
-        for (auto& pc : t->clips) ids.push_back(pc.clipId);
-        matchTimbreClips(ids, L"track '" + t->name + L"'");
-    }
+    // ---- Matching clips to each other: volume and timbre ----
+    // Both run the same way (see match.h). The menu picks which clips -- a set made
+    // alike, or one clip made like the rest -- and the dialog picks what they are
+    // matched to: the average, or one clip set as the standard. Each matched clip
+    // then gets one setting for its whole length (a volume, or one EQ curve), and
+    // the lot is a single undo step.
 
-    // The two clips in a set whose tone colours are furthest apart. The worst
-    // pair, not the average distance: an average hides one stubborn clip among
-    // five that agree, and that one clip is exactly the one the ear picks out.
-    // Naming both ends makes the report actionable -- "these two still differ"
-    // is something you can go and listen to.
-    struct TimbrePair { double db = -1.0; int a = -1, b = -1; };
-    static TimbrePair worstTimbrePair(const std::vector<dsp::TimbreProfile>& ps) {
-        TimbrePair w;
-        for (size_t i = 0; i < ps.size(); ++i)
-            for (size_t j = i + 1; j < ps.size(); ++j) {
-                // Invalid profiles (clips skipped as too short or the wrong
-                // rate) return -1 and so can never win.
-                const double d = dsp::timbreDistanceDb(ps[i], ps[j]);
-                if (d > w.db) { w.db = d; w.a = (int)i; w.b = (int)j; }
-            }
-        return w;
+    // The dialog's reference list: the pool by name, with the remembered standard
+    // preselected when it is one of them.
+    dlg::MatchReference matchReferenceFor(const match::ClipSet& s) const {
+        dlg::MatchReference r;
+        r.averageLabel = s.single() ? L"The average of " + s.others : L"The average of them all";
+        const std::vector<int> pool = s.poolIndices();
+        const int pre = s.referenceFor(matchRefClipId);
+        for (int k = 0; k < (int)pool.size(); ++k) {
+            r.clipNames.push_back(s.names[pool[k]]);
+            if (pool[k] == pre) r.choice = k;
+        }
+        return r;
+    }
+    // Back from the dialog: the chosen set index (-1 = the average), remembered.
+    int takeReference(const match::ClipSet& s, const dlg::MatchReference& r) {
+        const std::vector<int> pool = s.poolIndices();
+        const int ref = (r.choice >= 0 && r.choice < (int)pool.size()) ? pool[r.choice] : -1;
+        matchRefClipId = ref >= 0 ? s.ids[ref] : -1;
+        return ref;
+    }
+    // What the clips were matched to, for the undo step and the summary:
+    // "their average", "the average of the other 7 clips on 'Voice'", "'take 2'".
+    static std::wstring matchTargetText(const match::ClipSet& s, int ref) {
+        if (ref >= 0) return L"'" + s.names[ref] + L"'";
+        return s.single() ? L"the average of " + s.others : std::wstring(L"their average");
     }
     static std::wstring db1(double v) {
         wchar_t b[32]; swprintf(b, 32, L"%.1f", v); return b;
     }
+    static std::wstring signedDb(double v) {
+        wchar_t b[32]; swprintf(b, 32, L"%+.1f dB", v); return b;
+    }
+    static std::wstring pctText(float g) {
+        wchar_t b[32]; swprintf(b, 32, L"%d%%", (int)(g * 100.0f + 0.5f)); return b;
+    }
 
-    void matchTimbreClips(const std::vector<int>& ids, const std::wstring& scopeLabel) {
-        std::vector<int> targets;
-        std::vector<std::wstring> names;
-        int rate = 0;
-        for (int id : ids) {
-            bool dup = false;
-            for (int t : targets) if (t == id) { dup = true; break; }
-            if (dup) continue;
-            const Clip* c = doc.project().findClip(id);
-            if (!c || !c->buffer || c->buffer->frames() <= 0) continue;
-            // Bin-for-bin comparison of spectra only means anything at one rate.
-            // The first clip sets it and the rest have to agree; mismatches are
-            // reported below rather than silently dropped, since a clip missing
-            // from the match is exactly the one that will still sound different.
-            if (rate == 0) rate = c->buffer->sampleRate;
-            targets.push_back(id);
-            names.push_back(c->name);
-        }
-        if (targets.size() < 2) {
+    void matchVolumeClips(const match::ClipSet& s) {
+        if (!s.usable()) {
             MessageBoxW(hwnd,
-                L"Matching timbre needs at least two clips \u2014 it makes them sound like "
-                L"each other, so there has to be something to match.",
+                L"Matching volume needs at least two clips with audio \u2014 it makes them as "
+                L"loud as each other, so there has to be something to match.",
+                L"Match volume", MB_ICONINFORMATION);
+            return;
+        }
+        dlg::VolumeMatchContext ctx;
+        ctx.ref = matchReferenceFor(s);
+        ctx.scopeLabel = s.label;
+        if (!dlg::volumeMatch(hwnd, ctx)) return;
+        const int ref = takeReference(s, ctx.ref);
+
+        HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+        const match::VolumeResult r = match::matchVolume(doc.project(), s, ref);
+        SetCursor(old);
+        const int subject = s.single() ? s.firstChanged() : -1;
+        if (!r.ok || (subject >= 0 && !r.measured[subject])) {
+            const std::wstring who = !r.ok && ref >= 0 ? s.names[ref]
+                                   : subject >= 0 ? s.names[subject] : std::wstring();
+            MessageBoxW(hwnd,
+                (!who.empty()
+                    ? L"'" + who + L"' has no speech to measure \u2014 it is silent, or its volume "
+                      L"is all the way down."
+                    : std::wstring(L"None of these clips has any speech to measure \u2014 they "
+                                   L"are silent, or their volumes are all the way down.")).c_str(),
+                L"Match volume", MB_ICONWARNING);
+            return;
+        }
+
+        const std::wstring target = matchTargetText(s, ref);
+        const bool changed = doc.setClipGains(r.gains, L"Match volume of " + s.what + L" to " + target);
+        refresh();
+
+        std::wstring msg;
+        if (subject >= 0) {
+            const std::wstring who = L"'" + s.names[subject] + L"'";
+            const double moved = 20.0 * std::log10(r.newGain[subject] / r.oldGain[subject]);
+            if (changed)
+                msg = L"Turned " + who + (moved >= 0 ? L" up " : L" down ")
+                    + db1(std::fabs(moved)) + L" dB to match " + target + L".";
+            // Held at a limit, possibly one it was already sitting at from an earlier
+            // match -- in which case nothing moved, but "it already matches" would be
+            // false.
+            if (!r.held.empty())
+                msg += (changed ? L" That is as far as a clip's volume goes, so it is still "
+                                : who + L" is already as far as a clip's volume goes, and still ")
+                     + db1(r.after.db) + L" dB "
+                     + (r.newGain[subject] >= match::kMaxMatchGain ? L"quieter" : L"louder")
+                     + L" than " + target + L".";
+            else if (!changed)
+                msg = who + L" already matches " + target + L".";
+        } else {
+            int matched = 0;
+            for (int i = 0; i < s.size(); ++i)
+                if (s.change[i] && r.measured[i] && i != ref) ++matched;
+            // As above: nothing moving means "already matched" only if nothing is
+            // being held back from matching by a volume limit.
+            msg = changed ? L"Matched the volume of " + std::to_wstring(matched) + L" clips to "
+                            + target + L"."
+                : r.held.empty() ? L"These clips already match " + target
+                                   + L" \u2014 no volume needed to change."
+                : L"No volume changed: the clips that still differ from " + target
+                  + L" are already as far as a clip's volume goes.";
+            if (ref >= 0 && changed) msg += L" '" + s.names[ref] + L"' itself was left as it is.";
+            // How far apart they were and are -- the worst pair, named, so it can be
+            // checked by ear.
+            if (r.before.valid() && changed) {
+                msg += L"\n\nBefore, the loudest and quietest were '" + s.names[r.before.a]
+                     + L"' and '" + s.names[r.before.b] + L"', " + db1(r.before.db) + L" dB apart. ";
+                msg += !r.after.valid() || r.after.db < 0.05
+                     ? std::wstring(L"Now their speech all measures the same.")
+                     : L"Now the furthest apart are '" + s.names[r.after.a] + L"' and '"
+                       + s.names[r.after.b] + L"', " + db1(r.after.db) + L" dB.";
+            }
+            if (r.biggest >= 0 && r.changed > 1)
+                msg += L"\n\nThe biggest change was to '" + s.names[r.biggest] + L"': "
+                     + signedDb(r.biggestDb) + L".";
+        }
+        // A clip that needed more than a volume can give is usually not like the
+        // others in some other way too, which is worth a look before trusting it.
+        if (!r.held.empty() && subject < 0) {
+            const int n = (int)r.held.size();
+            msg += L"\n\n'" + s.names[r.held[0]] + L"'"
+                 + (n > 1 ? L" and " + std::to_wstring(n - 1) + (n == 2 ? L" other" : L" others")
+                          : std::wstring())
+                 + L" needed more of a change than a clip's volume allows (it goes from \u221226 to "
+                   L"+24 dB), so " + (n > 1 ? L"they stop" : L"it stops") + L" short. A clip that far "
+                   L"out is usually different in some other way too \u2014 check it belongs with "
+                   L"the rest.";
+        }
+        // Mixing clamps at full scale, so a match that pushes a peak over it distorts
+        // on playback and in the export with nothing on screen to say so.
+        if (!r.overFullScale.empty()) {
+            const int n = (int)r.overFullScale.size();
+            const auto& w = r.overFullScale[0];
+            msg += L"\n\n'" + s.names[w.first] + L"' now peaks " + db1(w.second)
+                 + L" dB above full scale"
+                 + (n > 1 ? L" (and " + std::to_wstring(n - 1) + L" more clip"
+                              + (n == 2 ? L" goes" : L"s go") + L" over too)" : std::wstring())
+                 + L", so it will distort when played and in the exported mix. Match to a "
+                   L"quieter clip instead, or turn the track down.";
+        }
+        // Track volume applies on top, and this only sets clip volumes.
+        if (!r.trackGains.empty()) {
+            msg += L"\n\nThese clips are on tracks set to different volumes (";
+            for (size_t k = 0; k < r.trackGains.size() && k < 4; ++k)
+                msg += (k ? L", '" : L"'") + r.trackGains[k].first + L"' "
+                     + pctText(r.trackGains[k].second);
+            if (r.trackGains.size() > 4) msg += L", \u2026";
+            msg += L"). Track volume applies on top of clip volume, so in the mix they will "
+                   L"still differ by that.";
+        }
+        if (changed) msg += L"\n\nUndo (Ctrl+Z) to go back.";
+        if (r.unmeasured)
+            msg += L"\n\nLeft out " + std::to_wstring(r.unmeasured)
+                 + (r.unmeasured == 1 ? L" clip that is" : L" clips that are")
+                 + L" silent or turned all the way down.";
+        MessageBoxW(hwnd, msg.c_str(), L"Match volume", MB_ICONINFORMATION);
+    }
+
+    void matchTimbreClips(const match::ClipSet& s) {
+        if (!s.usable()) {
+            MessageBoxW(hwnd,
+                L"Matching timbre needs at least two clips with audio \u2014 it makes them sound "
+                L"like each other, so there has to be something to match.",
                 L"Match timbre", MB_ICONINFORMATION);
             return;
         }
-
-        std::wstring scope = scopeLabel + L" (" + std::to_wstring(targets.size()) + L" clips)";
         dlg::TimbreMatchContext ctx;
         ctx.opts = &tmOpts;
-        ctx.clipNames = names;
-        ctx.scopeLabel = scope;
-        // Restore last session's reference by name if it is in this set (see
-        // tmReference); otherwise fall back to the average.
-        for (size_t i = 0; i < names.size(); ++i)
-            if (names[i] == tmReference) { ctx.reference = (int)i; break; }
+        ctx.ref = matchReferenceFor(s);
+        ctx.scopeLabel = s.label;
         if (!dlg::timbreMatch(hwnd, ctx)) return;
-        tmReference = (ctx.reference >= 0 && ctx.reference < (int)names.size())
-                    ? names[ctx.reference] : std::wstring();
+        const int ref = takeReference(s, ctx.ref);
 
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
-        // Measure every clip first: the target may be their average, and even
-        // when it isn't, a clip that can't be measured must be left alone rather
-        // than filtered by a curve derived from nothing.
-        std::vector<dsp::TimbreProfile> profiles;
-        int unmeasured = 0, mismatched = 0;
-        for (int id : targets) {
-            const Clip* c = doc.project().findClip(id);
-            dsp::TimbreProfile p;
-            if (!c || !c->buffer) { /* filtered out above; keep the arrays parallel */ }
-            else if (c->buffer->sampleRate != rate) ++mismatched;
-            else { p = dsp::computeTimbreProfile(*c->buffer); if (!p.valid()) ++unmeasured; }
-            profiles.push_back(p);
-        }
-        const bool named = ctx.reference >= 0 && ctx.reference < (int)profiles.size();
-        dsp::TimbreProfile target = named ? profiles[ctx.reference] : dsp::averageTimbre(profiles);
-        if (!target.valid()) {
-            SetCursor(old);
-            // Say which clip is the problem when one particular clip was chosen:
-            // "the clips are too short" would be misleading when the rest are fine.
+        const match::TimbreResult r = match::matchTimbre(doc.project(), s, ref, tmOpts);
+        SetCursor(old);
+        const int subject = s.single() ? s.firstChanged() : -1;
+        // Say which clip is the problem when one particular clip is: "the clips are
+        // too short" would be misleading when the rest are fine.
+        const std::wstring who = !r.ok && ref >= 0 ? s.names[ref]
+                               : r.updates.empty() && subject >= 0 ? s.names[subject]
+                               : std::wstring();
+        if (!r.ok || r.updates.empty()) {
             MessageBoxW(hwnd,
-                named ? (L"Couldn't measure the tone colour of '" + names[ctx.reference] +
-                         L"' \u2014 it is too short (under about 0.05 s) or silent.").c_str()
-                      : L"Couldn't measure a tone colour to match \u2014 the clips are too "
-                        L"short (under about 0.05 s) or silent.",
+                (!who.empty()
+                    ? L"Couldn't measure the tone colour of '" + who + L"' \u2014 it is too short "
+                      L"(under about 0.05 s) or silent."
+                    : !r.ok ? std::wstring(L"Couldn't measure a tone colour to match \u2014 the "
+                                           L"clips are too short (under about 0.05 s) or silent.")
+                            : std::wstring(L"Nothing could be matched.")).c_str(),
                 L"Match timbre", MB_ICONWARNING);
             return;
         }
-
-        std::vector<std::pair<int, AudioBufferPtr>> updates;
-        std::vector<size_t> updIndex;   // updates[u] came from targets/profiles[updIndex[u]]
-        double worstDb = 0.0, worstHz = 0.0;
-        int worstClip = -1;
-        const double binHz = dsp::timbreBinHz(rate);
-        for (size_t i = 0; i < targets.size(); ++i) {
-            const Clip* c = doc.project().findClip(targets[i]);
-            if (!c || !c->buffer || !profiles[i].valid()) continue;
-            std::vector<float> curve;
-            auto matched = dsp::matchTimbre(*c->buffer, target, tmOpts, &curve);
-            if (!matched) continue;
-            // Where the biggest move landed, not just how big it was: 8 dB at
-            // 250 Hz is a mic-distance difference, 8 dB at 40 Hz is a fan.
-            for (size_t k = 0; k < curve.size(); ++k)
-                if (std::fabs(curve[k]) > worstDb) {
-                    worstDb = std::fabs(curve[k]);
-                    worstHz = (double)k * binHz;
-                    worstClip = (int)i;   // and which clip needed it
-                }
-            updates.push_back({ targets[i], matched });
-            updIndex.push_back(i);
-        }
-        if (updates.empty()) {
-            SetCursor(old);
-            MessageBoxW(hwnd, L"Nothing could be matched.", L"Match timbre", MB_ICONWARNING);
-            return;
-        }
-
-        // Re-measure the results. The size of the correction says how far the
-        // clips were moved, which is not the same question as how close they
-        // ended up: a big correction that landed is a success and a small one
-        // that was clamped is a failure. Costs one more profiling pass over the
-        // audio, which is worth it -- without this number the only way to tell
-        // "the EQ stopped short" from "the difference isn't spectral at all" is
-        // to guess.
-        const TimbrePair before = worstTimbrePair(profiles);
-        std::vector<dsp::TimbreProfile> after(profiles.size());
-        for (size_t u = 0; u < updates.size(); ++u)
-            after[updIndex[u]] = dsp::computeTimbreProfile(*updates[u].second);
-        const TimbrePair residual = worstTimbrePair(after);
-        SetCursor(old);
         stopAll();   // buffers are changing under any active playback
-        const std::wstring ref = tmReference.empty() ? L"their average"
-                                                     : L"'" + tmReference + L"'";
-        doc.replaceClipBuffers(updates, L"Match timbre of " + scopeLabel + L" to " + ref);
+        const std::wstring target = matchTargetText(s, ref);
+        doc.replaceClipBuffers(r.updates, L"Match timbre of " + s.what + L" to " + target);
         refresh();
 
         wchar_t whereBuf[64];
-        swprintf(whereBuf, 64, worstHz >= 1000.0 ? L" (at %.1f kHz)" : L" (at %.0f Hz)",
-                 worstHz >= 1000.0 ? worstHz / 1000.0 : worstHz);
-        // Naming the clip matters most when there are a lot of them: across two
-        // dozen takes the figure is set by a single outlier, and "which one" is
-        // the only question the user can actually act on.
-        const std::wstring worstWho =
-            (worstClip >= 0 && worstClip < (int)names.size())
-                ? L", to \u2018" + names[worstClip] + L"\u2019" : std::wstring();
-        std::wstring msg = L"Matched " + std::to_wstring(updates.size())
-                         + L" clips to " + ref + L".\n\nThe largest correction applied was "
-                         + std::to_wstring((int)(worstDb + 0.5)) + L" dB" + whereBuf + worstWho;
+        swprintf(whereBuf, 64, r.worstHz >= 1000.0 ? L" (at %.1f kHz)" : L" (at %.0f Hz)",
+                 r.worstHz >= 1000.0 ? r.worstHz / 1000.0 : r.worstHz);
+        // Naming the clip matters most when there are a lot of them: across two dozen
+        // takes the figure is set by a single outlier, and "which one" is the only
+        // question the user can actually act on.
+        const std::wstring worstWho = (subject < 0 && r.worstClip >= 0)
+                                    ? L", to '" + s.names[r.worstClip] + L"'" : std::wstring();
+        std::wstring msg = (subject >= 0 ? L"Matched '" + s.names[subject] + L"'"
+                                         : L"Matched " + std::to_wstring(r.updates.size()) + L" clips")
+                         + L" to " + target + L".";
+        if (ref >= 0 && subject < 0) msg += L" '" + s.names[ref] + L"' itself was left as it is.";
+        msg += L"\n\nThe largest correction applied was "
+             + std::to_wstring((int)(r.worstDb + 0.5)) + L" dB" + whereBuf + worstWho;
         // The clamp having bitten means the clips genuinely are far apart, and a
-        // partial match is the honest result -- but the user should know the
-        // effect stopped short rather than wonder why they still differ. 24 dB is
-        // the ceiling the effect allows, so say that rather than send them back
-        // to a field that cannot go any higher.
-        if (worstDb >= tmOpts.maxCorrectionDb - 0.01)
+        // partial match is the honest result -- but the user should know the effect
+        // stopped short rather than wonder why they still differ. 24 dB is the
+        // ceiling the effect allows, so say that rather than send them back to a
+        // field that cannot go any higher.
+        if (r.worstDb >= tmOpts.maxCorrectionDb - 0.01)
             msg += tmOpts.maxCorrectionDb >= 23.99f
                  ? L" \u2014 the most this effect will apply. A clip needing that much is "
                    L"not just differently EQ'd; check whether it belongs with the others"
@@ -2073,21 +2125,23 @@ struct App {
                    L"to move them closer";
         msg += L".";
 
-        // How close they actually ended up, which is the question the user is
-        // really asking. Both ends of the worst pair are named so the number can
-        // be checked by ear against the clips it describes.
-        if (before.db >= 0.0 && residual.db >= 0.0) {
-            msg += L"\n\nThe two clips furthest apart in tone were \u2018" + names[before.a]
-                 + L"\u2019 and \u2018" + names[before.b] + L"\u2019, " + db1(before.db)
-                 + L" dB apart. Afterwards the furthest apart are \u2018" + names[residual.a]
-                 + L"\u2019 and \u2018" + names[residual.b] + L"\u2019, " + db1(residual.db)
-                 + L" dB.";
-            // Two different failures, and the residual is what tells them apart:
-            // still far apart means the EQ was held back, already close means
-            // the clips now *measure* alike and anything still audible is not a
-            // spectral-average difference at all. Saying so beats letting the
-            // user re-run the same match with the same settings.
-            if (residual.db > 2.0)
+        // How close they actually ended up, which is the question the user is really
+        // asking. Both ends are named so the number can be checked by ear.
+        if (r.before.valid() && r.after.valid()) {
+            if (subject >= 0)
+                msg += L"\n\nIn tone, '" + s.names[subject] + L"' was " + db1(r.before.db)
+                     + L" dB from " + target + L"; afterwards, " + db1(r.after.db) + L" dB.";
+            else
+                msg += L"\n\nThe two clips furthest apart in tone were '" + s.names[r.before.a]
+                     + L"' and '" + s.names[r.before.b] + L"', " + db1(r.before.db)
+                     + L" dB apart. Afterwards the furthest apart are '" + s.names[r.after.a]
+                     + L"' and '" + s.names[r.after.b] + L"', " + db1(r.after.db) + L" dB.";
+            // Two different failures, and the residual is what tells them apart: still
+            // far apart means the EQ was held back, already close means the clips now
+            // *measure* alike and anything still audible is not a spectral-average
+            // difference at all. Saying so beats letting the user re-run the same
+            // match with the same settings.
+            if (r.after.db > 2.0)
                 msg += L" They are still some way apart: raise \u201CMaximum change\u201D, "
                        L"or lower \u201CSmoothing\u201D so the correction can follow finer "
                        L"detail.";
@@ -2097,11 +2151,11 @@ struct App {
                        L"not others, or background noise, none of which EQ can reach.";
         }
         msg += L"\n\nUndo (Ctrl+Z) to go back.";
-        if (unmeasured || mismatched) {
-            msg += L"\n\nSkipped ";
-            if (unmeasured) msg += std::to_wstring(unmeasured) + L" clip(s) too short to measure";
-            if (unmeasured && mismatched) msg += L" and ";
-            if (mismatched) msg += std::to_wstring(mismatched) + L" clip(s) of a different sample rate";
+        if (r.unmeasured || r.mismatched) {
+            msg += L"\n\nLeft out ";
+            if (r.unmeasured) msg += std::to_wstring(r.unmeasured) + L" clip(s) too short to measure";
+            if (r.unmeasured && r.mismatched) msg += L" and ";
+            if (r.mismatched) msg += std::to_wstring(r.mismatched) + L" clip(s) of a different sample rate";
             msg += L".";
         }
         MessageBoxW(hwnd, msg.c_str(), L"Match timbre", MB_ICONINFORMATION);
@@ -2272,10 +2326,10 @@ struct App {
         hotSelClip = -1; hotSelBtn = 0;
         libScroll = tlScrollX = tlScrollY = 0;
         followPlayhead = true;
-        // The reference clip and the noise captures are named after clips from the
-        // old project; keeping them would offer the user a menu of things that are
-        // no longer there.
-        tmReference.clear();
+        // The reference clip and the noise captures are clips from the old project;
+        // keeping them would offer the user a menu of things that are no longer
+        // there, or -- for the reference's id -- point at an unrelated clip.
+        matchRefClipId = -1;
         noiseProfile = dsp::NoiseProfile{};
         noiseProfileDesc.clear();
         noiseCaptures.clear();
@@ -2293,6 +2347,7 @@ struct App {
         engine.setSourceRate(rate);
         projectPath = path;
         previewClipId = -1; timelinePlaying = false;
+        matchRefClipId = -1;   // a clip id from the old project (see matchRefClipId)
         libScroll = tlScrollX = tlScrollY = 0;
         restoreViewState();   // selection + playhead saved with the project
         setTitle(); clampScroll(); refresh();
@@ -2535,11 +2590,13 @@ struct App {
             L"  \u2022 Or right-click \u2192 Add to \u201CTrack 1\u201D (with several tracks,\n"
             L"    Add to track \u25B8 picks one); it goes at the end of that track,\n"
             L"    and the view scrolls to show where it landed\n"
-            L"  \u2022 Right-click for save-selection, crop, normalize, voice cleaner\u2026\n"
+            L"  \u2022 Right-click for save-selection, crop, voice cleaner, matching\u2026\n"
             L"  \u2022 Voice cleaner cleans one clip, or all clips in the project\n"
             L"  \u2022 Remove non-voice silences bumps, shuffling and room tone\n"
             L"  \u2022 Match timbre evens out the tone differences between clips\n"
-            L"    recorded separately (mic distance, room, tone controls)\n"
+            L"    recorded separately (mic distance, room, tone controls), and\n"
+            L"    Match volume evens out their loudness \u2014 each to the average,\n"
+            L"    or to one clip you pick as the standard; one setting per clip\n"
             L"  \u2022 Drag the volume slider to change a clip's level\n\n"
             L"Full-window editor:\n"
             L"  \u2022 Drag across the big waveform to select; buttons to play/crop/save\n"
@@ -2560,7 +2617,10 @@ struct App {
             L"  \u2022 Right-click a placed clip to set the space before it exactly,\n"
             L"    or to close it \u2014 later clips move to match, either way\n"
             L"  \u2022 Drag a track's volume slider to change the track level\n"
-            L"  \u2022 Right-click a track header to clean/isolate voice, rename or remove the track\n"
+            L"  \u2022 Right-click a track header to clean/isolate voice, match timbre\n"
+            L"    or volume (this track, or all tracks), rename or remove the track\n"
+            L"  \u2022 Right-click a placed clip to match its timbre or volume to the\n"
+            L"    rest of its track\n"
             L"  \u2022 Click a lane or the ruler to move the playhead\n"
             L"  \u2022 Wheel scrolls sideways; Ctrl+wheel zooms; Shift+wheel scrolls\n"
             L"    vertically. A longer-than-the-window arrangement also gets a\n"
@@ -3235,7 +3295,7 @@ struct App {
                 // Read the identity out now: the menu is modal, and acting on it
                 // mutates the track, so the layout entry `pl` points into is not
                 // safe to touch afterwards.
-                const int gTrack = pl->trackId, gIndex = pl->index;
+                const int gTrack = pl->trackId, gIndex = pl->index, gClip = pl->clipId;
                 HMENU m = CreatePopupMenu();
                 AppendMenuW(m, MF_STRING, IDM_TL_GAP, L"Space before this clip\u2026");
                 AppendMenuW(m, MF_STRING, IDM_TL_CLOSEGAP, L"Close the space before this clip");
@@ -3248,6 +3308,15 @@ struct App {
                 AppendMenuW(m, MF_STRING | (rippleMode ? MF_CHECKED : 0), IDM_TL_RIPPLE,
                             L"Dragging a clip carries the later ones (Shift inverts)");
                 AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+                // Here, unlike on a library card, "the rest" has an obvious meaning:
+                // the other clips on the lane this one was right-clicked on.
+                const UINT rest = match::clipToTrack(doc.project(), gClip, gTrack).usable()
+                                ? 0 : MF_GRAYED;
+                AppendMenuW(m, MF_STRING | rest, IDM_TL_TIMBRE,
+                            L"Match this clip's timbre to the rest of the track\u2026");
+                AppendMenuW(m, MF_STRING | rest, IDM_TL_VOLUME,
+                            L"Match this clip's volume to the rest of the track\u2026");
+                AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
                 AppendMenuW(m, MF_STRING, IDM_TL_REMOVE, L"Remove from timeline");
                 POINT sp = p; ClientToScreen(hwnd, &sp);
                 int cmd = TrackPopupMenu(m, TPM_RETURNCMD, sp.x, sp.y, 0, hwnd, nullptr);
@@ -3256,6 +3325,8 @@ struct App {
                 else if (cmd == IDM_TL_GAP) editGapBefore(gTrack, gIndex);
                 else if (cmd == IDM_TL_CLOSEGAP) setGapBefore(gTrack, gIndex, 0, L"Close space before clip");
                 else if (cmd == IDM_TL_RIPPLE) toggleRippleMode();
+                else if (cmd == IDM_TL_TIMBRE) matchTimbreClips(match::clipToTrack(doc.project(), gClip, gTrack));
+                else if (cmd == IDM_TL_VOLUME) matchVolumeClips(match::clipToTrack(doc.project(), gClip, gTrack));
                 return;
             }
             // right-click a track header or empty lane -> track menu
@@ -3320,9 +3391,15 @@ struct App {
                     L"Voice cleaner \u2014 this track\u2026");
         AppendMenuW(m, MF_STRING | (hasClips ? 0 : MF_GRAYED), IDM_TRK_VOICEISO,
                     L"Remove non-voice \u2014 this track\u2026");
-        // Needs at least two clips to have anything to match; see matchTimbreClips.
-        AppendMenuW(m, MF_STRING | (t->clips.size() > 1 ? 0 : MF_GRAYED), IDM_TRK_TIMBRE,
-                    L"Match timbre \u2014 this track\u2026");
+        // Matching needs two distinct clips to have anything to match. "All tracks"
+        // lives here too because this is the menu someone thinking in tracks opens.
+        const UINT trk = match::trackSet(doc.project(), trackId).usable() ? 0 : MF_GRAYED;
+        const UINT all = match::timelineSet(doc.project()).usable() ? 0 : MF_GRAYED;
+        AppendMenuW(m, MF_STRING | trk, IDM_TRK_TIMBRE, L"Match timbre \u2014 this track\u2026");
+        AppendMenuW(m, MF_STRING | trk, IDM_TRK_VOLUME, L"Match volume \u2014 this track\u2026");
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(m, MF_STRING | all, IDM_TRK_TIMBRE_ALL, L"Match timbre \u2014 all tracks\u2026");
+        AppendMenuW(m, MF_STRING | all, IDM_TRK_VOLUME_ALL, L"Match volume \u2014 all tracks\u2026");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_TRK_RENAME, L"Rename track\u2026");
         AppendMenuW(m, MF_STRING | (doc.project().tracks.size() > 1 ? 0 : MF_GRAYED),
@@ -3332,7 +3409,10 @@ struct App {
         DestroyMenu(m);
         if (cmd == IDM_TRK_DENOISE) voiceCleanTrack(trackId);
         else if (cmd == IDM_TRK_VOICEISO) removeNonVoiceTrack(trackId);
-        else if (cmd == IDM_TRK_TIMBRE) matchTimbreTrack(trackId);
+        else if (cmd == IDM_TRK_TIMBRE) matchTimbreClips(match::trackSet(doc.project(), trackId));
+        else if (cmd == IDM_TRK_VOLUME) matchVolumeClips(match::trackSet(doc.project(), trackId));
+        else if (cmd == IDM_TRK_TIMBRE_ALL) matchTimbreClips(match::timelineSet(doc.project()));
+        else if (cmd == IDM_TRK_VOLUME_ALL) matchVolumeClips(match::timelineSet(doc.project()));
         else if (cmd == IDM_TRK_RENAME) {
             std::wstring nm = t->name;
             if (dlg::promptText(hwnd, L"Rename track", L"Track name:", nm)) { doc.renameTrack(trackId, nm); refresh(); }
@@ -3405,8 +3485,6 @@ struct App {
             AppendMenuW(m, MF_POPUP, (UINT_PTR)sub, L"Add to track");
         }
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(m, MF_STRING, IDM_NORM_MATCH, L"Normalize to match other clips");
-        AppendMenuW(m, MF_STRING, IDM_NORM_ALL, L"Normalize all clips (all tracks)");
         // The range an effect runs over is picked here rather than inside the
         // dialog, so it's visible before committing to opening one. The selection
         // entry is greyed (not hidden) so it reads as an available option even
@@ -3440,10 +3518,22 @@ struct App {
         AppendMenuW(vi, MF_STRING, IDM_VOICEISO, L"This clip\u2026");
         AppendMenuW(vi, MF_STRING, IDM_VOICEISO_ALL, L"All clips (whole project)\u2026");
         AppendMenuW(m, MF_POPUP, (UINT_PTR)vi, L"Remove non-voice (bumps, shuffling)");
-        // A set operation, so it sits at the top level rather than in a
-        // this-clip / all-clips submenu: there is no "this clip" version.
-        AppendMenuW(m, MF_STRING | (doc.project().library.size() > 1 ? 0 : MF_GRAYED),
-                    IDM_TIMBRE_ALL, L"Match timbre across all clips\u2026");
+        // The two matchers take the same ranges, in the same order, so that what
+        // "the others" means can't differ between them: this clip made like the rest
+        // of the library, the clips on the timeline made alike, or the whole library.
+        // Each entry is greyed when it has nothing to match.
+        const UINT one = match::clipToLibrary(doc.project(), clipId).usable() ? 0 : MF_GRAYED;
+        const UINT tl  = match::timelineSet(doc.project()).usable() ? 0 : MF_GRAYED;
+        const UINT lib = match::librarySet(doc.project()).usable() ? 0 : MF_GRAYED;
+        auto matchMenu = [&](const wchar_t* title, int idOne, int idTl, int idLib) {
+            HMENU sub = CreatePopupMenu();
+            AppendMenuW(sub, MF_STRING | one, idOne, L"This clip, to match the others\u2026");
+            AppendMenuW(sub, MF_STRING | tl, idTl, L"Clips on the timeline (all tracks)\u2026");
+            AppendMenuW(sub, MF_STRING | lib, idLib, L"All clips (whole project)\u2026");
+            AppendMenuW(m, MF_POPUP, (UINT_PTR)sub, title);
+        };
+        matchMenu(L"Match timbre (EQ)", IDM_TIMBRE_ONE, IDM_TIMBRE_TL, IDM_TIMBRE_LIB);
+        matchMenu(L"Match volume", IDM_VOL_ONE, IDM_VOL_TL, IDM_VOL_LIB);
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_RENAME, L"Rename\u2026");
         AppendMenuW(m, MF_STRING, IDM_DELETE, L"Delete clip");
@@ -3467,8 +3557,6 @@ struct App {
         else if (cmd == IDM_EXPORTCLIP) exportClipAudio(clipId, false);
         else if (cmd == IDM_EXPORTSEL) exportClipAudio(clipId, true);
         else if (cmd == IDM_SPLITOUTSEL) { selClipId = clipId; splitSelectionOutToFile(clipId); }
-        else if (cmd == IDM_NORM_MATCH) normalizeClip(clipId, false);
-        else if (cmd == IDM_NORM_ALL) normalizeClip(clipId, true);
         else if (cmd == IDM_DENOISE) voiceCleanClip(clipId);
         else if (cmd == IDM_DENOISE_SEL) voiceCleanClipSelection(clipId);
         else if (cmd == IDM_DENOISE_ALL) voiceCleanAllClips();
@@ -3477,7 +3565,12 @@ struct App {
         else if (cmd == IDM_VOICEISO) removeNonVoiceClip(clipId);
         else if (cmd == IDM_VOICEISO_SEL) removeNonVoiceClipSelection(clipId);
         else if (cmd == IDM_VOICEISO_ALL) removeNonVoiceAllClips();
-        else if (cmd == IDM_TIMBRE_ALL) matchTimbreAllClips();
+        else if (cmd == IDM_TIMBRE_ONE) matchTimbreClips(match::clipToLibrary(doc.project(), clipId));
+        else if (cmd == IDM_TIMBRE_TL)  matchTimbreClips(match::timelineSet(doc.project()));
+        else if (cmd == IDM_TIMBRE_LIB) matchTimbreClips(match::librarySet(doc.project()));
+        else if (cmd == IDM_VOL_ONE) matchVolumeClips(match::clipToLibrary(doc.project(), clipId));
+        else if (cmd == IDM_VOL_TL)  matchVolumeClips(match::timelineSet(doc.project()));
+        else if (cmd == IDM_VOL_LIB) matchVolumeClips(match::librarySet(doc.project()));
         else if (cmd >= IDM_APPLYCAP_BASE && cmd < IDM_APPLYCAP_BASE + 100)
             applyCaptureToClip(clipId, cmd - IDM_APPLYCAP_BASE);
         else if (cmd == IDM_RENAME) renameClip(clipId);

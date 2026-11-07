@@ -18,8 +18,9 @@ sync with behavior changes.
 | `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker; `chain()` flattens the walkable line for the History window and `gotoNode()` jumps to any point on it; `allNodes()`/`rebuild()` round-trip the whole tree through the project file, `hasSnapshot` marks steps stored by name only, and `~UndoNode` tears down iteratively so a long history can't overflow the stack |
 | `document.{h,cpp}` | Owns `Project` + undo tree + `ViewState`; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`); `history()`/`gotoHistory()` expose the step list |
 | `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms, voice isolation, LTAS timbre matching, manual region edits (see below) |
+| `match.{h,cpp}` | Making clips alike, shared by the volume and timbre matchers: which clips a command involves (`ClipSet` — a track, all tracks, the library, or one clip to the rest), what they are matched to, and each matcher's compute-and-measure pass (`matchVolume`, `matchTimbre`); pure, so the selftest reaches it |
 | `waveform.{h,cpp}` | GDI oscilloscope: per-column min/max envelope (one `PolyPolyline`) zoomed out, per-sample trace zoomed in |
-| `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner options, history list, file/project pickers |
+| `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner, remove-non-voice, match-timbre and match-volume options, history list, file/project pickers |
 | `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`), toolbar row wrapping (`flowButtons` for the editor toolbar, `flowTransport` for the main transport bar), scrollbar sizing (`scrollBarsNeeded`, `scrollThumb`, `scrollFromThumb`), and `scrollToReveal` |
 | `transport.h` | Pure play/pause decision logic, likewise split out to be testable: `decide(State, Press)` → pause / resume / restart-from-where, for both the single combined control and the editor's labelled button pair |
 | `selhistory.h` | Pure undo/redo state machine for the waveform selection, kept out of the document's snapshot tree; a `base` token ties the stack to a point in the document history |
@@ -287,8 +288,9 @@ fixes it.
 the *content* — which words happened to be said — and leaves the recording
 chain's colouration. The ratio between two clips' LTASs is therefore exactly the
 EQ that turns one clip's tone into the other's, and applying it is the whole
-algorithm. This is precisely parallel to `normalizeClips`, which matches one
-number (loudness); this matches the whole curve.
+algorithm. This is precisely parallel to volume matching, which matches one
+number (loudness); this matches the whole curve — and the two share their scopes,
+reference and reporting (see *Matching clips to each other* below).
 
 **What it can't fix**, because these are not spectral-average differences:
 reverb and early reflections (a room tail is a *time* difference — EQ cannot add
@@ -386,79 +388,171 @@ Framing is 2048/512 — deliberately identical to the voice detector's, so
   top octave. Returns `-1` for profiles that aren't comparable, which lets the
   caller feed it a whole array including invalid entries without filtering first.
 
+## Matching clips to each other: volume and timbre (`match.{h,cpp}`)
+
+Two commands make separately-recorded clips alike: **Match timbre** (the LTAS EQ
+above) and **Match volume** (each clip's speech level, written as its volume). They
+differ only in what they measure and what they write back. Everything else is one
+question asked twice — which clips are involved, which of them change, what they are
+matched to, and how close they ended up — and that part lives in `match.cpp`, out of
+`ui.cpp`, so the two cannot come to disagree about what "this track" or "the others"
+means, and so the selftest can reach it. `ui.cpp` keeps only the dialogs, the commit
+and the wording of the summary box (`matchVolumeClips` / `matchTimbreClips`).
+
+**One setting per clip.** Volume matching writes one gain per clip; timbre matching
+bakes in one static EQ curve per clip — the same gain on every STFT frame from the
+first sample to the last — plus one loudness scalar. Nothing adapts over the course of
+a clip. That is deliberate, and a selftest pins it: a level or tone change *inside* a
+take is the performance (or a different problem), and a matcher that followed the clip
+along would flatten it, and would create a seam of its own wherever its estimate moved.
+
+### Which clips: `ClipSet`
+
+A `ClipSet` is built before any audio is looked at: the clip ids (display order,
+deduplicated, only clips with audio) and two flags per clip — **`change`** (it is
+matched) and **`pool`** (it counts toward "the average" and may be picked as the
+standard). It has one of two shapes:
+
+| Shape | `change` | `pool` | Built by |
+|---|---|---|---|
+| a **set** made alike | every clip | every clip | `trackSet` (one track), `timelineSet` (all tracks), `librarySet` (the whole project) |
+| **one clip to the rest** | that clip | the others | `clipToTrack` (the rest of its track), `clipToLibrary` (every other clip) |
+
+In the second shape the matched clip is **kept out of its own average**: counting it
+would only move it part of the way. `usable()` — two clips for a set, at least one
+other for one-to-the-rest — is what greys the menu entries.
+
+`timelineSet` exists beside `librarySet` because "all tracks" is what someone thinking
+in tracks means, and the library also holds things that are not takes — the source
+recording a clip was cut from, an outtake, a noise sample — which would pull an
+average away from the voice. A clip placed twice is one clip with one volume and one
+tone colour, so it is counted once rather than given a double say in the average.
+
+Where each shape is offered:
+
+| Menu | Entries |
+|---|---|
+| Library card | *Match timbre (EQ) ▸* and *Match volume ▸*, each: *This clip, to match the others…* (`clipToLibrary`), *Clips on the timeline (all tracks)…*, *All clips (whole project)…* |
+| Track header | *Match timbre — this track…*, *Match volume — this track…*, and the same two for *all tracks* |
+| Placed clip | *Match this clip's timbre / volume to the rest of the track…* (`clipToTrack`) |
+
+"The rest of its track" is offered only from the timeline, where it has one meaning; a
+library card can be on several tracks, or on none. Both submenus list the same scopes
+in the same order.
+
+Neither matcher has a selection-only variant. A volume is per clip by definition, and
+a tone colour is a property of a whole take: EQ'ing half a clip differently from the
+other half would create exactly the audible seam this exists to remove, which is why
+`blendProcessedRange` is not used here.
+
+### What to match to: the reference
+
+Both dialogs show the same **Match to:** combo (`dlg::MatchReference`, built by
+`refCombo` in `dialogs.cpp`): the average of the pool first, then each pool clip —
+"Sound like 'take 2'" for timbre, "As loud as 'take 2'" for volume. The average is the
+geometric mean in both (of power per bin, of speech level): the target that moves each
+clip the least and favours none of them.
+
+**The standard is not touched.** Its volume stays what it is — it is matched *at* its
+current volume, as it is heard — and its audio is not run through the timbre filter at
+all: an identity filter would cost a pass and could only add rounding to the one clip
+the user said was right.
+
+**The remembered choice is `App::matchRefClipId`, one clip id shared by both
+matchers.** Shared, because choosing a standard is a statement about a take ("this one
+sounds right"), so matching tone and then volume to it shouldn't mean choosing it
+twice. An id, because the choice outlives the dialog and the lists differ between
+commands: a list position from last time would quietly come to mean another clip, and
+a name is ambiguous whenever two clips share one. `ClipSet::referenceFor(id)`
+preselects it only when it is in *this* pool, and otherwise the average. Ids are unique
+only within a project, so New and Open forget it.
+
+### Volume matching
+
+`match::matchVolume(project, set, reference)` measures each clip's speech level
+(`dsp::speechLoudness`, which ignores the pauses) **at its current volume**, so a clip
+already at the target stays put and the standard keeps its own. Each matched clip's
+new volume is `target / level`, held to **−26 … +24 dB** (`kMinMatchGain`,
+`kMaxMatchGain`). The top is `kMaxClipGain`, the same constant `Document` clamps every
+clip volume to, so "it was held at the limit" is true. A change of **under 0.01 dB
+counts as none** — it is rounding — so re-running a match that already holds changes
+nothing, and `Document::setClipGains` (one undo step for all of them) records nothing
+when no volume moved.
+
+It is non-destructive: it moves the clips' volume sliders and leaves their audio alone.
+The dialog says so outright, because the timbre matcher next to it does rewrite audio,
+and the difference decides whether "I can still adjust it afterwards" is true.
+
+Silent clips (below about −100 dB FS, or turned all the way down) are left out and
+counted. The summary box reports **before and after**, like timbre's — for a set, the
+loudest and the quietest clip, named, and how far apart they are; for one clip to the
+rest, its distance from the target — and then warns about the three things that make a
+correct match still sound wrong:
+
+- **Held at a limit.** A clip needing more than −26 … +24 dB is usually different in
+  some other way too; the box names it and says to check it belongs.
+- **Over full scale.** The mix clamps at ±1 (`renderMix`, the engine), so raising a
+  quiet but peaky clip can make it distort with nothing on screen to show it. Judged at
+  the volume of the loudest unmuted track the clip plays on (unplaced: its own volume),
+  and reported with how far over it goes.
+- **Tracks at different volumes.** Track volume multiplies clip volume and matching
+  sets only clip volumes, so clips on tracks set differently still differ in the mix by
+  exactly that. Muted tracks don't count; 0.1 dB apart is the same volume.
+
 ### Timbre matching in the app
 
-`App::tmOpts` + `App::tmReference` (session-persisted) → `matchTimbreTrack` /
-`matchTimbreAllClips` funnel into `matchTimbreClips(ids, scopeLabel)`. One
-options dialog (`dlg::timbreMatch`), then every target clip is filtered and
-committed through `Document::replaceClipBuffers` as **one undo step**. Menu ids
-`IDM_TIMBRE_ALL` (clip menu, top level) and `IDM_TRK_TIMBRE` (track header menu).
+`match::matchTimbre(project, set, reference, opts)` measures every clip *before*
+filtering anything, because the target may be their average, and a clip that can't be
+measured must be left alone rather than filtered by a curve derived from nothing. The
+first matched clip sets the sample rate — in one-to-the-rest that is the clip being
+matched, which must not be the one left out — and clips of another rate are left out
+and counted: spectra are only comparable bin-for-bin at one rate, and a clip missing
+from the match is exactly the one that will still sound different. The results are
+committed through `Document::replaceClipBuffers` as **one undo step**.
 
-Three ways this differs from the other two effects, all following from it being a
-**set** operation rather than a per-clip one:
-
-1. **No "this clip" scope and no selection-only variant.** There is nothing to
-   match a lone clip *to*, so both entries are greyed below two clips. A tone
-   colour is a property of a whole take, and EQ'ing half a clip differently from
-   the other half would create exactly the audible seam this exists to remove —
-   which is why `blendProcessedRange` is not used here.
-2. **The dialog also picks the reference**: the average of the set (default) or
-   one named clip ("Sound like 'take 2'"). The average is the geometric mean, so
-   it moves each clip as little as possible and favours none — the same reasoning
-   as `normalizeClips`' geometric-mean-of-loudness target.
-3. **`tmReference` is stored as a clip *name*, not an index.** The choice
-   outlives the dialog that made it and the set it was chosen from changes (a
-   different track, a clip renamed or deleted); an index into last time's list
-   would silently come to mean a different clip.
-
-All profiles are measured *before* anything is filtered, because the target may
-be their average and a clip that can't be measured must be left alone rather than
-filtered by a curve derived from nothing. Clips of a sample rate other than the
-first one's are skipped — spectra are only comparable bin-for-bin at one rate —
-and the summary box names the count, since a clip missing from the match is
-exactly the one that will still sound different. The box also reports the largest
-correction applied — **at what frequency and to which clip**, since "8 dB at
-250 Hz" is a mic distance and "8 dB at 40 Hz" is a fan, and since across two
-dozen takes the figure is set by a single outlier that the user can go and look
-at — and says so explicitly when the clamp bit, so a partial match doesn't read
-as a broken one. When the clamp that bit is the effect's own 24 dB ceiling rather
-than a lower value the user chose, the message says *that* instead of sending
+The summary box reports the largest correction applied — **at what frequency and to
+which clip**, since "8 dB at 250 Hz" is a mic distance and "8 dB at 40 Hz" is a fan,
+and since across two dozen takes the figure is set by a single outlier that the user
+can go and look at — and says so explicitly when the clamp bit, so a partial match
+doesn't read as a broken one. When the clamp that bit is the effect's own 24 dB ceiling
+rather than a lower value the user chose, the message says *that* instead of sending
 them back to a field that cannot go any higher.
 
-**Numeric fields snap to their range on `EN_KILLFOCUS`** (`vcSnapEdit`), and the
-range is written into the label — *"Maximum change (0–24 dB)"*. This came from a
-real report: a user set the limit to 50, then to 100, and got "24 dB, which is
-the limit you set" both times. `vcReadDouble` clamps silently, so the typed value
-vanished with nothing on screen ever mentioning a ceiling, and raising the number
-could not possibly help. Snapping the box makes the cap discoverable by using the
-dialog, and makes every "the limit you set" message true. The ceiling itself
-stays at 24 dB on purpose: beyond that a static EQ is no longer matching a tone
-colour, it is lifting one clip's noise floor into audibility.
+**Numeric fields snap to their range on `EN_KILLFOCUS`** (`vcSnapEdit`), and the range
+is written into the label — *"Maximum change (0–24 dB)"*. This came from a real
+report: a user set the limit to 50, then to 100, and got "24 dB, which is the limit you
+set" both times. `vcReadDouble` clamps silently, so the typed value vanished with
+nothing on screen ever mentioning a ceiling, and raising the number could not possibly
+help. Snapping the box makes the cap discoverable by using the dialog, and makes every
+"the limit you set" message true. The ceiling itself stays at 24 dB on purpose: beyond
+that a static EQ is no longer matching a tone colour, it is lifting one clip's noise
+floor into audibility.
 
-**The summary reports the residual, not just the correction.** After filtering,
-every result buffer is profiled a second time and `worstTimbrePair` picks the two
-clips furthest apart by `timbreDistanceDb`, before and after — *"‘take3’ and
-‘take5’ were 7.2 dB apart; afterwards the furthest apart are ‘take1’ and ‘take4’,
-0.9 dB."* The worst pair rather than an average, because an average hides one
-stubborn clip among five that agree and that clip is exactly the one the ear
-picks out; both ends are **named** so the number can be checked by ear against
-the clips it describes.
+**The summary reports the residual, not just the correction.** After filtering, every
+result is profiled a second time. For a set, the two clips furthest apart by
+`timbreDistanceDb` are named before and after — *"'take3' and 'take5' were 7.2 dB
+apart; afterwards the furthest apart are 'take1' and 'take4', 0.9 dB."* The worst pair
+rather than an average, because an average hides one stubborn clip among five that
+agree and that clip is exactly the one the ear picks out; both ends are **named** so the
+number can be checked by ear against the clips it describes. For one clip to the rest it
+is that clip's distance from the target, before and after.
 
 This exists because "I matched the timbre and they still sound different" has two
-completely different causes and the user cannot tell which they have. A residual
-still above 2 dB means the EQ was held back (the box says: raise the clamp, or
-lower Smoothing to let the curve follow finer detail). A residual near 0 means
-the clips now *measure* alike, so whatever is still audible is not a
-spectral-average difference at all — reverb, compression on some clips but not
-others, or background noise — and the box says that instead, because re-running
-the same match with the same settings is otherwise the obvious next thing to try
-and it cannot possibly help. The cost is one extra profiling pass over the audio,
-which is worth it: without the number, distinguishing the two cases is guesswork.
+completely different causes and the user cannot tell which they have. A residual still
+above 2 dB means the EQ was held back (the box says: raise the clamp, or lower
+Smoothing to let the curve follow finer detail). A residual near 0 means the clips now
+*measure* alike, so whatever is still audible is not a spectral-average difference at
+all — reverb, compression on some clips but not others, or background noise — and the
+box says that instead, because re-running the same match with the same settings is
+otherwise the obvious next thing to try and it cannot possibly help. The cost is one
+extra profiling pass over the audio, which is worth it: without the number,
+distinguishing the two cases is guesswork.
 
 ## Applying an effect to the selection only
 
 Both the voice cleaner and remove-non-voice can be limited to the current
-waveform selection instead of the whole clip. Timbre matching cannot — see above.
+waveform selection instead of the whole clip. The two matchers cannot — see
+*Matching clips to each other* above.
 
 **The range is chosen in the right-click menu, not in the dialog.** Each effect's
 submenu lists its scopes directly:
@@ -1406,14 +1500,18 @@ pattern: a Sensitivity preset combo, numeric Attenuation / Hold / Fade edits
 radios, with the scope (`'clip name'`, `all clips (N clips)`, `track 'x'`) shown
 in the dialog so a project-wide run can't be triggered by accident.
 
-`dlg::timbreMatch(parent, TimbreMatchContext&)` adds one thing the other two
-don't need: a **reference combo** listing "The average of them all" followed by
-"Sound like '<clip>'" for each clip in the set. The context carries the names in
-and the chosen index (`-1` = average) back out. Clip names are clamped to
-`S(320)` when sizing the combo so a long name can't stretch the dialog off the
-screen. Otherwise it is the same shape as `voiceIsolate`: numeric Maximum-change
-and Smoothing edits through `vcReadDouble`, a Keep-loudness checkbox, and the
-scope line.
+`dlg::timbreMatch(parent, TimbreMatchContext&)` and
+`dlg::volumeMatch(parent, VolumeMatchContext&)` add one thing the other two don't
+need: a **reference combo** (`refCombo` / `refComboW` / `refChoice`, shared so the two
+can't diverge) listing the average first — "The average of them all", or for one clip
+to the rest "The average of the other 7 clips on 'Voice'" — followed by "Sound like
+'<clip>'" / "As loud as '<clip>'" for each pool clip. `dlg::MatchReference` carries
+the labels in and the chosen index (`-1` = average) back out; the caller maps that to
+a set index. Clip items are clamped to `S(320)` when sizing the combo so a long name
+can't stretch the dialog off the screen. Beyond that, the timbre dialog is the same
+shape as `voiceIsolate` — numeric Maximum-change and Smoothing edits through
+`vcReadDouble`, a Keep-loudness checkbox, and the scope line — and the volume dialog
+is just the info paragraph, the scope line and the combo.
 
 ## Selftest
 
@@ -1546,6 +1644,29 @@ Scaling a clip by 0.25 must leave the distance at 0, or the report would call tw
 identically-coloured takes different merely because one is quieter, which is
 exactly the confusion the number exists to remove.
 
+**Matching clips to each other** (`match.h`, 33 checks) is tested on `Document`s
+built in the test, with deterministic noise whose levels are in known ratios so the
+expected volumes are exact. *Sets*: a clip placed twice on a track counts once, a clip
+with no audio is skipped, all-tracks leaves out a clip on no track, the library takes
+every clip, one-clip-to-the-rest keeps the clip out of its own pool, a remembered
+standard is found by id and never resolves to the matched clip or one outside the set,
+and a lone clip or a lone track is not `usable()`. *Volume*: levels 0.05 / 0.1 / 0.2
+match to gains 2 / 1 / ½ exactly (the geometric mean), the clip already at the target
+keeps its gain bit-for-bit, the before-spread names the loudest and quietest (12.04 dB)
+and the after-spread is 0; the gains commit as one undo step that one undo reverses,
+and re-running the match changes nothing and adds no step; a standard is matched at
+its own volume (gain 1.5 → the others to 6 and 3) and keeps it; one clip to the rest
+goes to the *others'* average (4×, not the 2.5× that counting itself would give); a
+silent clip is left alone and counted; a clip needing +40 dB is held at +24 and the
+after-spread says 15.9 dB short; a spike pushed over full scale is reported at
++5.1 dB, and not once its track is turned down; differing track volumes are pointed
+out and equal ones are not. *Timbre*: one clip to the rest filters only that clip and
+lands it 0.38 dB from the others' average (from 2.26); the standard is never put
+through the filter; and **one EQ per clip** — a clip whose second half is brighter
+than its first keeps exactly that difference after matching (2.229 dB before and
+after), while the control, EQ'ing each half on its own as a time-varying matcher
+would, flattens it to 0.55 dB, proving the measure can tell the two apart.
+
 The **band limit** is pinned by a case built to break the old behaviour: `clipA`
 against a copy of itself with a loud 30 Hz tone added, i.e. two takes identical
 where speech lives and wildly different below it. That must produce essentially
@@ -1571,7 +1692,9 @@ the fork point reporting `branches == 2`.
 
 Voice cleaning (any algorithm), voice isolation and timbre matching replace clip
 buffers and commit **one snapshot per operation** — a track-wide or project-wide
-clean / isolation / match is a single undo step.
+clean / isolation / match is a single undo step. Volume matching changes only clip
+volumes, through `Document::setClipGains`, and is likewise one step for the whole set
+(none at all when nothing moved).
 
 ## History window and undo feedback
 
@@ -1742,8 +1865,9 @@ would resurrect clips the user just threw away), and `markSaved` so a new projec
 doesn't start dirty. The UI half is everything in `App` that *pointed into* the
 old project and would otherwise name something that no longer exists: preview and
 playback state, both selections and the selection-save, the hover ids, scroll
-offsets, the clip-editor overlay, any drag in progress, `tmReference`, and the
-noise captures. Session **preferences** deliberately survive — effect options,
+offsets, the clip-editor overlay, any drag in progress, `matchRefClipId` (also
+reset on Open: it is a clip id, and ids only mean something within one project), and
+the noise captures. Session **preferences** deliberately survive — effect options,
 ripple mode — because they describe how the user works rather than this project.
 
 `rate` is restored from `App::nativeRate` (the device rate, floored at 48 kHz,

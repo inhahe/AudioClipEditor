@@ -11,7 +11,9 @@ int runSelfTest();  // selftest.cpp
 // their layout is only as good as the measurements in DlgUI — being able to
 // bring one up in isolation is how that gets checked. Append "sel" to exercise
 // the long "Applies to: the selection in ..." scope label, which is the widest
-// thing either effect dialog has to fit.
+// thing either effect dialog has to fit -- or, for the two matchers (5 = timbre,
+// 6 = volume), the one-clip-to-the-rest wording and its longer "average of the
+// other N clips on ..." reference item.
 static int runDialogTest(HINSTANCE hInst, int which, bool withSelection) {
     WNDCLASSW wc{}; wc.lpfnWndProc = DefWindowProcW; wc.hInstance = hInst;
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); wc.lpszClassName = L"ACE_DlgTestParent";
@@ -37,6 +39,26 @@ static int runDialogTest(HINSTANCE hInst, int which, bool withSelection) {
     } else if (which == 3) {
         mfio::ExportOptions o; std::wstring path;
         dlg::exportOptions(p, o, path, L"clip");
+    } else if (which == 5 || which == 6) {
+        dlg::MatchReference ref;
+        ref.averageLabel = withSelection ? L"The average of the other 7 clips on 'Narration'"
+                                         : L"The average of them all";
+        ref.clipNames = { L"consciousness p1s1", L"consciousness p1s2",
+                          L"a take with a rather long name that goes on and on", L"p2s1" };
+        ref.choice = 1;
+        const std::wstring matchScope =
+            withSelection ? L"'consciousness p1s3' only, matched to the other 7 clips on 'Narration'"
+                          : L"track 'Narration' (8 clips)";
+        if (which == 5) {
+            dsp::TimbreMatchOptions o;
+            dlg::TimbreMatchContext ctx;
+            ctx.opts = &o; ctx.ref = ref; ctx.scopeLabel = matchScope;
+            dlg::timbreMatch(p, ctx);
+        } else {
+            dlg::VolumeMatchContext ctx;
+            ctx.ref = ref; ctx.scopeLabel = matchScope;
+            dlg::volumeMatch(p, ctx);
+        }
     } else {
         std::wstring t = L"consciousness p1s1";
         dlg::promptText(p, L"Rename clip", L"Clip name:", t);

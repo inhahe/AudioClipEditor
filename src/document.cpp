@@ -1,5 +1,4 @@
 #include "document.h"
-#include "dsp.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -264,54 +263,28 @@ int64_t Document::rippleClips(int trackId, int placedIndex, int64_t delta, const
 void Document::setClipGain(int id, float g, const std::wstring& desc) {
     Clip* c = project_.findClip(id);
     if (!c) return;
-    c->gain = std::max(0.0f, std::min(16.0f, g));
+    c->gain = std::max(0.0f, std::min(kMaxClipGain, g));
     commit(desc);
+}
+
+bool Document::setClipGains(const std::vector<std::pair<int, float>>& gains,
+                            const std::wstring& desc) {
+    bool any = false;
+    for (const auto& u : gains) {
+        Clip* c = project_.findClip(u.first);
+        if (!c) continue;
+        const float g = std::max(0.0f, std::min(kMaxClipGain, u.second));
+        if (g != c->gain) { c->gain = g; any = true; }
+    }
+    if (any) commit(desc);
+    return any;
 }
 
 void Document::setTrackGain(int id, float g, const std::wstring& desc) {
     Track* t = project_.findTrack(id);
     if (!t) return;
-    t->gain = std::max(0.0f, std::min(16.0f, g));
+    t->gain = std::max(0.0f, std::min(kMaxClipGain, g));
     commit(desc);
-}
-
-int Document::normalizeClips(int onlyClipId, bool acrossAll) {
-    // Measure speech loudness of every clip that has audio.
-    struct M { int id; double loud; float gain; };
-    std::vector<M> ms;
-    for (auto& c : project_.library) {
-        if (!c.buffer || c.frames() == 0) continue;
-        double L = dsp::speechLoudness(*c.buffer);
-        if (L < 1e-5) continue;   // effectively silent - skip
-        ms.push_back({ c.id, L, c.gain });
-    }
-    if (ms.empty()) return 0;
-
-    // Target = geometric mean of effective (current) loudness of the reference set.
-    // Reference set for "match others" excludes the clip being normalized.
-    double sumLogEff = 0; int cnt = 0;
-    for (auto& m : ms) {
-        if (!acrossAll && onlyClipId >= 0 && m.id == onlyClipId) continue; // exclude self
-        sumLogEff += std::log(m.loud * std::max(1e-4f, m.gain));
-        ++cnt;
-    }
-    if (cnt == 0) { // only one clip existed - fall back to unity target
-        for (auto& m : ms) { sumLogEff += std::log(m.loud * std::max(1e-4f, m.gain)); ++cnt; }
-    }
-    double target = std::exp(sumLogEff / cnt);
-
-    int changed = 0;
-    for (auto& c : project_.library) {
-        if (onlyClipId >= 0 && !acrossAll && c.id != onlyClipId) continue;
-        double L = 0;
-        for (auto& m : ms) if (m.id == c.id) L = m.loud;
-        if (L < 1e-5) continue;
-        float g = (float)(target / L);
-        g = std::max(0.05f, std::min(16.0f, g));
-        if (std::fabs(g - c.gain) > 1e-4f) { c.gain = g; ++changed; }
-    }
-    if (changed) commit(acrossAll ? L"Normalize all clips" : L"Normalize clip volume");
-    return changed;
 }
 
 AudioBufferPtr Document::renderMix() const {

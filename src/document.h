@@ -77,9 +77,11 @@ public:
     // --- Volume ---
     void setClipGain(int id, float g, const std::wstring& desc);
     void setTrackGain(int id, float g, const std::wstring& desc);
-    // Speech-aware normalization (ignores silent gaps). matchTarget from either
-    // the other clips only, or every clip. Returns number of clips changed.
-    int normalizeClips(int onlyClipId /* -1 = all */, bool acrossAll);
+    // Set several clips' volumes as one undo step -- what volume matching commits
+    // (see match::matchVolume). Each pair is (clip id, new linear gain), clamped like
+    // setClipGain. Records nothing and returns false if no volume actually changed,
+    // so matching clips that already match leaves no do-nothing step in the history.
+    bool setClipGains(const std::vector<std::pair<int, float>>& gains, const std::wstring& desc);
 
     // --- Project I/O and mixdown ---
     // `withHistory` writes the undo tree into the file (format v4) so reopening the

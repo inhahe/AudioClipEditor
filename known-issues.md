@@ -36,7 +36,7 @@ fix belongs in `design.md`.
   `BufferPool` with every superseded `AudioBuffer` the history refers to, and
   `buildPeaks` runs over each one.
 - **Symptom:** opening a project with a long history of *destructive* edits
-  (timbre match, noise reduction, normalise) costs both memory and load time in
+  (timbre match, noise reduction, remove non-voice) costs both memory and load time in
   proportion to the history, not to the project. The audio budget caps this at
   512 MB of superseded samples on top of the project itself, so it is bounded,
   but the worst case is a noticeably slower open and a much larger process.

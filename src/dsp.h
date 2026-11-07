@@ -143,7 +143,7 @@ TimbreProfile computeTimbreProfile(const AudioBuffer& buf);
 // The consensus timbre of a set: the per-bin mean of their log spectra, i.e. the
 // geometric mean of their power. Matching everything to this moves each clip as
 // little as possible and favours none of them -- the same reasoning as
-// Document::normalizeClips using the geometric mean of loudness. Profiles that
+// match::matchVolume using the geometric mean of loudness. Profiles that
 // are invalid, or of a different sample rate than the first valid one, are
 // ignored.
 TimbreProfile averageTimbre(const std::vector<TimbreProfile>& profiles);

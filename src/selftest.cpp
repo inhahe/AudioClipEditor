@@ -8,6 +8,7 @@
 #include "document.h"
 #include "engine.h"
 #include "layout.h"
+#include "match.h"
 #include "transport.h"
 #include "selhistory.h"
 #include "snap.h"
@@ -2464,6 +2465,297 @@ int runSelfTest() {
               L"timbre: audio shorter than one window can't be profiled");
         check(dsp::matchTimbre(*tiny, pa, opt) == nullptr,
               L"timbre: a clip too short to measure is refused");
+    }
+
+    // ---- matching clips to each other (match.h): which clips, volume, timbre
+    {
+        const int RATE = 48000;
+        // Deterministic shaped noise (the timbre section's generator, with a seed and
+        // an amplitude). The same seed at two amplitudes gives speech levels in
+        // exactly that ratio, so the gains a volume match should produce are known.
+        auto noise = [](double amp, double tilt, double seconds, uint32_t seed) {
+            auto b = std::make_shared<AudioBuffer>();
+            b->sampleRate = 48000; b->channels = 1;
+            const int64_t n = (int64_t)(48000 * seconds);
+            b->samples.resize((size_t)n);
+            uint32_t s = seed;
+            double y = 0.0, prev = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                s = s * 1664525u + 1013904223u;
+                const double w = (double)(int32_t)(s >> 1) / 1073741824.0 - 1.0;
+                y = 0.7 * y + 0.3 * w;
+                const double v = y - tilt * prev;
+                prev = y;
+                b->samples[(size_t)i] = (float)(amp * v);
+            }
+            return b;
+        };
+        // A one-second 220 Hz sine whose peak is known: `amp`, or `spike` at one sample.
+        auto tone = [](double amp, double spike) {
+            auto b = std::make_shared<AudioBuffer>();
+            b->sampleRate = 48000; b->channels = 1;
+            b->samples.resize(48000);
+            for (int i = 0; i < 48000; ++i)
+                b->samples[(size_t)i] = (float)(amp * std::sin(2.0 * 3.14159265358979 * 220.0 * i / 48000.0));
+            if (spike > 0.0) b->samples[24000] = (float)spike;
+            return b;
+        };
+        auto slice = [](const AudioBuffer& src, int64_t f0, int64_t f1) {
+            auto b = std::make_shared<AudioBuffer>();
+            b->sampleRate = src.sampleRate; b->channels = src.channels;
+            b->samples.assign(src.samples.begin() + f0 * src.channels,
+                              src.samples.begin() + f1 * src.channels);
+            return b;
+        };
+        auto dB = [](double x) { return 20.0 * std::log10(x); };
+        auto num = [](double v) { wchar_t b[32]; swprintf(b, 32, L"%.3f", v); return std::wstring(b); };
+        auto gainOf = [](const Document& d, int id) {
+            const Clip* c = d.project().findClip(id); return c ? c->gain : -1.0f;
+        };
+
+        // --- which clips a command involves
+        {
+            Document d; d.init(RATE);
+            const int a = d.addClip(L"a", noise(0.2, 0.0, 1.0, 1), L"", L"add");
+            const int b = d.addClip(L"b", noise(0.2, 0.0, 1.0, 2), L"", L"add");
+            const int c = d.addClip(L"c", noise(0.2, 0.0, 1.0, 3), L"", L"add");   // on no track
+            auto none = std::make_shared<AudioBuffer>(); none->sampleRate = RATE; none->channels = 1;
+            const int e = d.addClip(L"empty", none, L"", L"add");
+            const int t1 = d.project().tracks[0].id;
+            const int t2 = d.addTrack();
+            d.placeClip(t1, a, 0, L"p");
+            d.placeClip(t1, b, RATE, L"p");
+            d.placeClip(t1, a, 2 * RATE, L"p");   // the same clip a second time
+            d.placeClip(t1, e, 3 * RATE, L"p");
+            d.placeClip(t2, b, 0, L"p");
+            const Project& p = d.project();
+
+            const match::ClipSet ts = match::trackSet(p, t1);
+            check(ts.size() == 2 && ts.ids[0] == a && ts.ids[1] == b,
+                  L"match sets: a track counts a clip placed twice once, and skips one with no audio",
+                  std::to_wstring(ts.size()) + L" clips");
+            check(ts.usable() && !ts.single() && ts.changeCount() == 2 && ts.poolCount() == 2,
+                  L"match sets: in a set every clip is matched, and every clip is in the average");
+            const match::ClipSet tl = match::timelineSet(p);
+            check(tl.size() == 2 && tl.indexOf(c) < 0,
+                  L"match sets: all tracks leaves out a clip that is on no track");
+            const match::ClipSet lib = match::librarySet(p);
+            check(lib.size() == 3 && lib.indexOf(c) >= 0 && lib.indexOf(e) < 0,
+                  L"match sets: the whole project is every clip with audio");
+            const match::ClipSet one = match::clipToTrack(p, b, t1);
+            check(one.single() && one.usable() && one.size() == 2 && one.ids[0] == b &&
+                  one.change[0] && !one.pool[0] && one.pool[1] && !one.change[1],
+                  L"match sets: one clip to the rest of its track changes only it, and keeps it "
+                  L"out of its own average");
+            check(one.referenceFor(a) == 1 && one.referenceFor(b) == -1 && one.referenceFor(c) == -1,
+                  L"match sets: a remembered standard is found by id in the pool, and never "
+                  L"means the clip being matched or one outside the set");
+            check(!match::clipToTrack(p, b, t2).usable(),
+                  L"match sets: a clip alone on its track has nothing to be matched to");
+            check(!match::trackSet(p, t2).usable(), L"match sets: one distinct clip is not a set");
+            check(match::clipToLibrary(p, c).poolCount() == 2,
+                  L"match sets: one clip to the others compares it with every other clip");
+        }
+
+        // --- volume: a set, to its average; then to a standard
+        {
+            Document d; d.init(RATE);
+            const int q = d.addClip(L"quiet", noise(0.05, 0.0, 2.0, 7), L"", L"add");
+            const int m = d.addClip(L"mid", noise(0.10, 0.0, 2.0, 7), L"", L"add");
+            const int l = d.addClip(L"loud", noise(0.20, 0.0, 2.0, 7), L"", L"add");
+            const int t1 = d.project().tracks[0].id;
+            d.placeClip(t1, q, 0, L"p");
+            d.placeClip(t1, m, 2 * RATE, L"p");
+            d.placeClip(t1, l, 4 * RATE, L"p");
+            const match::ClipSet s = match::trackSet(d.project(), t1);
+
+            // The geometric mean of 0.05, 0.1 and 0.2 is 0.1: gains 2, 1 and 1/2.
+            const match::VolumeResult r = match::matchVolume(d.project(), s, -1);
+            check(r.ok && std::fabs(r.newGain[0] - 2.0f) < 1e-3f && r.newGain[1] == 1.0f &&
+                  std::fabs(r.newGain[2] - 0.5f) < 1e-3f,
+                  L"match volume: a set is matched to the geometric mean of its speech levels",
+                  num(r.newGain[0]) + L", " + num(r.newGain[1]) + L", " + num(r.newGain[2]));
+            check(r.changed == 2 && r.gains.size() == 2,
+                  L"match volume: a clip already at the target keeps its volume exactly",
+                  std::to_wstring(r.changed) + L" changed");
+            check(r.before.valid() && std::fabs(r.before.db - dB(4.0)) < 0.05 &&
+                  r.before.a == 2 && r.before.b == 0,
+                  L"match volume: the spread before names the loudest and the quietest",
+                  num(r.before.db) + L" dB");
+            check(r.after.valid() && r.after.db < 0.01, L"match volume: afterwards they measure the same",
+                  num(r.after.db) + L" dB");
+            check(r.held.empty() && r.overFullScale.empty() && r.trackGains.empty() && r.unmeasured == 0,
+                  L"match volume: an ordinary match has nothing to warn about");
+
+            check(d.setClipGains(r.gains, L"match") && d.undoDesc() == L"match" &&
+                  std::fabs(gainOf(d, q) - 2.0f) < 1e-3f && std::fabs(gainOf(d, l) - 0.5f) < 1e-3f,
+                  L"match volume: the volumes are committed together, as one undo step");
+            const match::VolumeResult again = match::matchVolume(d.project(), s, -1);
+            check(again.ok && again.changed == 0 && !d.setClipGains(again.gains, L"again") &&
+                  d.undoDesc() == L"match",
+                  L"match volume: matching clips that already match changes nothing and adds no step",
+                  std::to_wstring(again.changed) + L" changed");
+            d.undo();
+            check(gainOf(d, q) == 1.0f && gainOf(d, m) == 1.0f && gainOf(d, l) == 1.0f,
+                  L"match volume: one undo puts every volume back");
+
+            // The standard is matched as it is heard, at the volume it has, and keeps it.
+            d.setClipGain(l, 1.5f, L"vol");
+            const match::VolumeResult rr = match::matchVolume(d.project(), s, s.indexOf(l));
+            bool refTouched = false;
+            for (const auto& g : rr.gains) if (g.first == l) refTouched = true;
+            check(rr.ok && std::fabs(rr.newGain[0] - 6.0f) < 1e-2f && std::fabs(rr.newGain[1] - 3.0f) < 1e-2f &&
+                  rr.newGain[2] == 1.5f && !refTouched,
+                  L"match volume: matched to a standard at its own volume, which it keeps",
+                  num(rr.newGain[0]) + L", " + num(rr.newGain[1]) + L", " + num(rr.newGain[2]));
+        }
+
+        // --- volume: one clip to the rest of its track
+        {
+            Document d; d.init(RATE);
+            const int subj = d.addClip(L"subject", noise(0.05, 0.0, 2.0, 5), L"", L"add");
+            const int o1 = d.addClip(L"o1", noise(0.10, 0.0, 2.0, 5), L"", L"add");
+            const int o2 = d.addClip(L"o2", noise(0.40, 0.0, 2.0, 5), L"", L"add");
+            const int t1 = d.project().tracks[0].id;
+            d.placeClip(t1, o1, 0, L"p");
+            d.placeClip(t1, subj, 2 * RATE, L"p");
+            d.placeClip(t1, o2, 4 * RATE, L"p");
+            const match::ClipSet one = match::clipToTrack(d.project(), subj, t1);
+            const match::VolumeResult r = match::matchVolume(d.project(), one, -1);
+            // The others' geometric mean is 0.2, so 4x. Counting the subject in its own
+            // average would give (0.05 * 0.1 * 0.4)^(1/3) = 0.126, i.e. 2.5x.
+            check(r.ok && r.gains.size() == 1 && r.gains[0].first == subj &&
+                  std::fabs(r.gains[0].second - 4.0f) < 1e-2f,
+                  L"match volume: one clip to the rest moves only that clip, to the others' average",
+                  r.gains.empty() ? L"no change" : num(r.gains[0].second));
+            check(r.before.valid() && std::fabs(r.before.db - dB(4.0)) < 0.05 && r.after.valid() &&
+                  r.after.db < 0.01,
+                  L"match volume: one clip to the rest reports its own distance from the target",
+                  num(r.before.db) + L" -> " + num(r.after.db) + L" dB");
+            (void)o2;
+        }
+
+        // --- volume: what it has to warn about
+        {
+            Document d; d.init(RATE);
+            auto quiet = std::make_shared<AudioBuffer>();
+            quiet->sampleRate = RATE; quiet->channels = 1; quiet->samples.assign(RATE, 0.0f);
+            const int z = d.addClip(L"silent", quiet, L"", L"add");
+            const int faint = d.addClip(L"faint", noise(0.001, 0.0, 2.0, 9), L"", L"add");
+            const int ref = d.addClip(L"ref", noise(0.1, 0.0, 2.0, 9), L"", L"add");
+            const match::ClipSet s = match::librarySet(d.project());
+            const match::VolumeResult r = match::matchVolume(d.project(), s, s.indexOf(ref));
+            bool zTouched = false;
+            for (const auto& g : r.gains) if (g.first == z) zTouched = true;
+            check(r.ok && r.unmeasured == 1 && !r.measured[s.indexOf(z)] && !zTouched,
+                  L"match volume: a silent clip is left alone, and counted");
+            const int fi = s.indexOf(faint);
+            check(r.held.size() == 1 && r.held[0] == fi && r.newGain[fi] == match::kMaxMatchGain,
+                  L"match volume: a clip needing more than +24 dB is held at the limit and reported",
+                  num(r.newGain[fi]));
+            check(r.after.valid() && std::fabs(r.after.db - (40.0 - dB(match::kMaxMatchGain))) < 0.1,
+                  L"match volume: ...and the spread afterwards says how far short it stopped",
+                  num(r.after.db) + L" dB");
+        }
+        {
+            Document d; d.init(RATE);
+            // "full" is a 0.9 sine; "spiky" a 0.3 sine with one 0.6 sample. Matching
+            // spiky up to full's level is about 3x, which takes the spike to ~1.8.
+            const int full = d.addClip(L"full", tone(0.9, 0.0), L"", L"add");
+            const int spiky = d.addClip(L"spiky", tone(0.3, 0.6), L"", L"add");
+            const int other = d.addClip(L"other", tone(0.6, 0.0), L"", L"add");
+            const int t1 = d.project().tracks[0].id;
+            const int t2 = d.addTrack();
+            d.placeClip(t1, full, 0, L"p");
+            d.placeClip(t1, spiky, RATE, L"p");
+            d.placeClip(t2, other, 0, L"p");
+            const match::ClipSet one = match::clipToTrack(d.project(), spiky, t1);
+            const match::VolumeResult r = match::matchVolume(d.project(), one, -1);
+            const double expect = dB(0.6 * 3.0);
+            check(r.overFullScale.size() == 1 && r.overFullScale[0].first == 0 &&
+                  std::fabs(r.overFullScale[0].second - expect) < 0.3,
+                  L"match volume: a peak pushed past full scale is reported, by how much",
+                  r.overFullScale.empty() ? L"none" : num(r.overFullScale[0].second) + L" dB");
+            d.setTrackGain(t1, 0.25f, L"track down");
+            const match::VolumeResult r2 = match::matchVolume(d.project(), one, -1);
+            check(r2.overFullScale.empty(),
+                  L"match volume: ...judged at the volume of the track it plays on");
+
+            // Track volume applies on top, so differing tracks are worth a word.
+            const match::ClipSet tl = match::timelineSet(d.project());
+            d.setTrackGain(t2, 0.7f, L"t2");
+            check(match::matchVolume(d.project(), tl, -1).trackGains.size() == 2,
+                  L"match volume: clips on tracks at different volumes are pointed out");
+            d.setTrackGain(t1, 0.7f, L"t1");
+            check(match::matchVolume(d.project(), tl, -1).trackGains.empty(),
+                  L"match volume: ...and tracks at the same volume are not");
+        }
+
+        // --- timbre: one clip to the rest, a standard left alone, one EQ per clip
+        {
+            Document d; d.init(RATE);
+            const int a1 = d.addClip(L"a1", noise(0.4, 0.0, 3.0, 11), L"", L"add");
+            const int a2 = d.addClip(L"a2", noise(0.4, 0.0, 3.0, 12), L"", L"add");
+            const int br = d.addClip(L"bright", noise(0.4, 0.6, 3.0, 13), L"", L"add");
+            const dsp::TimbreMatchOptions opt;
+
+            const match::ClipSet one = match::clipToLibrary(d.project(), br);
+            const match::TimbreResult r = match::matchTimbre(d.project(), one, -1, opt);
+            check(r.ok && r.updates.size() == 1 && r.updates[0].first == br,
+                  L"match timbre: one clip to the rest filters only that clip",
+                  std::to_wstring(r.updates.size()) + L" filtered");
+            check(r.before.valid() && r.before.db > 2.0 && r.after.valid() && r.after.db < 0.5,
+                  L"match timbre: ...onto the others' average, and says how close it got",
+                  num(r.before.db) + L" -> " + num(r.after.db) + L" dB");
+
+            const match::ClipSet all = match::librarySet(d.project());
+            const match::TimbreResult rr = match::matchTimbre(d.project(), all, all.indexOf(a1), opt);
+            bool refTouched = false;
+            for (const auto& u : rr.updates) if (u.first == a1) refTouched = true;
+            check(rr.ok && rr.updates.size() == 2 && !refTouched,
+                  L"match timbre: the standard is not run through the filter at all",
+                  std::to_wstring(rr.updates.size()) + L" filtered");
+            check(rr.before.valid() && rr.after.valid() && rr.after.db < rr.before.db && rr.after.db < 0.5,
+                  L"match timbre: a set matched to a standard ends up close to it",
+                  num(rr.before.db) + L" -> " + num(rr.after.db) + L" dB");
+            (void)a2;
+
+            // One EQ curve for the whole clip: a take whose tone changes halfway
+            // through still changes halfway through afterwards. The control proves
+            // the measure can tell: EQ'ing each half on its own -- an EQ that followed
+            // the clip along -- flattens the difference.
+            auto twoTone = std::make_shared<AudioBuffer>(*noise(0.4, 0.0, 2.0, 21));
+            const auto brightHalf = noise(0.4, 0.6, 2.0, 22);
+            twoTone->samples.insert(twoTone->samples.end(), brightHalf->samples.begin(),
+                                    brightHalf->samples.end());
+            const int tt = d.addClip(L"two-tone", twoTone, L"", L"add");
+            const match::ClipSet ts = match::clipToLibrary(d.project(), tt);
+            const match::TimbreResult rt = match::matchTimbre(d.project(), ts, ts.indexOf(a1), opt);
+            if (rt.ok && rt.updates.size() == 1) {
+                const AudioBuffer& outB = *rt.updates[0].second;
+                const int64_t h = 2 * RATE, e2 = 4 * RATE;
+                auto halves = [&](const AudioBuffer& b) {
+                    return dsp::timbreDistanceDb(dsp::computeTimbreProfile(*slice(b, 0, h)),
+                                                 dsp::computeTimbreProfile(*slice(b, h, e2)));
+                };
+                const double dIn = halves(*twoTone), dOut = halves(outB);
+                const dsp::TimbreProfile target = dsp::computeTimbreProfile(*d.project().findClip(a1)->buffer);
+                auto first = dsp::matchTimbre(*slice(*twoTone, 0, h), target, opt);
+                auto second = dsp::matchTimbre(*slice(*twoTone, h, e2), target, opt);
+                const double dAdaptive = (first && second)
+                    ? dsp::timbreDistanceDb(dsp::computeTimbreProfile(*first),
+                                            dsp::computeTimbreProfile(*second)) : -1.0;
+                check(dIn > 2.0 && std::fabs(dOut - dIn) < 0.3,
+                      L"match timbre: one EQ for the whole clip -- a tone change inside a take survives",
+                      num(dIn) + L" dB between the halves before, " + num(dOut) + L" after");
+                check(dAdaptive >= 0.0 && dAdaptive < dIn / 3.0,
+                      L"match timbre: (control) EQ'ing each half separately would have flattened it",
+                      num(dAdaptive) + L" dB");
+            } else {
+                check(false, L"match timbre: one EQ for the whole clip -- a tone change inside a take survives",
+                      L"the two-tone clip was not matched");
+            }
+        }
     }
 
     out(L"");

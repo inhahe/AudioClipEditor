@@ -149,10 +149,6 @@ of clips, audition them, trim/crop, and arrange them on tracks.
 - **Per-clip and per-track volume.** Every card and every track header has a
   volume slider (0–200%). Gain is applied live to preview, timeline mixing, and
   export, and each change is a single undo step.
-- **Speech-aware normalize.** Right-click a clip to **normalize it to match the
-  other clips**, or **normalize every clip on every track** to a common level.
-  Loudness is measured over speech only — relatively silent gaps are ignored — so
-  quiet talkers get pulled up without amplifying room tone.
 - **Voice cleaner (noise reduction).** Right-click → *Voice cleaner* runs an STFT
   denoiser to strip steady background noise. Three **algorithms**: automatic
   **spectral subtraction** or **Wiener filter** (noise floor estimated from the
@@ -188,17 +184,30 @@ of clips, audition them, trim/crop, and arrange them on tracks.
 - **Match timbre across clips.** Sentences recorded in separate takes rarely sound
   quite alike, even when nothing obvious changed: a few centimetres of mic
   distance moves the low end, a few degrees off-axis rolls off the top, a
-  different spot in the room recolours the mids. Right-click a clip → **Match
-  timbre across all clips…**, or a track header → **Match timbre — this track…**,
-  and every clip is measured and gently EQ'd toward a common tone colour. Choose
-  what to match to: **the average of them all** (the default — it moves each clip
-  as little as possible and favours none) or one particular clip
-  (*Sound like 'take 2'*), when you know which take sounds right. **Maximum
-  change** caps how far any clip may be moved (default 12 dB, ceiling 24 — past
-  that an EQ isn't matching tone any more, it's lifting a clip's noise floor into
-  audibility), **Smoothing** controls how broad the correction curve is, and
-  *Keep each clip's loudness*
-  makes sure this changes only tone, never level. One undo step for the whole set.
+  different spot in the room recolours the mids. **Match timbre** measures each
+  clip's average tone colour over its speech and gives every clip **one fixed EQ
+  curve** toward a common target — the same from the clip's first word to its
+  last, so nothing shifts in the middle of a sentence. Pick which clips:
+  - **a track** — right-click its header → *Match timbre — this track…*;
+  - **all tracks** — a track header → *Match timbre — all tracks…*, or a card →
+    *Match timbre (EQ) → Clips on the timeline (all tracks)…*. Clips that sit only
+    in the library (the recording you cut them from, an outtake) are left out;
+  - **the whole project** — a card → *Match timbre (EQ) → All clips (whole
+    project)…*;
+  - **one clip to the rest** — right-click a placed clip → *Match this clip's
+    timbre to the rest of the track…*, or a card → *Match timbre (EQ) → This clip,
+    to match the others…*. Only that clip changes; the others are left alone.
+
+  Then choose what to match to: **the average of them all** (the default — it
+  moves each clip as little as possible and favours none) or one clip as the
+  standard (*Sound like 'take 2'*), when you know which take sounds right. The
+  standard itself is left exactly as it is, and the choice is remembered — and
+  shared with *Match volume*, so matching tone and then level to the same take
+  means picking it once. **Maximum change** caps how far any clip may be moved
+  (default 12 dB, ceiling 24 — past that an EQ isn't matching tone any more, it's
+  lifting a clip's noise floor into audibility), **Smoothing** controls how broad
+  the correction curve is, and *Keep each clip's loudness* makes sure this
+  changes only tone, never level. One undo step for the whole set.
 
   The correction only covers the range speech actually occupies (about
   90 Hz – 11 kHz). Below and above that a recording is mostly its own rumble and
@@ -208,7 +217,8 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   **The result box tells you whether it worked**, not just what it did: it names
   the two clips that were furthest apart in tone and how far apart they were, then
   the two that are furthest apart *afterwards* — say *7.2 dB apart before, 0.9 dB
-  after*. That second number is the one to read. It also says at what frequency
+  after* (matching one clip to the rest, it's how far that clip was from the
+  target, and is now). That second number is the one to read. It also says at what frequency
   the largest correction landed **and which clip needed it** — because *8 dB at
   250 Hz* is a mic-distance difference and *8 dB at 40 Hz* is a fan, and across
   two dozen takes that figure is usually one outlier worth going to look at. If it's still a few dB, the EQ
@@ -219,6 +229,26 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   EQ can add or remove one), **compression** on some clips but not others,
   differing **background noise** (use the voice cleaner), or delivery. Knowing
   which of the two you have saves re-running the same match and hoping.
+- **Match volume across clips.** Clips recorded at different distances from the
+  mic, or on different days, come out at different levels. **Match volume** sets
+  each clip's volume so its *speech* is as loud as the target — measured over
+  speech only, so pauses don't drag the measurement down, and quiet takes get
+  pulled up without the silence between words counting against them. It works
+  exactly like *Match timbre*: the same ranges (a track, all tracks, the whole
+  project, or one clip to the rest — the menus sit side by side), the same choice
+  of target (**the average of them all**, or one clip as the standard: *As loud as
+  'take 2'*, which keeps its own volume), **one volume per clip**, and one undo
+  step. It only moves the clips' volume sliders, never their audio, so you can
+  still adjust any of them by hand afterwards, and running it again on clips that
+  already match changes nothing.
+
+  The result box names the loudest and quietest clips and how far apart they were
+  and are now, the biggest change made, and warns about the three things that make
+  a correct match still sound wrong: a clip that needed more than a volume can give
+  (−26 to +24 dB) — usually a sign it differs in some other way too; a clip whose
+  peaks were pushed **past full scale**, which would distort on playback and in the
+  export; and tracks set to **different volumes**, since track volume applies on
+  top of clip volume. Silent clips are left out and counted.
 - **Clean / de-noise just part of a clip.** Drag a selection, then pick
   **This clip (selection)…** — the first entry in the *Voice cleaner* and
   *Remove non-voice* submenus, right above *This clip…* and *All clips*. The range
@@ -334,20 +364,21 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Crop to a selection | **Crop** button on the card while a selection is active |
 | Make a new clip from a selection | **New clip** button on the card, or right-click the card → *New clip from selection* |
 | Keep only the selection, as a file | right-click the card → *Split selection out to a WAV file (replaces this clip)* — new clip + WAV + the old clip gone, no dialogs, one undo step |
-| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, export clip / selection to a file, split the selection out to a file, normalize, voice cleaner, remove non-voice, match timbre, rename, delete, add to a track |
+| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, export clip / selection to a file, split the selection out to a file, voice cleaner, remove non-voice, match timbre, match volume, rename, delete, add to a track |
 | Rename a clip | right-click → Rename |
 | Reorder clips | drag a card by its title bar to a new spot in the library (caret shows the drop point) |
 | Sort clips | right-click the empty library area → *Sort clips by name* / *by time* |
 | Set clip / track volume | drag the volume slider on the card or track header |
-| Normalize volume | right-click a card → *Normalize to match other clips* / *Normalize all clips* |
+| Make clips equally loud | right-click a track header → *Match volume — this track…* / *— all tracks…*; a card → *Match volume ▸* (*This clip, to match the others* / *Clips on the timeline* / *All clips*); or a placed clip → *Match this clip's volume to the rest of the track…* |
 | Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |
 | Remove bumps / shuffling (keep only voice) | right-click a card → *Remove non-voice → This clip / All clips*, or right-click a track header → *Remove non-voice — this track* |
-| Make separately-recorded clips sound alike | right-click a card → *Match timbre across all clips…*, or right-click a track header → *Match timbre — this track…* |
+| Make separately-recorded clips sound alike | right-click a track header → *Match timbre — this track…* / *— all tracks…*; a card → *Match timbre (EQ) ▸* (*This clip, to match the others* / *Clips on the timeline* / *All clips*); or a placed clip → *Match this clip's timbre to the rest of the track…* |
+| Match to one particular take | in either *Match* dialog, set **Match to:** to *Sound like / As loud as '<that clip>'* — it's remembered for both |
 | Clean / de-noise only part of a clip | drag a selection, then right-click a card → *Voice cleaner* / *Remove non-voice* → **This clip (selection)…** |
 | Get rid of a noise *Remove non-voice* won't touch | drag a selection over it, then right-click a card (or use the editor toolbar) → *Silence selection (keep timing)* / *Delete selection (close gap)* |
 | Capture a noise profile | select a noise-only stretch, then right-click → *Voice cleaner → Capture noise from selection* (or the **Get noise profile** button in the dialog); or *Capture noise from whole clip*; or the **Capture noise** button in the full-window editor |
 | Apply a saved noise capture | right-click a card → *Voice cleaner → Apply noise capture ▸* and pick a recent capture |
-| Track actions | **right-click a track header/lane**: voice-clean the track, remove non-voice, match timbre, rename, remove |
+| Track actions | **right-click a track header/lane**: voice-clean the track, remove non-voice, match timbre or volume (this track, or all tracks), rename, remove |
 | Add a track | **+ Add Track** |
 | Place a clip on a track | drag a clip card up into a track lane (drops at any time offset), or right-click → **Add to “Track 1”** (**Add to track ▸** when there are several) |
 | Move a placed clip | drag it along the track — a live ghost shows where it will land (drag vertically to change tracks) |
@@ -387,7 +418,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `document.{h,cpp}` | Owns the project + undo tree; every edit commits a snapshot |
 | `waveform.{h,cpp}` | GDI oscilloscope rendering: min/max envelope zoomed out, sample line zoomed in |
 | `dsp.{h,cpp}` | FFT, speech-aware loudness, STFT noise reduction (spectral subtraction / Wiener / Audacity-style profile gate), voice isolation (non-speech removal), LTAS timbre matching, manual silence/delete edits |
-| `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, remove-non-voice options, match-timbre options, history list, open/save file & project dialogs |
+| `match.{h,cpp}` | Making clips alike, shared by *Match timbre* and *Match volume*: which clips a command covers, what they're matched to, and the before/after measurements |
+| `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, remove-non-voice options, match-timbre and match-volume options, history list, open/save file & project dialogs |
 | `ui.cpp` | Main window: menu bar, layout, painting, hit-testing, all interaction |
 | `selftest.cpp` | `--selftest` backend round-trip checks (decode/encode/peaks/DSP) |
 
