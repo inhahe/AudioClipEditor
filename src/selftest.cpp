@@ -33,35 +33,38 @@
 #include <vector>
 #include <algorithm>
 
-// The peak meter of this process's audio session on the default output device -- the
-// one the engine plays to -- which shows what the process actually hands Windows'
-// mixer. Null if there is none (no device, or no session yet).
-static Microsoft::WRL::ComPtr<IAudioMeterInformation> ownSessionMeter() {
+// This process's audio session on the default output device -- the default session,
+// which the engine's stream joins: its peak meter, which shows what the process
+// actually hands Windows' mixer, and whether it plays at full volume, unmuted. Whether
+// that meter reads before or after the session's volume isn't documented, so a check
+// that relies on it only holds at full volume (the user may have turned this program
+// down in the Volume Mixer, which Windows remembers per program).
+struct OwnSession {
+    Microsoft::WRL::ComPtr<IAudioMeterInformation> meter;   // null if there is none
+    bool atFullVolume = false;
+};
+static OwnSession ownSession() {
     using Microsoft::WRL::ComPtr;
+    OwnSession s;
     ComPtr<IMMDeviceEnumerator> devices;
     ComPtr<IMMDevice> device;
-    ComPtr<IAudioSessionManager2> manager;
-    ComPtr<IAudioSessionEnumerator> sessions;
+    ComPtr<IAudioSessionManager> manager;
+    ComPtr<IAudioSessionControl> control;
     if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                 IID_PPV_ARGS(devices.GetAddressOf()))) ||
         FAILED(devices->GetDefaultAudioEndpoint(eRender, eConsole, device.GetAddressOf())) ||
-        FAILED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
+        FAILED(device->Activate(__uuidof(IAudioSessionManager), CLSCTX_ALL, nullptr,
                                 (void**)manager.GetAddressOf())) ||
-        FAILED(manager->GetSessionEnumerator(sessions.GetAddressOf())))
-        return nullptr;
-    int count = 0;
-    sessions->GetCount(&count);
-    for (int i = 0; i < count; ++i) {
-        ComPtr<IAudioSessionControl> control;
-        ComPtr<IAudioSessionControl2> control2;
-        ComPtr<IAudioMeterInformation> meter;
-        DWORD pid = 0;
-        if (SUCCEEDED(sessions->GetSession(i, control.GetAddressOf())) && SUCCEEDED(control.As(&control2)) &&
-            SUCCEEDED(control2->GetProcessId(&pid)) && pid == GetCurrentProcessId() &&
-            SUCCEEDED(control.As(&meter)))
-            return meter;
-    }
-    return nullptr;
+        FAILED(manager->GetAudioSessionControl(nullptr, 0, control.GetAddressOf())) ||
+        FAILED(control.As(&s.meter)))
+        return OwnSession{};
+    ComPtr<ISimpleAudioVolume> volume;
+    float level = 0.0f;
+    BOOL muted = TRUE;
+    s.atFullVolume = SUCCEEDED(manager->GetSimpleAudioVolume(nullptr, FALSE, volume.GetAddressOf())) &&
+                     SUCCEEDED(volume->GetMasterVolume(&level)) && SUCCEEDED(volume->GetMute(&muted)) &&
+                     level > 0.999f && !muted;
+    return s;
 }
 
 static AudioBufferPtr makeSine(int rate, double seconds, double freq) {
@@ -1470,23 +1473,30 @@ int runSelfTest() {
             LARGE_INTEGER q; QueryPerformanceCounter(&q);
             return (double)q.QuadPart / (double)qf.QuadPart;
         };
+        // Skipped only when there is no output device at all; any other failure to open
+        // one is the engine's, and fails.
+        auto noOutputDevice = [] {
+            Microsoft::WRL::ComPtr<IMMDeviceEnumerator> devices;
+            Microsoft::WRL::ComPtr<IMMDevice> device;
+            return SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                              IID_PPV_ARGS(devices.GetAddressOf()))) &&
+                   devices->GetDefaultAudioEndpoint(eRender, eConsole, device.GetAddressOf()) == E_NOTFOUND;
+        };
         if (!eng.init(&engErr)) {
-            out(L"[SKIP] playback engine: no audio device (" + engErr + L")");
+            if (noOutputDevice()) out(L"[SKIP] playback engine: no audio output device");
+            else check(false, L"playback engine opens the default output device", engErr);
         } else {
             // init() is what calls IAudioClient::Start(), so this is the moment
             // the device clock starts running -- the anchor the startup settling
             // window below is measured from.
             const double tStreamStart = nowSec();
-            auto faint = std::make_shared<AudioBuffer>();
-            faint->sampleRate = eng.sampleRate(); faint->channels = 2;
-            faint->samples.resize((size_t)eng.sampleRate() * 2 * 2);   // 2 s
-            const float kFaint = 1e-4f;                                 // -80 dBFS
-            for (size_t f = 0; f < faint->samples.size() / 2; ++f)
-                faint->samples[f * 2] = faint->samples[f * 2 + 1] =
-                    kFaint * (float)std::sin(2.0 * 3.14159265358979 * 440.0 * (double)f / eng.sampleRate());
-            eng.setSourceRate(faint->sampleRate);
-            eng.play(std::make_shared<BufferSource>(faint, 0, faint->frames()), 0);
-            const Microsoft::WRL::ComPtr<IAudioMeterInformation> meter = ownSessionMeter();
+            const AudioBufferPtr tone = makeSine(eng.sampleRate(), 2.0, 440.0);   // peak 0.5
+            const float kGain = 2e-4f, kFaint = 0.5f * kGain;                    // -80 dBFS
+            auto faint = [&] { return std::make_shared<BufferSource>(tone, 0, tone->frames(), kGain); };
+            eng.setSourceRate(tone->sampleRate);
+            eng.play(faint(), 0);
+            const OwnSession session = ownSession();
+            const auto& meter = session.meter;
             float peak = 0.0f;
 
             // Sample the position repeatedly, timing each sample with QPC --
@@ -1503,9 +1513,13 @@ int runSelfTest() {
             }
             eng.stop();
             // Something, and nothing louder than the tone itself: it is this tone.
-            check(meter && peak > kFaint * 0.1f && peak < kFaint * 10.0f,
-                  L"playback reaches Windows' mixer (this process's session peak meter sees the tone)",
-                  meter ? L"peak " + std::to_wstring(peak) : L"no session meter");
+            if (meter && !session.atFullVolume)
+                out(L"[SKIP] playback reaches Windows' mixer: this program is turned down or muted "
+                    L"in the Volume Mixer");
+            else
+                check(meter && peak > kFaint * 0.1f && peak < kFaint * 10.0f,
+                      L"playback reaches Windows' mixer (this process's session peak meter sees the tone)",
+                      meter ? L"peak " + std::to_wstring(peak) : L"no session meter");
 
             bool monotonic = true;
             double worstRate = 0.0, bestRate = 1e9;
@@ -1581,7 +1595,7 @@ int runSelfTest() {
             // where it was. The device frames written start again from 0 (it is a new
             // stream, with a new clock), the playhead goes on forward at about real time,
             // and the tone still reaches the mixer.
-            eng.play(std::make_shared<BufferSource>(faint, 0, faint->frames()), 0);
+            eng.play(faint(), 0);
             Sleep(300);
             int64_t last = eng.position();   // which also refreshes posDiag
             const PlaybackEngine::PosDiag beforeReopen = eng.posDiag();
@@ -1590,15 +1604,15 @@ int runSelfTest() {
             eng.reopenDevice();
             bool forward = true;
             float peakAfter = 0.0f;
-            Microsoft::WRL::ComPtr<IAudioMeterInformation> meterAfter;
+            OwnSession after;
             for (int i = 0; i < 40; ++i) {
                 Sleep(20);
                 const int64_t p = eng.position();
                 if (p < last) forward = false;
                 last = p;
-                if (i == 20) meterAfter = ownSessionMeter();   // the new stream's session
+                if (i == 20) after = ownSession();   // the new stream's
                 float pk = 0.0f;
-                if (i > 20 && meterAfter && SUCCEEDED(meterAfter->GetPeakValue(&pk))) peakAfter = std::max(peakAfter, pk);
+                if (i > 20 && after.meter && SUCCEEDED(after.meter->GetPeakValue(&pk))) peakAfter = std::max(peakAfter, pk);
             }
             const PlaybackEngine::PosDiag afterReopen = eng.posDiag();
             const bool stillPlaying = eng.isPlaying();
@@ -1616,9 +1630,13 @@ int runSelfTest() {
             check(stillPlaying && forward && advanced > 0.6 && advanced < 1.2,
                   L"playback moves to the default device: it carries on forward, at about real time",
                   std::to_wstring(advanced) + L"x");
-            check(peakAfter > kFaint * 0.1f && peakAfter < kFaint * 10.0f,
-                  L"playback moves to the default device: the tone still reaches the mixer",
-                  L"peak " + std::to_wstring(peakAfter));
+            if (after.meter && !after.atFullVolume)
+                out(L"[SKIP] playback moves to the default device: the mixer check needs this program "
+                    L"at full volume");
+            else
+                check(peakAfter > kFaint * 0.1f && peakAfter < kFaint * 10.0f,
+                      L"playback moves to the default device: the tone still reaches the mixer",
+                      L"peak " + std::to_wstring(peakAfter));
             eng.shutdown();
         }
     }

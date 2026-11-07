@@ -296,11 +296,14 @@ came back normal-sized.) The saved size and position always apply.
   every id the stored history uses. Otherwise undoing an *add clip* and adding another
   reuses the id, and anything still holding it — the remembered matching standard
   (`App::matchRefClipId`) — silently comes to mean an unrelated clip.
-- **UI thread owns everything except the WASAPI render callback**, which only
-  reads through the engine's source objects (swapped under a lock).
+- **The UI thread owns all the app's state; the audio thread only the engine's device
+  objects and its render loop**, which reads the project only through the engine's
+  source objects (swapped under a lock).
 - **The UI thread is a single-threaded COM apartment; the audio thread a
   multithreaded one, and it owns every WASAPI object.** `mfio::startup` initialises
-  the UI thread as an STA, as Windows expects of a thread with windows: the shell calls
+  the UI thread as an STA (with `COINIT_DISABLE_OLE1DDE`, as the shell's documentation
+  asks; a thread already in the MTA is a mistake it asserts against, and it undoes only
+  an initialisation that succeeded), as Windows expects of a thread with windows: the shell calls
   it makes (`GetOpenFileName`/`GetSaveFileName`, `SHAddToRecentDocs`) assume one, and
   OLE drag and drop or the clipboard would need it. Media Foundation's Source Reader and
   Sink Writer, which decode and encode synchronously on that thread, work in either.

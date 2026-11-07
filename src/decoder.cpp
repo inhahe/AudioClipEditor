@@ -5,11 +5,17 @@
 #include <mfreadwrite.h>
 #include <mferror.h>
 #include <wrl/client.h>
+#include <cassert>
 #include <cstdint>
 
 using Microsoft::WRL::ComPtr;
 
 namespace mfio {
+
+// Whether startup's CoInitializeEx is shutdown's to undo: every call that succeeds,
+// S_FALSE (already an STA) included, needs its CoUninitialize, and one that failed
+// must not get one.
+static bool comStarted = false;
 
 bool startup() {
     // A single-threaded apartment: this is the thread that runs the window, and
@@ -17,14 +23,21 @@ bool startup() {
     // recent documents) assume it. Media Foundation's Source Reader and Sink Writer,
     // used here synchronously, work in either. The audio engine keeps its WASAPI
     // objects on its own thread, in the multithreaded apartment (engine.cpp).
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    // COINIT_DISABLE_OLE1DDE as the shell's documentation asks of a thread that calls
+    // it: nothing here uses the OLE1 DDE it would otherwise keep alive.
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return false;
+    comStarted = SUCCEEDED(hr);
+    // RPC_E_CHANGED_MODE: something put this thread in the multithreaded apartment
+    // first. Media Foundation works there, but the thread with the windows shouldn't
+    // be in it (above): a mistake in the program, said out loud where it can be.
+    assert(hr != RPC_E_CHANGED_MODE && "the UI thread must be a single-threaded apartment");
     return SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE));
 }
 
 void shutdown() {
     MFShutdown();
-    CoUninitialize();
+    if (comStarted) { CoUninitialize(); comStarted = false; }
 }
 
 AudioBufferPtr decodeFile(const std::wstring& path, int targetRate, std::wstring* err) {
