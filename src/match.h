@@ -85,15 +85,37 @@ struct Spread {
     bool valid() const { return db >= 0.0; }
 };
 
+// Why a match could not be made, so the summary can name the cause instead of
+// guessing at it -- blaming the clip being matched when it is the others that are
+// silent sends the user to fix the wrong thing.
+enum class Failure {
+    None,
+    Subject,    // one clip to the rest: that clip couldn't be measured
+    Reference,  // the chosen standard couldn't be measured (or, for timbre, is at another rate)
+    Pool,       // nothing in the pool could be measured, so there is no average
+    Alone,      // a set in which only one clip could be measured: nothing to match it to
+};
+
 // ---------------------------------------------------------------- volume
 // The limits a matched volume is held to. The top is the most any clip volume can
 // be (Clip::gain is capped there everywhere); the bottom is -26 dB, past which a
-// clip is not "a bit louder than the others" but a different kind of recording.
+// clip is not "a bit louder than the others" but a different kind of recording. A
+// clip the user has already set beyond a limit is never pushed back inside it --
+// that would move it away from the target, not towards it.
 constexpr float kMinMatchGain = 0.05f;
 constexpr float kMaxMatchGain = kMaxClipGain;
 
+// A matched clip that the match pushed over full scale.
+struct OverFullScale {
+    int index = -1;         // set index
+    double db = 0.0;        // how far over, at the louder of the two ways it is heard
+    bool inMix = false;     // over in the mix too (at its loudest track's volume), not
+                            // only on its own -- its card, and Export clip
+};
+
 struct VolumeResult {
-    bool ok = false;                    // false: what it was to match had no speech in it
+    Failure failure = Failure::None;
+    bool ok() const { return failure == Failure::None; }
     int changed = 0;                    // clips whose volume actually moves
     std::vector<std::pair<int, float>> gains;   // (clip id, new volume) for the matched clips
     // Parallel to the set:
@@ -103,9 +125,9 @@ struct VolumeResult {
     double targetDb = 0.0;              // the level the matched clips were set to
     int unmeasured = 0;                 // clips left out: silent
     std::vector<int> held;              // matched clips stopped at a volume limit
-    // Matched clips whose peaks now go over full scale -- in the mix, at the volume
-    // of the loudest track they are on -- so they will distort. (set index, dB over)
-    std::vector<std::pair<int, double>> overFullScale;
+    // Clips this match turned up past full scale, worst first. Only clips it turned
+    // *up*: one it left alone, or lowered, was not made to clip by it.
+    std::vector<OverFullScale> overFullScale;
     // The tracks these clips sit on, when their volumes differ: track volume applies
     // on top of clip volume, so clips matched here still differ in the mix by that.
     std::vector<std::pair<std::wstring, float>> trackGains;
@@ -124,9 +146,15 @@ VolumeResult matchVolume(const Project& p, const ClipSet& s, int reference);
 
 // ---------------------------------------------------------------- timbre
 struct TimbreResult {
-    bool ok = false;                    // false: the target couldn't be measured
+    Failure failure = Failure::None;
+    bool ok() const { return failure == Failure::None; }
     std::vector<std::pair<int, AudioBufferPtr>> updates;   // for Document::replaceClipBuffers
-    int rate = 0;                       // the rate every measured clip shares
+    // The rate the match works at: the matched clip's in one clip to the rest, else
+    // the rate most of the set shares -- one odd clip must not exclude all the others.
+    int rate = 0;
+    // Parallel to the set:
+    std::vector<uint8_t> measured;      // has a tone colour (valid profile at `rate`)
+    std::vector<uint8_t> otherRate;     // left out for being at another sample rate
     int unmeasured = 0;                 // clips left out: too short or silent
     int mismatched = 0;                 // clips left out: a different sample rate
     double worstDb = 0.0;               // the largest correction applied, dB...

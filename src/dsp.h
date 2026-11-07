@@ -137,7 +137,8 @@ struct TimbreMatchOptions {
 // own noise floor -- matching noise floors is not what "the same timbre" means.
 // Falls back to the loudest frames if the voice detector finds nothing, so an
 // unusual clip is still matched rather than silently skipped. Returns an invalid
-// profile for audio shorter than one 2048-frame analysis window.
+// profile for audio shorter than one 2048-frame analysis window, or silent (below
+// about -100 dB FS, where all there is to measure is the noise floor).
 TimbreProfile computeTimbreProfile(const AudioBuffer& buf);
 
 // The consensus timbre of a set: the per-bin mean of their log spectra, i.e. the

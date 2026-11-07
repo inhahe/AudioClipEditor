@@ -730,6 +730,11 @@ TimbreProfile computeTimbreProfile(const AudioBuffer& buf) {
             rms[fr] = std::sqrt(acc / kTMWin);
             peak = std::max(peak, rms[fr]);
         }
+        // Silence has no tone colour. Below -100 dB FS (speechLoudness's floor) every
+        // frame is the noise floor, whose spectrum is flat; averaged into a target it
+        // would flatten that target's shape, and matched to one it would only rewrite
+        // the clip for nothing.
+        if (peak < 1e-5) return p;
         const double thr = std::max(peak * 0.1, 3e-4);
         use.assign(nFrames, 0); sel = 0;
         for (size_t fr = 0; fr < nFrames; ++fr)

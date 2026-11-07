@@ -1,7 +1,6 @@
 #include "match.h"
 #include <algorithm>
 #include <cmath>
-#include <limits>
 
 namespace match {
 
@@ -159,7 +158,7 @@ VolumeResult matchVolume(const Project& p, const ClipSet& s, int reference) {
     r.levelDb.assign(n, 0.0);
     r.oldGain.assign(n, 1.0f);
     r.newGain.assign(n, 1.0f);
-    std::vector<double> loud(n, 0.0), peak(n, 0.0);
+    std::vector<double> loud(n, 0.0);
     for (int i = 0; i < n; ++i) {
         const Clip* c = p.findClip(s.ids[i]);
         if (!c || !c->buffer) continue;
@@ -175,29 +174,39 @@ VolumeResult matchVolume(const Project& p, const ClipSet& s, int reference) {
         }
         r.measured[i] = 1;
         loud[i] = L;
-        peak[i] = peakOf(*c->buffer);
         r.levelDb[i] = toDb(L * c->gain);
     }
 
-    // The target, in dB at the clips' current volumes.
+    // The target, in dB at the clips' current volumes -- and if there is none, why.
+    int measuredCount = 0;
+    for (uint8_t m : r.measured) measuredCount += m ? 1 : 0;
+    if (s.single() && !r.measured[s.firstChanged()]) { r.failure = Failure::Subject; return r; }
     if (reference >= 0) {
-        if (reference >= n || !s.pool[reference] || !r.measured[reference]) return r;
+        if (reference >= n || !s.pool[reference] || !r.measured[reference]) {
+            r.failure = Failure::Reference; return r;
+        }
         r.targetDb = r.levelDb[reference];
     } else {
         // Geometric mean of the pool's levels = arithmetic mean in dB.
         double acc = 0.0; int cnt = 0;
         for (int i = 0; i < n; ++i)
             if (s.pool[i] && r.measured[i]) { acc += r.levelDb[i]; ++cnt; }
-        if (cnt == 0) return r;
+        if (cnt == 0) { r.failure = Failure::Pool; return r; }
         r.targetDb = acc / cnt;
     }
-    r.ok = true;
+    // A set needs two clips that can be compared; with one, "they already match"
+    // would be a claim about clips that were never measured.
+    if (!s.single() && measuredCount < 2) { r.failure = Failure::Alone; return r; }
 
     const double target = std::pow(10.0, r.targetDb / 20.0);
     for (int i = 0; i < n; ++i) {
         if (!s.change[i] || !r.measured[i] || i == reference) continue;
         const double want = target / loud[i];
-        float g = (float)std::max<double>(kMinMatchGain, std::min<double>(kMaxMatchGain, want));
+        // The limits never push a clip outward: one already set below -26 dB by hand
+        // may stay where it is (or come up towards the target), but is not raised to
+        // -26 dB when that is further from the target than it is now.
+        const double lo = std::min<double>(kMinMatchGain, r.oldGain[i]);
+        float g = (float)std::max<double>(lo, std::min<double>(kMaxMatchGain, want));
         // Held: the clamp moved it by more than float rounding would.
         if (std::fabs(toDb(g) - toDb(want)) > 0.01) r.held.push_back(i);
         // Under 0.01 dB is rounding, not a correction. Keeping the volume it has
@@ -257,14 +266,21 @@ VolumeResult matchVolume(const Project& p, const ClipSet& s, int reference) {
         }
     if (!differ) r.trackGains.clear();
 
+    // A clip is heard two ways: on its own (its card, and Export clip) at its own
+    // volume, and in the mix at its volume times its loudest track's. Either one
+    // going over full scale clips. Only clips this match turned up are looked at --
+    // it did not make the others clip -- which also keeps the scan of every sample
+    // to the few clips that need it.
     for (int i = 0; i < n; ++i) {
-        if (!s.change[i] || !r.measured[i]) continue;
-        // Unplaced, it is only ever heard on its own card, at its own volume.
-        const double level = peak[i] * r.newGain[i] * (placed[i] ? trackMax[i] : 1.0f);
-        if (level > 1.0) r.overFullScale.push_back({ i, toDb(level) });
+        if (!s.change[i] || !r.measured[i] || !(r.newGain[i] > r.oldGain[i])) continue;
+        const Clip* c = p.findClip(s.ids[i]);
+        const double alone = peakOf(*c->buffer) * r.newGain[i];
+        const double mix = placed[i] ? alone * trackMax[i] : 0.0;
+        if (alone > 1.0 || mix > 1.0)
+            r.overFullScale.push_back({ i, toDb(std::max(alone, mix)), mix > 1.0 });
     }
     std::sort(r.overFullScale.begin(), r.overFullScale.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
+              [](const OverFullScale& a, const OverFullScale& b) { return a.db > b.db; });
     return r;
 }
 
@@ -289,14 +305,27 @@ TimbreResult matchTimbre(const Project& p, const ClipSet& s, int reference,
                          const dsp::TimbreMatchOptions& opts) {
     TimbreResult r;
     const int n = s.size();
-    // Bin-for-bin comparison of spectra only means anything at one rate. The first
-    // matched clip sets it -- in "one clip to the rest" that is the clip being
-    // matched, which must not be the one left out -- and clips at any other rate are
-    // left out and counted, since a clip missing from a match is exactly the one
-    // that will still sound different.
     const int first = s.firstChanged();
-    if (first < 0) return r;
-    if (const Clip* c = p.findClip(s.ids[first]); c && c->buffer) r.rate = c->buffer->sampleRate;
+    if (first < 0) { r.failure = Failure::Subject; return r; }
+    r.measured.assign(n, 0);
+    r.otherRate.assign(n, 0);
+    // Bin-for-bin comparison of spectra only means anything at one rate, so clips at
+    // any other rate are left out and counted -- a clip missing from a match is
+    // exactly the one that will still sound different. In one clip to the rest the
+    // clip being matched sets the rate, since it must not be the one left out. In a
+    // set it is the rate most clips share (the earliest on a tie): taking the first
+    // clip's would let one odd clip at the head of a track exclude all the others.
+    std::vector<int> rates((size_t)n, 0);
+    for (int i = 0; i < n; ++i)
+        if (const Clip* c = p.findClip(s.ids[i]); c && c->buffer) rates[i] = c->buffer->sampleRate;
+    r.rate = rates[first];
+    if (!s.single()) {
+        int best = 0;
+        for (int i = 0; i < n; ++i) {
+            const int votes = (int)std::count(rates.begin(), rates.end(), rates[i]);
+            if (votes > best) { best = votes; r.rate = rates[i]; }
+        }
+    }
 
     // Measure everything before filtering anything: the target may be the average
     // of these, and a clip that can't be measured must be left alone rather than
@@ -305,22 +334,31 @@ TimbreResult matchTimbre(const Project& p, const ClipSet& s, int reference,
     for (int i = 0; i < n; ++i) {
         const Clip* c = p.findClip(s.ids[i]);
         if (!c || !c->buffer) continue;
-        if (c->buffer->sampleRate != r.rate) { ++r.mismatched; continue; }
+        if (rates[i] != r.rate) { ++r.mismatched; r.otherRate[i] = 1; continue; }
         profiles[i] = dsp::computeTimbreProfile(*c->buffer);
-        if (!profiles[i].valid()) ++r.unmeasured;
+        if (profiles[i].valid()) r.measured[i] = 1;
+        else ++r.unmeasured;
     }
 
+    // The target -- and if there is none, why.
+    if (s.single() && !r.measured[first]) { r.failure = Failure::Subject; return r; }
     dsp::TimbreProfile target;
     if (reference >= 0) {
-        if (reference >= n || !s.pool[reference]) return r;
+        if (reference >= n || !s.pool[reference] || !r.measured[reference]) {
+            r.failure = Failure::Reference; return r;
+        }
         target = profiles[reference];
     } else {
         std::vector<dsp::TimbreProfile> poolProfiles;
         for (int i = 0; i < n; ++i) if (s.pool[i]) poolProfiles.push_back(profiles[i]);
         target = dsp::averageTimbre(poolProfiles);
+        if (!target.valid()) { r.failure = Failure::Pool; return r; }
     }
-    if (!target.valid()) return r;
-    r.ok = true;
+    // A set needs two measured clips; with one, the "match" would filter that clip
+    // towards its own spectrum and rewrite its audio for nothing.
+    if (!s.single() && std::count(r.measured.begin(), r.measured.end(), 1) < 2) {
+        r.failure = Failure::Alone; return r;
+    }
 
     std::vector<dsp::TimbreProfile> after = profiles;
     const double binHz = dsp::timbreBinHz(r.rate);

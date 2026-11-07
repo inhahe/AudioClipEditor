@@ -2465,6 +2465,10 @@ int runSelfTest() {
               L"timbre: audio shorter than one window can't be profiled");
         check(dsp::matchTimbre(*tiny, pa, opt) == nullptr,
               L"timbre: a clip too short to measure is refused");
+        auto silence = std::make_shared<AudioBuffer>();
+        silence->sampleRate = RATE; silence->channels = 1; silence->samples.assign(RATE, 0.0f);
+        check(!dsp::computeTimbreProfile(*silence).valid(),
+              L"timbre: silence has no tone colour to measure");
     }
 
     // ---- matching clips to each other (match.h): which clips, volume, timbre
@@ -2571,7 +2575,7 @@ int runSelfTest() {
 
             // The geometric mean of 0.05, 0.1 and 0.2 is 0.1: gains 2, 1 and 1/2.
             const match::VolumeResult r = match::matchVolume(d.project(), s, -1);
-            check(r.ok && std::fabs(r.newGain[0] - 2.0f) < 1e-3f && r.newGain[1] == 1.0f &&
+            check(r.ok() && std::fabs(r.newGain[0] - 2.0f) < 1e-3f && r.newGain[1] == 1.0f &&
                   std::fabs(r.newGain[2] - 0.5f) < 1e-3f,
                   L"match volume: a set is matched to the geometric mean of its speech levels",
                   num(r.newGain[0]) + L", " + num(r.newGain[1]) + L", " + num(r.newGain[2]));
@@ -2591,7 +2595,7 @@ int runSelfTest() {
                   std::fabs(gainOf(d, q) - 2.0f) < 1e-3f && std::fabs(gainOf(d, l) - 0.5f) < 1e-3f,
                   L"match volume: the volumes are committed together, as one undo step");
             const match::VolumeResult again = match::matchVolume(d.project(), s, -1);
-            check(again.ok && again.changed == 0 && !d.setClipGains(again.gains, L"again") &&
+            check(again.ok() && again.changed == 0 && !d.setClipGains(again.gains, L"again") &&
                   d.undoDesc() == L"match",
                   L"match volume: matching clips that already match changes nothing and adds no step",
                   std::to_wstring(again.changed) + L" changed");
@@ -2604,7 +2608,7 @@ int runSelfTest() {
             const match::VolumeResult rr = match::matchVolume(d.project(), s, s.indexOf(l));
             bool refTouched = false;
             for (const auto& g : rr.gains) if (g.first == l) refTouched = true;
-            check(rr.ok && std::fabs(rr.newGain[0] - 6.0f) < 1e-2f && std::fabs(rr.newGain[1] - 3.0f) < 1e-2f &&
+            check(rr.ok() && std::fabs(rr.newGain[0] - 6.0f) < 1e-2f && std::fabs(rr.newGain[1] - 3.0f) < 1e-2f &&
                   rr.newGain[2] == 1.5f && !refTouched,
                   L"match volume: matched to a standard at its own volume, which it keeps",
                   num(rr.newGain[0]) + L", " + num(rr.newGain[1]) + L", " + num(rr.newGain[2]));
@@ -2624,7 +2628,7 @@ int runSelfTest() {
             const match::VolumeResult r = match::matchVolume(d.project(), one, -1);
             // The others' geometric mean is 0.2, so 4x. Counting the subject in its own
             // average would give (0.05 * 0.1 * 0.4)^(1/3) = 0.126, i.e. 2.5x.
-            check(r.ok && r.gains.size() == 1 && r.gains[0].first == subj &&
+            check(r.ok() && r.gains.size() == 1 && r.gains[0].first == subj &&
                   std::fabs(r.gains[0].second - 4.0f) < 1e-2f,
                   L"match volume: one clip to the rest moves only that clip, to the others' average",
                   r.gains.empty() ? L"no change" : num(r.gains[0].second));
@@ -2647,7 +2651,7 @@ int runSelfTest() {
             const match::VolumeResult r = match::matchVolume(d.project(), s, s.indexOf(ref));
             bool zTouched = false;
             for (const auto& g : r.gains) if (g.first == z) zTouched = true;
-            check(r.ok && r.unmeasured == 1 && !r.measured[s.indexOf(z)] && !zTouched,
+            check(r.ok() && r.unmeasured == 1 && !r.measured[s.indexOf(z)] && !zTouched,
                   L"match volume: a silent clip is left alone, and counted");
             const int fi = s.indexOf(faint);
             check(r.held.size() == 1 && r.held[0] == fi && r.newGain[fi] == match::kMaxMatchGain,
@@ -2672,14 +2676,16 @@ int runSelfTest() {
             const match::ClipSet one = match::clipToTrack(d.project(), spiky, t1);
             const match::VolumeResult r = match::matchVolume(d.project(), one, -1);
             const double expect = dB(0.6 * 3.0);
-            check(r.overFullScale.size() == 1 && r.overFullScale[0].first == 0 &&
-                  std::fabs(r.overFullScale[0].second - expect) < 0.3,
+            check(r.overFullScale.size() == 1 && r.overFullScale[0].index == 0 &&
+                  r.overFullScale[0].inMix && std::fabs(r.overFullScale[0].db - expect) < 0.3,
                   L"match volume: a peak pushed past full scale is reported, by how much",
-                  r.overFullScale.empty() ? L"none" : num(r.overFullScale[0].second) + L" dB");
+                  r.overFullScale.empty() ? L"none" : num(r.overFullScale[0].db) + L" dB");
+            // Its card and Export clip play it at its own volume, so a quiet track
+            // keeps the mix clean but not those.
             d.setTrackGain(t1, 0.25f, L"track down");
             const match::VolumeResult r2 = match::matchVolume(d.project(), one, -1);
-            check(r2.overFullScale.empty(),
-                  L"match volume: ...judged at the volume of the track it plays on");
+            check(r2.overFullScale.size() == 1 && !r2.overFullScale[0].inMix,
+                  L"match volume: ...on its own as well as in the mix, which its track decides");
 
             // Track volume applies on top, so differing tracks are worth a word.
             const match::ClipSet tl = match::timelineSet(d.project());
@@ -2689,6 +2695,92 @@ int runSelfTest() {
             d.setTrackGain(t1, 0.7f, L"t1");
             check(match::matchVolume(d.project(), tl, -1).trackGains.empty(),
                   L"match volume: ...and tracks at the same volume are not");
+        }
+
+        // --- volume: limits never push a clip outward; only raised clips can clip;
+        //     and when nothing can be matched, the reason names the right clip
+        {
+            Document d; d.init(RATE);
+            // "hand" is a loud take turned down to 2% by hand -- below the -26 dB
+            // limit -- which puts it exactly level with "low".
+            const int low = d.addClip(L"low", noise(0.02, 0.0, 2.0, 31), L"", L"add");
+            const int hand = d.addClip(L"hand", noise(1.0, 0.0, 2.0, 31), L"", L"add");
+            d.setClipGain(hand, 0.02f, L"vol");
+            const match::ClipSet s = match::librarySet(d.project());
+            const match::VolumeResult r = match::matchVolume(d.project(), s, -1);
+            check(r.ok() && r.changed == 0 && r.newGain[s.indexOf(hand)] == 0.02f,
+                  L"match volume: a clip set below the -26 dB limit by hand and already level "
+                  L"is not pushed back up to the limit",
+                  num(r.newGain[s.indexOf(hand)]));
+            (void)low;
+        }
+        {
+            Document d; d.init(RATE);
+            // A standard that already peaks over full scale, and a clip raised to it
+            // that stays under: the match turned nothing over, so nothing is reported.
+            const int hot = d.addClip(L"hot", tone(0.9, 1.5), L"", L"add");
+            const int soft = d.addClip(L"soft", tone(0.3, 0.0), L"", L"add");
+            const match::ClipSet s = match::librarySet(d.project());
+            const match::VolumeResult r = match::matchVolume(d.project(), s, s.indexOf(hot));
+            check(r.ok() && r.changed == 1 && r.overFullScale.empty(),
+                  L"match volume: a clip the match didn't turn up is never reported as pushed "
+                  L"over full scale", std::to_wstring(r.overFullScale.size()) + L" reported");
+            (void)soft;
+        }
+        {
+            Document d; d.init(RATE);
+            auto hush = [&]() {
+                auto b = std::make_shared<AudioBuffer>();
+                b->sampleRate = RATE; b->channels = 1; b->samples.assign(2 * RATE, 0.0f);
+                return b;
+            };
+            const int speak = d.addClip(L"speaks", noise(0.1, 0.0, 2.0, 41), L"", L"add");
+            const int q1 = d.addClip(L"q1", hush(), L"", L"add");
+            const int q2 = d.addClip(L"q2", hush(), L"", L"add");
+            const int t1 = d.project().tracks[0].id;
+            d.placeClip(t1, speak, 0, L"p");
+            d.placeClip(t1, q1, 2 * RATE, L"p");
+            d.placeClip(t1, q2, 4 * RATE, L"p");
+            const Project& p = d.project();
+            check(match::matchVolume(p, match::clipToTrack(p, speak, t1), -1).failure ==
+                      match::Failure::Pool,
+                  L"match volume: a clip whose track-mates are all silent blames them, not it");
+            check(match::matchVolume(p, match::clipToTrack(p, q1, t1), -1).failure ==
+                      match::Failure::Subject,
+                  L"match volume: a silent clip matched to the rest blames itself");
+            const match::ClipSet all = match::trackSet(p, t1);
+            check(match::matchVolume(p, all, all.indexOf(q2)).failure == match::Failure::Reference,
+                  L"match volume: a silent standard is named as the problem");
+            const match::VolumeResult alone = match::matchVolume(p, all, all.indexOf(speak));
+            check(alone.failure == match::Failure::Alone && alone.gains.empty(),
+                  L"match volume: a set with one measurable clip is not reported as matched");
+            check(match::matchTimbre(p, all, -1, dsp::TimbreMatchOptions{}).failure ==
+                      match::Failure::Alone,
+                  L"match timbre: nor is one with one measurable clip filtered towards itself");
+        }
+        {
+            Document d; d.init(RATE);
+            // One clip at another rate at the head of a track must not exclude the
+            // ones after it: the set works at the rate most of it shares.
+            auto odd = noise(0.4, 0.0, 3.0, 51); odd->sampleRate = 44100;
+            const int o = d.addClip(L"odd", odd, L"", L"add");
+            const int t1 = d.project().tracks[0].id;
+            d.placeClip(t1, o, 0, L"p");
+            for (int k = 0; k < 3; ++k) {
+                const int c = d.addClip(L"c" + std::to_wstring(k),
+                                        noise(0.4, 0.3 * k, 3.0, 52 + k), L"", L"add");
+                d.placeClip(t1, c, (k + 1) * 4 * RATE, L"p");
+            }
+            const match::ClipSet s = match::trackSet(d.project(), t1);
+            const match::TimbreResult r = match::matchTimbre(d.project(), s, -1,
+                                                             dsp::TimbreMatchOptions{});
+            check(r.ok() && r.rate == RATE && r.mismatched == 1 && r.otherRate[0] &&
+                  r.updates.size() == 3,
+                  L"match timbre: a set works at the rate most of its clips share",
+                  std::to_wstring(r.rate) + L" Hz, " + std::to_wstring(r.updates.size()) + L" filtered");
+            check(match::matchTimbre(d.project(), s, 0, dsp::TimbreMatchOptions{}).failure ==
+                      match::Failure::Reference,
+                  L"match timbre: a standard at another rate is named as the problem");
         }
 
         // --- timbre: one clip to the rest, a standard left alone, one EQ per clip
@@ -2701,7 +2793,7 @@ int runSelfTest() {
 
             const match::ClipSet one = match::clipToLibrary(d.project(), br);
             const match::TimbreResult r = match::matchTimbre(d.project(), one, -1, opt);
-            check(r.ok && r.updates.size() == 1 && r.updates[0].first == br,
+            check(r.ok() && r.updates.size() == 1 && r.updates[0].first == br,
                   L"match timbre: one clip to the rest filters only that clip",
                   std::to_wstring(r.updates.size()) + L" filtered");
             check(r.before.valid() && r.before.db > 2.0 && r.after.valid() && r.after.db < 0.5,
@@ -2712,7 +2804,7 @@ int runSelfTest() {
             const match::TimbreResult rr = match::matchTimbre(d.project(), all, all.indexOf(a1), opt);
             bool refTouched = false;
             for (const auto& u : rr.updates) if (u.first == a1) refTouched = true;
-            check(rr.ok && rr.updates.size() == 2 && !refTouched,
+            check(rr.ok() && rr.updates.size() == 2 && !refTouched,
                   L"match timbre: the standard is not run through the filter at all",
                   std::to_wstring(rr.updates.size()) + L" filtered");
             check(rr.before.valid() && rr.after.valid() && rr.after.db < rr.before.db && rr.after.db < 0.5,
@@ -2731,7 +2823,7 @@ int runSelfTest() {
             const int tt = d.addClip(L"two-tone", twoTone, L"", L"add");
             const match::ClipSet ts = match::clipToLibrary(d.project(), tt);
             const match::TimbreResult rt = match::matchTimbre(d.project(), ts, ts.indexOf(a1), opt);
-            if (rt.ok && rt.updates.size() == 1) {
+            if (rt.ok() && rt.updates.size() == 1) {
                 const AudioBuffer& outB = *rt.updates[0].second;
                 const int64_t h = 2 * RATE, e2 = 4 * RATE;
                 auto halves = [&](const AudioBuffer& b) {

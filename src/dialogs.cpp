@@ -759,10 +759,12 @@ static const wchar_t* kMatchTo = L"Match to:";
 static std::wstring refItem(const wchar_t* prefix, const std::wstring& name) {
     return prefix + (L"'" + name + L"'");
 }
-// Long clip names shouldn't stretch the dialog off the screen; the combo scrolls and
-// ellipsises, and the names are only there to be recognised.
+// Long clip and track names shouldn't stretch the dialog off the screen -- the
+// average's label names a track ("The average of the other 7 clips on '...'") -- so
+// every item is capped; the combo scrolls and ellipsises, and the names are only
+// there to be recognised.
 static int refComboW(const DlgUI& ui, const MatchReference& r, const wchar_t* prefix) {
-    int w = std::max(ui.S(190), ui.comboW(r.averageLabel.c_str()));
+    int w = std::max(ui.S(190), std::min(ui.comboW(r.averageLabel.c_str()), ui.S(320)));
     for (const std::wstring& n : r.clipNames)
         w = std::max(w, std::min(ui.comboW(refItem(prefix, n).c_str()), ui.S(320)));
     return w;

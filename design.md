@@ -474,7 +474,10 @@ only within a project, so New and Open forget it.
 already at the target stays put and the standard keeps its own. Each matched clip's
 new volume is `target / level`, held to **−26 … +24 dB** (`kMinMatchGain`,
 `kMaxMatchGain`). The top is `kMaxClipGain`, the same constant `Document` clamps every
-clip volume to, so "it was held at the limit" is true. A change of **under 0.01 dB
+clip volume to, so "it was held at the limit" is true. The limits **never push a clip
+outward**: one the user already set below −26 dB by hand may stay there (or come up
+towards the target) but is not raised to −26 dB, which would move it away from the
+target it already meets. A change of **under 0.01 dB
 counts as none** — it is rounding — so re-running a match that already holds changes
 nothing, and `Document::setClipGains` (one undo step for all of them) records nothing
 when no volume moved.
@@ -484,17 +487,24 @@ The dialog says so outright, because the timbre matcher next to it does rewrite 
 and the difference decides whether "I can still adjust it afterwards" is true.
 
 Silent clips (below about −100 dB FS, or turned all the way down) are left out and
-counted. The summary box reports **before and after**, like timbre's — for a set, the
+counted. When nothing can be matched, `match::Failure` says why, so the box names the
+clip that is actually the problem: the one being matched (`Subject`), the chosen
+standard (`Reference`), the pool — "none of the other clips has any speech", rather than
+blaming the clip that does (`Pool`) — or, for a set, that only one clip could be
+measured at all (`Alone`), which used to read as "these clips already match". The summary box reports **before and after**, like timbre's — for a set, the
 loudest and the quietest clip, named, and how far apart they are; for one clip to the
 rest, its distance from the target — and then warns about the three things that make a
 correct match still sound wrong:
 
 - **Held at a limit.** A clip needing more than −26 … +24 dB is usually different in
   some other way too; the box names it and says to check it belongs.
-- **Over full scale.** The mix clamps at ±1 (`renderMix`, the engine), so raising a
-  quiet but peaky clip can make it distort with nothing on screen to show it. Judged at
-  the volume of the loudest unmuted track the clip plays on (unplaced: its own volume),
-  and reported with how far over it goes.
+- **Over full scale.** Playback and export clamp at ±1 (`renderMix`, the engine, the
+  encoder), so raising a quiet but peaky clip can make it distort with nothing on screen
+  to show it. A clip is heard two ways — on its own (its card, *Export clip*) at its own
+  volume, and in the mix at that times its loudest unmuted track's — so both are checked,
+  and the box says which one clips (`OverFullScale::inMix`) and how far over. Only clips
+  the match turned **up** are checked: one it left alone or lowered was not made to clip
+  by it, and saying "now peaks over" about it would blame the match.
 - **Tracks at different volumes.** Track volume multiplies clip volume and matching
   sets only clip volumes, so clips on tracks set differently still differ in the mix by
   exactly that. Muted tracks don't count; 0.1 dB apart is the same volume.
@@ -503,11 +513,15 @@ correct match still sound wrong:
 
 `match::matchTimbre(project, set, reference, opts)` measures every clip *before*
 filtering anything, because the target may be their average, and a clip that can't be
-measured must be left alone rather than filtered by a curve derived from nothing. The
-first matched clip sets the sample rate — in one-to-the-rest that is the clip being
-matched, which must not be the one left out — and clips of another rate are left out
-and counted: spectra are only comparable bin-for-bin at one rate, and a clip missing
-from the match is exactly the one that will still sound different. The results are
+measured must be left alone rather than filtered by a curve derived from nothing.
+Spectra are only comparable bin-for-bin at one rate, so clips of another rate are left
+out and counted — a clip missing from the match is exactly the one that will still sound
+different. In one-to-the-rest the clip being matched sets the rate (it must not be the
+one left out); in a set it is the rate **most** clips share, so one odd clip at the head
+of a track can't exclude all the others. A set with fewer than two measurable clips is
+refused (`Failure::Alone`) rather than "matching" one clip to its own spectrum, and a
+silent clip has no profile (`computeTimbreProfile` returns invalid below −100 dB FS): its
+flat noise-floor spectrum averaged into a target would flatten the target's shape. The results are
 committed through `Document::replaceClipBuffers` as **one undo step**.
 
 The summary box reports the largest correction applied — **at what frequency and to
@@ -1642,7 +1656,8 @@ the overlap-add reconstruction as well as the zero-mean logic. Also covered:
 loudness preserved to within 1.5 dB (it must not double as a normalizer),
 `averageTimbre` equalling the per-bin mean and ignoring a profile of a different
 rate, the `maxCorrectionDb` clamp holding exactly, and refusals for an unmeasured
-profile / a rate mismatch / a clip shorter than one analysis window.
+profile / a rate mismatch / a clip shorter than one analysis window, and silence
+having no profile at all.
 
 `timbreDistanceDb` — the residual the summary box reports — is checked to agree
 with that convergence (2.19 dB → 0.03 dB on the same pair) and then for the
@@ -1653,7 +1668,7 @@ Scaling a clip by 0.25 must leave the distance at 0, or the report would call tw
 identically-coloured takes different merely because one is quieter, which is
 exactly the confusion the number exists to remove.
 
-**Matching clips to each other** (`match.h`, 33 checks) is tested on `Document`s
+**Matching clips to each other** (`match.h`, 42 checks) is tested on `Document`s
 built in the test, with deterministic noise whose levels are in known ratios so the
 expected volumes are exact. *Sets*: a clip placed twice on a track counts once, a clip
 with no audio is skipped, all-tracks leaves out a clip on no track, the library takes
@@ -1667,11 +1682,19 @@ and re-running the match changes nothing and adds no step; a standard is matched
 its own volume (gain 1.5 → the others to 6 and 3) and keeps it; one clip to the rest
 goes to the *others'* average (4×, not the 2.5× that counting itself would give); a
 silent clip is left alone and counted; a clip needing +40 dB is held at +24 and the
-after-spread says 15.9 dB short; a spike pushed over full scale is reported at
-+5.1 dB, and not once its track is turned down; differing track volumes are pointed
-out and equal ones are not. *Timbre*: one clip to the rest filters only that clip and
+after-spread says 15.9 dB short, while a clip set below −26 dB by hand and already
+level is left there rather than pushed back up to the limit; a spike pushed over full
+scale is reported at +5.1 dB, in the mix, and still on its own once its track is turned
+down, while a standard that already clipped, which the match didn't turn up, is never
+reported; differing track volumes are pointed out and equal ones are not. When nothing
+can be matched, the `Failure` names the right clip: silent track-mates (`Pool`), a
+silent clip being matched (`Subject`), a silent standard (`Reference`), and a set with
+one measurable clip (`Alone`, for both matchers; timbre would otherwise filter it
+towards itself). *Timbre*: one clip to the rest filters only that clip and
 lands it 0.38 dB from the others' average (from 2.26); the standard is never put
-through the filter; and **one EQ per clip** — a clip whose second half is brighter
+through the filter; a set works at the rate most of its clips share (an odd 44.1 kHz
+clip at the head of a track is left out, not the three 48 kHz ones after it), and a
+standard at another rate is named as the problem; and **one EQ per clip** — a clip whose second half is brighter
 than its first keeps exactly that difference after matching (2.229 dB before and
 after), while the control, EQ'ing each half on its own as a time-varying matcher
 would, flattens it to 0.55 dB, proving the measure can tell the two apart.
