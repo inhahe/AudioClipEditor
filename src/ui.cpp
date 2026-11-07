@@ -2748,7 +2748,12 @@ struct App {
         if (!selectionCovers(clipId)) return;
         const Clip* c = doc.project().findClip(clipId);
         if (!c || !c->buffer) return;
+        // The new clip is the selection of the clip's own audio, keeping the EQ as a
+        // setting on top (replaceClipWithNew carries it over). The file is what that
+        // sounds like -- the EQ applied -- but at the clip's own level: the volume
+        // stays a setting of the clip in the project.
         auto slice = sliceBuffer(*c->buffer, selStart, selEnd);
+        auto toWrite = c->hasEq() ? sliceBuffer(*c->heard(), selStart, selEnd) : slice;
         if (!slice || slice->frames() == 0) {
             MessageBoxW(hwnd, L"The selection is empty.", L"Split selection out", MB_ICONINFORMATION);
             return;
@@ -2783,7 +2788,7 @@ struct App {
             mfio::uniqueFilePath(dir, newName, mfio::extensionFor(o.format));
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
         std::wstring err;
-        const bool ok = mfio::encodeFile(path, *slice, o, &err);
+        const bool ok = mfio::encodeFile(path, *toWrite, o, &err);
         SetCursor(old);
         if (!ok) {
             MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING);

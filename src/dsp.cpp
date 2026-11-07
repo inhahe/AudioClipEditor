@@ -984,21 +984,28 @@ double timbreBinHz(int sampleRate) {
 // Overlap-add a static, real, symmetric gain onto every STFT frame. Because the
 // gain is real and mirrored onto the conjugate bins, each frame's phase is
 // untouched: the filter is zero-phase and smears nothing in time.
-static std::vector<float> tmFilterChannel(const std::vector<float>& in,
-                                          const std::vector<float>& gain) {
-    const size_t len = in.size();
-    // Lead-padding, as in denoiseChannelProfile, so the first and last samples
-    // get the same overlap coverage as the middle instead of a fading window.
+// `stride`-interleaved channel `in` through `gain`, overlap-added into `out` (same
+// layout, zeroed by the caller). Writes straight into the output: this runs over
+// whole clips, some of them long recordings, so the only memory beyond the result
+// is one frame.
+//
+// Every output sample lies under the same four windows' worth of overlap -- the
+// lead padding sees to that at the start, the trailing frames at the end -- so the
+// overlap-add normaliser depends only on the position within a hop: a hop-long
+// table, rather than an array the length of the clip.
+static void tmFilterChannel(const float* in, float* out, size_t len, int stride,
+                            const std::vector<float>& gain) {
     const size_t lead = kTMWin - kTMHop;
     const size_t padded = lead + len + kTMWin;
     const size_t nFr = 1 + (padded - kTMWin) / kTMHop;
 
     std::vector<float> win; tmMakeWindow(win);
+    std::vector<float> norm((size_t)kTMHop, 0.0f);
+    for (int i = 0; i < kTMWin; ++i) norm[(size_t)(i % kTMHop)] += win[i] * win[i];
     auto sampleAt = [&](size_t padIdx) -> float {
-        return (padIdx >= lead && padIdx - lead < len) ? in[padIdx - lead] : 0.0f;
+        return (padIdx >= lead && padIdx - lead < len) ? in[(padIdx - lead) * stride] : 0.0f;
     };
 
-    std::vector<float> outPad(padded, 0.0f), norm(padded, 0.0f);
     std::vector<cf> fbuf(kTMWin);
     for (size_t fr = 0; fr < nFr; ++fr) {
         const size_t s0 = fr * (size_t)kTMHop;
@@ -1010,16 +1017,12 @@ static std::vector<float> tmFilterChannel(const std::vector<float>& in,
         }
         fft(fbuf, true);
         for (int i = 0; i < kTMWin; ++i) {
-            outPad[s0 + i] += fbuf[i].real() * win[i];
-            norm[s0 + i] += win[i] * win[i];
+            const size_t p = s0 + (size_t)i;
+            if (p < lead || p - lead >= len) continue;
+            out[(p - lead) * stride] += fbuf[i].real() * win[i];
         }
     }
-    std::vector<float> out(len, 0.0f);
-    for (size_t i = 0; i < len; ++i) {
-        const float nn = norm[lead + i];
-        if (nn > 1e-6f) out[i] = outPad[lead + i] / nn;
-    }
-    return out;
+    for (size_t i = 0; i < len; ++i) out[i * stride] /= norm[(lead + i) % (size_t)kTMHop];
 }
 
 int timbreBins() { return kTMSpec; }
@@ -1034,12 +1037,8 @@ AudioBufferPtr applyEq(const AudioBuffer& buf, const std::vector<float>& curveDb
     out->sampleRate = buf.sampleRate;
     out->channels = ch;
     out->samples.resize(buf.samples.size());
-    for (int c = 0; c < ch; ++c) {
-        std::vector<float> chan((size_t)nf);
-        for (int64_t i = 0; i < nf; ++i) chan[(size_t)i] = buf.samples[(size_t)(i * ch + c)];
-        const std::vector<float> filt = tmFilterChannel(chan, gain);
-        for (int64_t i = 0; i < nf; ++i) out->samples[(size_t)(i * ch + c)] = filt[(size_t)i];
-    }
+    for (int c = 0; c < ch; ++c)
+        tmFilterChannel(buf.samples.data() + c, out->samples.data() + c, (size_t)nf, ch, gain);
     return out;
 }
 
@@ -1119,14 +1118,6 @@ TimbreEq designTimbreEq(const AudioBuffer& buf, const TimbreProfile& target,
     eq.curveDb = db;
     for (float& v : eq.curveDb) v += offset;
     return eq;
-}
-
-AudioBufferPtr matchTimbre(const AudioBuffer& buf, const TimbreProfile& target,
-                           const TimbreMatchOptions& opts,
-                           std::vector<float>* curveDbOut) {
-    TimbreEq eq = designTimbreEq(buf, target, opts);
-    if (curveDbOut) *curveDbOut = eq.shapeDb;
-    return eq.result;
 }
 
 // ---------------- manual region edits ----------------

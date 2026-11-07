@@ -38,6 +38,38 @@ static AudioBufferPtr makeSine(int rate, double seconds, double freq) {
     return b;
 }
 
+// Deterministic shaped noise: a one-pole low-pass of an LCG (a falling, roughly
+// speech-shaped spectrum) with a first-order high-frequency tilt -- the "different
+// recording conditions" -- scaled by `amp`. The same seed at two amplitudes gives
+// speech levels in exactly that ratio, so the gains a volume match should produce
+// are known exactly.
+static AudioBufferPtr tiltedNoise(double amp, double tilt, double seconds, uint32_t seed) {
+    auto b = std::make_shared<AudioBuffer>();
+    b->sampleRate = 48000; b->channels = 1;
+    const int64_t n = (int64_t)(48000 * seconds);
+    b->samples.resize((size_t)n);
+    uint32_t s = seed;
+    double y = 0.0, prev = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        s = s * 1664525u + 1013904223u;
+        const double w = (double)(int32_t)(s >> 1) / 1073741824.0 - 1.0;
+        y = 0.7 * y + 0.3 * w;
+        const double v = y - tilt * prev;
+        prev = y;
+        b->samples[(size_t)i] = (float)(amp * v);
+    }
+    return b;
+}
+
+// A timbre match of `b` onto `t`: the audio, and optionally the correction alone.
+static AudioBufferPtr timbreMatched(const AudioBuffer& b, const dsp::TimbreProfile& t,
+                                    const dsp::TimbreMatchOptions& o,
+                                    std::vector<float>* shape = nullptr) {
+    dsp::TimbreEq e = dsp::designTimbreEq(b, t, o);
+    if (shape) *shape = e.shapeDb;
+    return e.result;
+}
+
 static double rms(const AudioBuffer& b) {
     double s = 0; for (float v : b.samples) s += (double)v * v;
     return b.samples.empty() ? 0 : std::sqrt(s / b.samples.size());
@@ -2309,7 +2341,7 @@ int runSelfTest() {
         dsp::TimbreMatchOptions opt;   // defaults: 12 dB clamp, 1/2-octave smoothing
         opt.maxCorrectionDb = 24.0f;
         std::vector<float> curve;
-        auto fixed = dsp::matchTimbre(*clipB, pa, opt, &curve);
+        auto fixed = timbreMatched(*clipB, pa, opt, &curve);
         check(fixed != nullptr, L"timbre: matchTimbre returned a buffer");
         if (fixed) {
             const double diffAfter = curveRms(pa, dsp::computeTimbreProfile(*fixed));
@@ -2330,7 +2362,7 @@ int runSelfTest() {
 
         // --- matching a clip to its own spectrum must be a no-op, which also
         //     pins that the STFT filter reconstructs the signal exactly.
-        auto same = dsp::matchTimbre(*clipA, pa, opt);
+        auto same = timbreMatched(*clipA, pa, opt);
         check(same != nullptr, L"timbre: matching a clip to itself returns a buffer");
         if (same && same->frames() == N) {
             double worst = 0.0;
@@ -2352,8 +2384,8 @@ int runSelfTest() {
                     avg.logPower[k] - 0.5f * (pa.logPower[k] + pb.logPower[k])));
             check(worst < 1e-4, L"timbre: the average is the per-bin mean of the log spectra",
                   std::to_wstring(worst));
-            auto ma = dsp::matchTimbre(*clipA, avg, opt);
-            auto mb = dsp::matchTimbre(*clipB, avg, opt);
+            auto ma = timbreMatched(*clipA, avg, opt);
+            auto mb = timbreMatched(*clipB, avg, opt);
             check(ma && mb, L"timbre: both clips matched to the average");
             if (ma && mb) {
                 const double conv = curveRms(dsp::computeTimbreProfile(*ma),
@@ -2390,7 +2422,7 @@ int runSelfTest() {
             dsp::TimbreProfile pr = dsp::computeTimbreProfile(*rumbly);
             std::vector<float> curve;
             dsp::TimbreMatchOptions o; o.maxCorrectionDb = 24.0f;
-            auto fixedRumble = dsp::matchTimbre(*clipA, pr, o, &curve);
+            auto fixedRumble = timbreMatched(*clipA, pr, o, &curve);
             check(fixedRumble != nullptr, L"timbre band: matched against a rumbly reference");
             if (fixedRumble) {
                 const double binHz = dsp::timbreBinHz(RATE);
@@ -2451,23 +2483,23 @@ int runSelfTest() {
         // --- the clamp is a hard limit on how far a clip may be moved
         dsp::TimbreMatchOptions tight; tight.maxCorrectionDb = 3.0f;
         std::vector<float> tightCurve;
-        auto lim = dsp::matchTimbre(*clipB, pa, tight, &tightCurve);
+        auto lim = timbreMatched(*clipB, pa, tight, &tightCurve);
         double biggest = 0.0;
         for (float d : tightCurve) biggest = std::max(biggest, (double)std::fabs(d));
         check(lim && biggest <= 3.0001, L"timbre: the correction respects the dB clamp",
               std::to_wstring(biggest));
 
         // --- refusals, rather than silently returning something wrong
-        check(dsp::matchTimbre(*clipB, dsp::TimbreProfile{}, opt) == nullptr,
+        check(timbreMatched(*clipB, dsp::TimbreProfile{}, opt) == nullptr,
               L"timbre: matching against an unmeasured profile is refused");
         dsp::TimbreProfile wrongRate = pa; wrongRate.sampleRate = 44100;
-        check(dsp::matchTimbre(*clipB, wrongRate, opt) == nullptr,
+        check(timbreMatched(*clipB, wrongRate, opt) == nullptr,
               L"timbre: matching across sample rates is refused");
         auto tiny = std::make_shared<AudioBuffer>();
         tiny->sampleRate = RATE; tiny->channels = 1; tiny->samples.resize(1000, 0.1f);
         check(!dsp::computeTimbreProfile(*tiny).valid(),
               L"timbre: audio shorter than one window can't be profiled");
-        check(dsp::matchTimbre(*tiny, pa, opt) == nullptr,
+        check(timbreMatched(*tiny, pa, opt) == nullptr,
               L"timbre: a clip too short to measure is refused");
         auto silence = std::make_shared<AudioBuffer>();
         silence->sampleRate = RATE; silence->channels = 1; silence->samples.assign(RATE, 0.0f);
@@ -2478,26 +2510,6 @@ int runSelfTest() {
     // ---- matching clips to each other (match.h): which clips, volume, timbre
     {
         const int RATE = 48000;
-        // Deterministic shaped noise (the timbre section's generator, with a seed and
-        // an amplitude). The same seed at two amplitudes gives speech levels in
-        // exactly that ratio, so the gains a volume match should produce are known.
-        auto noise = [](double amp, double tilt, double seconds, uint32_t seed) {
-            auto b = std::make_shared<AudioBuffer>();
-            b->sampleRate = 48000; b->channels = 1;
-            const int64_t n = (int64_t)(48000 * seconds);
-            b->samples.resize((size_t)n);
-            uint32_t s = seed;
-            double y = 0.0, prev = 0.0;
-            for (int64_t i = 0; i < n; ++i) {
-                s = s * 1664525u + 1013904223u;
-                const double w = (double)(int32_t)(s >> 1) / 1073741824.0 - 1.0;
-                y = 0.7 * y + 0.3 * w;
-                const double v = y - tilt * prev;
-                prev = y;
-                b->samples[(size_t)i] = (float)(amp * v);
-            }
-            return b;
-        };
         // A one-second 220 Hz sine whose peak is known: `amp`, or `spike` at one sample.
         auto tone = [](double amp, double spike) {
             auto b = std::make_shared<AudioBuffer>();
@@ -2524,9 +2536,9 @@ int runSelfTest() {
         // --- which clips a command involves
         {
             Document d; d.init(RATE);
-            const int a = d.addClip(L"a", noise(0.2, 0.0, 1.0, 1), L"", L"add");
-            const int b = d.addClip(L"b", noise(0.2, 0.0, 1.0, 2), L"", L"add");
-            const int c = d.addClip(L"c", noise(0.2, 0.0, 1.0, 3), L"", L"add");   // on no track
+            const int a = d.addClip(L"a", tiltedNoise(0.2, 0.0, 1.0, 1), L"", L"add");
+            const int b = d.addClip(L"b", tiltedNoise(0.2, 0.0, 1.0, 2), L"", L"add");
+            const int c = d.addClip(L"c", tiltedNoise(0.2, 0.0, 1.0, 3), L"", L"add");   // on no track
             auto none = std::make_shared<AudioBuffer>(); none->sampleRate = RATE; none->channels = 1;
             const int e = d.addClip(L"empty", none, L"", L"add");
             const int t1 = d.project().tracks[0].id;
@@ -2568,9 +2580,9 @@ int runSelfTest() {
         // --- volume: a set, to its average; then to a standard
         {
             Document d; d.init(RATE);
-            const int q = d.addClip(L"quiet", noise(0.05, 0.0, 2.0, 7), L"", L"add");
-            const int m = d.addClip(L"mid", noise(0.10, 0.0, 2.0, 7), L"", L"add");
-            const int l = d.addClip(L"loud", noise(0.20, 0.0, 2.0, 7), L"", L"add");
+            const int q = d.addClip(L"quiet", tiltedNoise(0.05, 0.0, 2.0, 7), L"", L"add");
+            const int m = d.addClip(L"mid", tiltedNoise(0.10, 0.0, 2.0, 7), L"", L"add");
+            const int l = d.addClip(L"loud", tiltedNoise(0.20, 0.0, 2.0, 7), L"", L"add");
             const int t1 = d.project().tracks[0].id;
             d.placeClip(t1, q, 0, L"p");
             d.placeClip(t1, m, 2 * RATE, L"p");
@@ -2621,9 +2633,9 @@ int runSelfTest() {
         // --- volume: one clip to the rest of its track
         {
             Document d; d.init(RATE);
-            const int subj = d.addClip(L"subject", noise(0.05, 0.0, 2.0, 5), L"", L"add");
-            const int o1 = d.addClip(L"o1", noise(0.10, 0.0, 2.0, 5), L"", L"add");
-            const int o2 = d.addClip(L"o2", noise(0.40, 0.0, 2.0, 5), L"", L"add");
+            const int subj = d.addClip(L"subject", tiltedNoise(0.05, 0.0, 2.0, 5), L"", L"add");
+            const int o1 = d.addClip(L"o1", tiltedNoise(0.10, 0.0, 2.0, 5), L"", L"add");
+            const int o2 = d.addClip(L"o2", tiltedNoise(0.40, 0.0, 2.0, 5), L"", L"add");
             const int t1 = d.project().tracks[0].id;
             d.placeClip(t1, o1, 0, L"p");
             d.placeClip(t1, subj, 2 * RATE, L"p");
@@ -2649,8 +2661,8 @@ int runSelfTest() {
             auto quiet = std::make_shared<AudioBuffer>();
             quiet->sampleRate = RATE; quiet->channels = 1; quiet->samples.assign(RATE, 0.0f);
             const int z = d.addClip(L"silent", quiet, L"", L"add");
-            const int faint = d.addClip(L"faint", noise(0.001, 0.0, 2.0, 9), L"", L"add");
-            const int ref = d.addClip(L"ref", noise(0.1, 0.0, 2.0, 9), L"", L"add");
+            const int faint = d.addClip(L"faint", tiltedNoise(0.001, 0.0, 2.0, 9), L"", L"add");
+            const int ref = d.addClip(L"ref", tiltedNoise(0.1, 0.0, 2.0, 9), L"", L"add");
             const match::ClipSet s = match::librarySet(d.project());
             const match::VolumeResult r = match::matchVolume(d.project(), s, s.indexOf(ref));
             bool zTouched = false;
@@ -2707,8 +2719,8 @@ int runSelfTest() {
             Document d; d.init(RATE);
             // "hand" is a loud take turned down to 2% by hand -- below the -26 dB
             // limit -- which puts it exactly level with "low".
-            const int low = d.addClip(L"low", noise(0.02, 0.0, 2.0, 31), L"", L"add");
-            const int hand = d.addClip(L"hand", noise(1.0, 0.0, 2.0, 31), L"", L"add");
+            const int low = d.addClip(L"low", tiltedNoise(0.02, 0.0, 2.0, 31), L"", L"add");
+            const int hand = d.addClip(L"hand", tiltedNoise(1.0, 0.0, 2.0, 31), L"", L"add");
             d.setClipGain(hand, 0.02f, L"vol");
             const match::ClipSet s = match::librarySet(d.project());
             const match::VolumeResult r = match::matchVolume(d.project(), s, -1);
@@ -2738,7 +2750,7 @@ int runSelfTest() {
                 b->sampleRate = RATE; b->channels = 1; b->samples.assign(2 * RATE, 0.0f);
                 return b;
             };
-            const int speak = d.addClip(L"speaks", noise(0.1, 0.0, 2.0, 41), L"", L"add");
+            const int speak = d.addClip(L"speaks", tiltedNoise(0.1, 0.0, 2.0, 41), L"", L"add");
             const int q1 = d.addClip(L"q1", hush(), L"", L"add");
             const int q2 = d.addClip(L"q2", hush(), L"", L"add");
             const int t1 = d.project().tracks[0].id;
@@ -2766,13 +2778,13 @@ int runSelfTest() {
             Document d; d.init(RATE);
             // One clip at another rate at the head of a track must not exclude the
             // ones after it: the set works at the rate most of it shares.
-            auto odd = noise(0.4, 0.0, 3.0, 51); odd->sampleRate = 44100;
+            auto odd = tiltedNoise(0.4, 0.0, 3.0, 51); odd->sampleRate = 44100;
             const int o = d.addClip(L"odd", odd, L"", L"add");
             const int t1 = d.project().tracks[0].id;
             d.placeClip(t1, o, 0, L"p");
             for (int k = 0; k < 3; ++k) {
                 const int c = d.addClip(L"c" + std::to_wstring(k),
-                                        noise(0.4, 0.3 * k, 3.0, 52 + k), L"", L"add");
+                                        tiltedNoise(0.4, 0.3 * k, 3.0, 52 + k), L"", L"add");
                 d.placeClip(t1, c, (k + 1) * 4 * RATE, L"p");
             }
             const match::ClipSet s = match::trackSet(d.project(), t1);
@@ -2790,9 +2802,9 @@ int runSelfTest() {
         // --- timbre: one clip to the rest, a standard left alone, one EQ per clip
         {
             Document d; d.init(RATE);
-            const int a1 = d.addClip(L"a1", noise(0.4, 0.0, 3.0, 11), L"", L"add");
-            const int a2 = d.addClip(L"a2", noise(0.4, 0.0, 3.0, 12), L"", L"add");
-            const int br = d.addClip(L"bright", noise(0.4, 0.6, 3.0, 13), L"", L"add");
+            const int a1 = d.addClip(L"a1", tiltedNoise(0.4, 0.0, 3.0, 11), L"", L"add");
+            const int a2 = d.addClip(L"a2", tiltedNoise(0.4, 0.0, 3.0, 12), L"", L"add");
+            const int br = d.addClip(L"bright", tiltedNoise(0.4, 0.6, 3.0, 13), L"", L"add");
             const dsp::TimbreMatchOptions opt;
 
             const match::ClipSet one = match::clipToLibrary(d.project(), br);
@@ -2820,8 +2832,8 @@ int runSelfTest() {
             // through still changes halfway through afterwards. The control proves
             // the measure can tell: EQ'ing each half on its own -- an EQ that followed
             // the clip along -- flattens the difference.
-            auto twoTone = std::make_shared<AudioBuffer>(*noise(0.4, 0.0, 2.0, 21));
-            const auto brightHalf = noise(0.4, 0.6, 2.0, 22);
+            auto twoTone = std::make_shared<AudioBuffer>(*tiltedNoise(0.4, 0.0, 2.0, 21));
+            const auto brightHalf = tiltedNoise(0.4, 0.6, 2.0, 22);
             twoTone->samples.insert(twoTone->samples.end(), brightHalf->samples.begin(),
                                     brightHalf->samples.end());
             const int tt = d.addClip(L"two-tone", twoTone, L"", L"add");
@@ -2836,8 +2848,8 @@ int runSelfTest() {
                 };
                 const double dIn = halves(*twoTone), dOut = halves(outB);
                 const dsp::TimbreProfile target = dsp::computeTimbreProfile(*d.project().findClip(a1)->buffer);
-                auto first = dsp::matchTimbre(*slice(*twoTone, 0, h), target, opt);
-                auto second = dsp::matchTimbre(*slice(*twoTone, h, e2), target, opt);
+                auto first = timbreMatched(*slice(*twoTone, 0, h), target, opt);
+                auto second = timbreMatched(*slice(*twoTone, h, e2), target, opt);
                 const double dAdaptive = (first && second)
                     ? dsp::timbreDistanceDb(dsp::computeTimbreProfile(*first),
                                             dsp::computeTimbreProfile(*second)) : -1.0;
@@ -3037,21 +3049,6 @@ int runSelfTest() {
     // match replaces the curve instead of stacking on it, edits keep it, it can come
     // off exactly, and undo, redo and the project file all carry it.
     {
-        auto noise = [](double amp, double tilt, double seconds, uint32_t seed) {
-            auto b = std::make_shared<AudioBuffer>();
-            b->sampleRate = 48000; b->channels = 1;
-            const int64_t n = (int64_t)(48000 * seconds);
-            b->samples.resize((size_t)n);
-            uint32_t s = seed; double y = 0.0, prev = 0.0;
-            for (int64_t i = 0; i < n; ++i) {
-                s = s * 1664525u + 1013904223u;
-                const double w = (double)(int32_t)(s >> 1) / 1073741824.0 - 1.0;
-                y = 0.7 * y + 0.3 * w;
-                const double v = y - tilt * prev; prev = y;
-                b->samples[(size_t)i] = (float)(amp * v);
-            }
-            return b;
-        };
         auto maxDiff = [](const AudioBuffer& x, const AudioBuffer& y) {
             if (x.samples.size() != y.samples.size()) return 1e9;
             double m = 0.0;
@@ -3062,8 +3059,8 @@ int runSelfTest() {
         auto num = [](double v) { wchar_t b[32]; swprintf(b, 32, L"%.4g", v); return std::wstring(b); };
 
         Document d; d.init(48000);
-        const int a = d.addClip(L"ref", noise(0.4, 0.0, 3.0, 61), L"", L"add");
-        const int b = d.addClip(L"bright", noise(0.4, 0.6, 3.0, 62), L"", L"add");
+        const int a = d.addClip(L"ref", tiltedNoise(0.4, 0.0, 3.0, 61), L"", L"add");
+        const int b = d.addClip(L"bright", tiltedNoise(0.4, 0.6, 3.0, 62), L"", L"add");
         const AudioBufferPtr bOwn = d.project().findClip(b)->buffer;
         const match::ClipSet one = match::clipToLibrary(d.project(), b);
         const match::TimbreResult r = match::matchTimbre(d.project(), one, one.indexOf(a), dsp::TimbreMatchOptions{});
@@ -3184,8 +3181,8 @@ int runSelfTest() {
 
         // Volume matching hears the EQ: a flat +6 dB curve makes a clip 6 dB louder.
         Document v; v.init(48000);
-        const int x = v.addClip(L"x", noise(0.1, 0.0, 2.0, 71), L"", L"add");
-        const int y = v.addClip(L"y", noise(0.1, 0.0, 2.0, 71), L"", L"add");
+        const int x = v.addClip(L"x", tiltedNoise(0.1, 0.0, 2.0, 71), L"", L"add");
+        const int y = v.addClip(L"y", tiltedNoise(0.1, 0.0, 2.0, 71), L"", L"add");
         auto flat = std::make_shared<const std::vector<float>>((size_t)dsp::timbreBins(), 6.0f);
         v.applyMatch({ { y, flat, nullptr } }, {}, L"eq");
         const match::ClipSet vs = match::librarySet(v.project());
@@ -3230,24 +3227,9 @@ int runSelfTest() {
     // The volumes have to be measured through the new EQs. With "keep loudness" off
     // an EQ moves a clip's level, so volumes measured before it would be off by that.
     {
-        auto noise = [](double amp, double tilt, double seconds, uint32_t seed) {
-            auto b = std::make_shared<AudioBuffer>();
-            b->sampleRate = 48000; b->channels = 1;
-            const int64_t n = (int64_t)(48000 * seconds);
-            b->samples.resize((size_t)n);
-            uint32_t s = seed; double y = 0.0, prev = 0.0;
-            for (int64_t i = 0; i < n; ++i) {
-                s = s * 1664525u + 1013904223u;
-                const double w = (double)(int32_t)(s >> 1) / 1073741824.0 - 1.0;
-                y = 0.7 * y + 0.3 * w;
-                const double v = y - tilt * prev; prev = y;
-                b->samples[(size_t)i] = (float)(amp * v);
-            }
-            return b;
-        };
         Document d; d.init(48000);
-        const int dark = d.addClip(L"dark", noise(0.1, 0.0, 3.0, 81), L"", L"add");
-        const int bright = d.addClip(L"bright", noise(0.3, 0.6, 3.0, 82), L"", L"add");
+        const int dark = d.addClip(L"dark", tiltedNoise(0.1, 0.0, 3.0, 81), L"", L"add");
+        const int bright = d.addClip(L"bright", tiltedNoise(0.3, 0.6, 3.0, 82), L"", L"add");
         dsp::TimbreMatchOptions opt; opt.preserveLoudness = false;
         const match::ClipSet s = match::librarySet(d.project());
         const match::TimbreResult r = match::matchTimbre(d.project(), s, s.indexOf(dark), opt);
@@ -3285,6 +3267,100 @@ int runSelfTest() {
         p = d.historyPosition();
         check(p.redoChoices == 2 && p.undone == 1,
               L"history position: a fork says redo will ask which", std::to_wstring(p.redoChoices) + L" choices");
+    }
+
+    // ---- the EQ and the history: renders shared, not redone; degraded files
+    {
+        auto maxDiff = [](const AudioBuffer& x, const AudioBuffer& y) {
+            if (x.samples.size() != y.samples.size()) return 1e9;
+            double m = 0.0;
+            for (size_t i = 0; i < x.samples.size(); ++i)
+                m = std::max(m, std::fabs((double)x.samples[i] - y.samples[i]));
+            return m;
+        };
+        auto flatEq = [](float db) {
+            return std::make_shared<const std::vector<float>>((size_t)dsp::timbreBins(), db);
+        };
+
+        // A history state read back from a file has its curves but not their renders.
+        // Visiting it must reuse the render the state being left already holds, for a
+        // clip that is the same in both: re-filtering every EQ'd clip on every first
+        // undo after reopening stalls a long project for seconds.
+        {
+            Document d; d.init(48000);
+            const int a = d.addClip(L"a", tiltedNoise(0.2, 0.3, 2.0, 91), L"", L"add a");
+            d.applyMatch({ { a, flatEq(3.0f), nullptr } }, {}, L"eq a");
+            d.addClip(L"b", tiltedNoise(0.2, 0.0, 2.0, 92), L"", L"add b");
+            std::wstring proj = dir + L"\\_selftest_eq_hist.acep";
+            Document r;
+            const bool ok = d.saveProject(proj) && r.loadProject(proj);
+            const Clip* before = ok ? r.project().findClip(a) : nullptr;
+            const AudioBuffer* render = before ? before->eqBuffer.get() : nullptr;
+            if (ok) r.undo();   // to "eq a": a is the same clip, same curve
+            const Clip* after = ok ? r.project().findClip(a) : nullptr;
+            check(render && after && after->eqBuffer.get() == render,
+                  L"timbre EQ: visiting a reopened history state reuses the render a clip already has");
+            DeleteFileW(proj.c_str());
+        }
+
+        // A pre-rendered EQ is only taken for the audio it was rendered from.
+        {
+            Document d; d.init(48000);
+            const int a = d.addClip(L"a", tiltedNoise(0.2, 0.0, 2.0, 93), L"", L"add");
+            const AudioBufferPtr other = tiltedNoise(0.2, 0.6, 2.0, 94);   // same length
+            const EqCurve curve = flatEq(-4.0f);
+            const AudioBufferPtr wrong = dsp::applyEq(*other, *curve);
+            d.applyMatch({ { a, curve, wrong, other } }, {}, L"eq");
+            const Clip* c = d.project().findClip(a);
+            auto right = dsp::applyEq(*c->buffer, *curve);
+            check(c->eqBuffer != wrong && right && maxDiff(*c->heard(), *right) < 1e-6,
+                  L"timbre EQ: a render made from other audio is not adopted, the clip's own is made");
+        }
+
+        // A history state stored by name only, between ones that are stored, keeps its
+        // place in the EQ section: the states either side still get their own EQs.
+        {
+            Document d; d.init(48000);
+            const int a = d.addClip(L"a", tiltedNoise(0.2, 0.0, 2.0, 95), L"", L"add a");
+            const int b = d.addClip(L"b", tiltedNoise(0.2, 0.0, 2.0, 96), L"", L"add b");
+            d.replaceClipBuffers({ { b, dsp::silenceRange(*d.project().findClip(b)->buffer, 0, 4000) } },
+                                 L"edit b");   // what came before now refers to superseded audio
+            d.applyMatch({ { a, flatEq(5.0f), nullptr } }, {}, L"eq a");
+            d.renameClip(a, L"a2");
+            const int64_t budget = Document::historyBudgetBytes();
+            Document::setHistoryBudgetBytes(1);   // superseded audio can't be stored
+            std::wstring proj = dir + L"\\_selftest_eq_nameonly.acep";
+            const bool saved = d.saveProject(proj);
+            const int dropped = d.lastSaveHistoryDropped();
+            Document::setHistoryBudgetBytes(budget);
+            Document r;
+            const bool ok = saved && r.loadProject(proj);
+            const bool liveEq = ok && r.project().findClip(a)->hasEq();
+            if (ok) r.undo();   // "eq a": stored, with a's EQ
+            const bool histEq = ok && r.project().findClip(a) && r.project().findClip(a)->hasEq();
+            if (ok) r.undo();   // "edit b": stored, before the EQ
+            const bool before = ok && r.project().findClip(a) && !r.project().findClip(a)->hasEq();
+            check(dropped > 0 && liveEq && histEq && before && !r.canUndo(),
+                  L"timbre EQ: with a history state stored by name only, the stored ones keep their EQs",
+                  L"dropped " + std::to_wstring(dropped));
+            DeleteFileW(proj.c_str());
+        }
+
+        // A curve of the wrong size can't be applied: dropped on load, the rest kept.
+        {
+            Document d; d.init(48000);
+            const int a = d.addClip(L"a", tiltedNoise(0.2, 0.0, 2.0, 97), L"", L"add a");
+            const int b = d.addClip(L"b", tiltedNoise(0.2, 0.0, 2.0, 98), L"", L"add b");
+            d.applyMatch({ { b, flatEq(2.0f), nullptr } }, {}, L"eq b");
+            d.project().findClip(a)->eq = std::make_shared<const std::vector<float>>(10, 3.0f);
+            std::wstring proj = dir + L"\\_selftest_eq_badcurve.acep";
+            Document r;
+            const bool ok = d.saveProject(proj, false) && r.loadProject(proj);
+            check(ok && !r.project().findClip(a)->hasEq() && r.project().findClip(b)->hasEq() &&
+                      r.project().findClip(a)->heard() == r.project().findClip(a)->buffer,
+                  L"timbre EQ: a curve of the wrong size is dropped on load; the other clips keep theirs");
+            DeleteFileW(proj.c_str());
+        }
     }
 
     out(L"");

@@ -448,8 +448,9 @@ TimbreResult matchTimbre(const Project& p, const ClipSet& s, int reference,
         // like through its current EQ: it replaces that EQ rather than stacking on
         // it, so matching again lands in the same place instead of compounding. It
         // keeps the loudness the clip is heard at now.
-        const dsp::TimbreEq eq = dsp::designTimbreEq(*c->buffer, target, opts,
-                                                     dsp::speechLoudness(*c->heard()));
+        const dsp::TimbreEq eq = dsp::designTimbreEq(
+            *c->buffer, target, opts,
+            opts.preserveLoudness ? dsp::speechLoudness(*c->heard()) : -1.0);
         if (!eq.result) continue;
         // Where the biggest move landed, not just how big it was: 8 dB at 250 Hz is
         // a mic-distance difference, 8 dB at 40 Hz is a fan.
@@ -460,7 +461,7 @@ TimbreResult matchTimbre(const Project& p, const ClipSet& s, int reference,
                 r.worstClip = i;
             }
         r.updates.push_back({ s.ids[i], std::make_shared<const std::vector<float>>(eq.curveDb),
-                              eq.result });
+                              eq.result, c->buffer });
         const AudioBufferPtr& matched = eq.result;
         // Re-measure the result. The size of the correction says how far a clip was
         // moved, which is a different question from how close it ended up: a big

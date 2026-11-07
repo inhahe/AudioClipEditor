@@ -316,8 +316,8 @@ bool Document::applyMatch(const std::vector<ClipEq>& eqs,
         Clip* c = project_.findClip(u.clipId);
         if (!c || c->eq == u.eq) continue;   // the same curve (or none on either side)
         c->eq = u.eq;
-        if (u.eq && u.heard && c->buffer && u.heard->frames() == c->buffer->frames()) {
-            c->eqBuffer = u.heard;           // rendered already, by the match
+        if (u.eq && u.heard && u.source && u.source == c->buffer) {
+            c->eqBuffer = u.heard;           // rendered already, by the match, from this audio
             c->peaks = buildPeaks(u.heard);
         } else {
             renderClip(*c);
@@ -903,6 +903,14 @@ std::wstring Document::undoDesc() const {
 void Document::restore(const Project& p) {
     const int nextClip = std::max(p.nextClipId, project_.nextClipId);
     const int nextTrack = std::max(p.nextTrackId, project_.nextTrackId);
+    // Renders the state being left already holds, by the (audio, curve) pair they
+    // were made from: a clip unchanged between the two states -- most of them, in
+    // most steps -- shares its render instead of being filtered all over again.
+    struct Render { AudioBufferPtr eqBuffer; PeakCachePtr peaks; };
+    std::unordered_map<const AudioBuffer*, std::vector<std::pair<const std::vector<float>*, Render>>> have;
+    for (const Clip& c : project_.library)
+        if (c.eq && c.eqBuffer && c.buffer)
+            have[c.buffer.get()].push_back({ c.eq.get(), { c.eqBuffer, c.peaks } });
     project_ = p;
     project_.nextClipId = nextClip;
     project_.nextTrackId = nextTrack;
@@ -914,7 +922,13 @@ void Document::restore(const Project& p) {
     for (size_t i = 0; i < project_.library.size(); ++i) {
         Clip& c = project_.library[i];
         if (!c.eq || c.eqBuffer) continue;
-        renderClip(c);
+        bool reused = false;
+        if (auto it = have.find(c.buffer.get()); it != have.end())
+            for (const auto& r : it->second)
+                if (r.first == c.eq.get()) {
+                    c.eqBuffer = r.second.eqBuffer; c.peaks = r.second.peaks; reused = true; break;
+                }
+        if (!reused) renderClip(c);
         if (node && i < node->snapshot.library.size() && node->snapshot.library[i].id == c.id) {
             node->snapshot.library[i].eqBuffer = c.eqBuffer;
             node->snapshot.library[i].peaks = c.peaks;

@@ -578,19 +578,35 @@ draws, measures or exports uses — previews, the timeline mix (and its re-arm h
 **Rendering** (`Document::renderClip`) runs wherever a clip's audio or curve changes:
 `replaceClipBuffer(s)` keep the EQ and re-render it onto the edited audio;
 `addClipFromRange` and `replaceClipWithNew` carry the EQ over, like the volume; and
-`applyMatch` takes a match's pre-rendered result when it fits rather than filtering
-twice. `dsp::designTimbreEq` folds the two broadband scalars a match applies (keep
-loudness, keep peaks under full scale) into the curve as one dB offset, so the stored
-curve applied with `dsp::applyEq` reproduces the match's result exactly (selftest:
-within 6e-8).
+`applyMatch` takes a match's pre-rendered result rather than filtering twice — but
+only when `ClipEq::source` *is* the clip's audio (a `shared_ptr`, so the identity
+can't be reused by another buffer in the meantime); a render of other audio, even of
+the same length, is refused and the clip is rendered from its own. `dsp::designTimbreEq`
+folds the two broadband scalars a match applies (keep loudness, keep peaks under full
+scale) into the curve as one dB offset, so the stored curve applied with
+`dsp::applyEq` reproduces the match's result exactly (selftest: within 6e-8). With
+*Keep each clip's loudness* off, the loudness to keep isn't measured at all.
+
+**Memory.** A clip with an EQ holds its audio twice — its own and the render — which
+is the price of playing, drawing and exporting it without filtering on the fly. The
+filter itself (`tmFilterChannel`) works in place on the interleaved output: the
+overlap-add normaliser depends only on the position within a hop (every sample lies
+under the same four windows, by the lead padding at the start and the trailing frames
+at the end), so it is a hop-long table rather than two clip-length arrays, and the
+only working memory beyond the result is one frame. That matters for the clips it
+runs over — whole takes, sometimes an hour-long source recording.
 
 **Undo and history.** Snapshots share curves and rendered audio through `shared_ptr`,
 so a step costs a pointer per clip. A state read back from a project file has its
 curves but not their renders — rendering every state of a long history at load would
 cost far more than rendering the few that are visited — so `Document::restore`
-renders any missing ones and writes them back into that history node, making a second
-visit free. Until then `heard()` would fall back to the un-EQ'd audio, which is why
-nothing reads a history snapshot's audio except through `restore`.
+completes them. First it takes the render the state being *left* holds for the same
+(audio, curve) pair — a clip unchanged between the two states, which is most of them
+in most steps, shares its render instead of being filtered again, so the first undo
+after reopening a project costs nothing for clips the step didn't touch. Only clips
+that really differ are rendered, and the result is written back into that history
+node, making a second visit free. Until then `heard()` would fall back to the un-EQ'd
+audio, which is why nothing reads a history snapshot's audio except through `restore`.
 
 **In the project file** the curves are a tagged section (`ACEQ`, version 1) after
 everything else: a deduplicated curve pool, a reference per live clip, and per written
@@ -1168,10 +1184,12 @@ on undo would be wrong. The new clip takes the old one's **library slot** (so it
 appears where the eye already is) and its **gain**, and carries the path just
 written as its `sourcePath`, which makes it a normal file-backed clip: a later
 *Export clip* defaults to the same folder, and sort-by-time uses the file's own
-mtime. For the same reason the file is written **without** the clip's volume,
-unlike *Export clip*: it is the new clip's audio, and the new clip carries the
-volume on top, so baking it in as well would apply it twice to anything that later
-reads the file back. *New clip from selection* (`Document::addClipFromRange`) carries the
+mtime. The file is the selection **as it sounds, at the clip's own level**: its
+timbre EQ applied (as it always was, when matching rewrote the audio), its volume
+not — the volume stays a setting of the new clip in the project, which keeps its
+own audio with the EQ as a setting on top, so it can still be re-matched or have the
+EQ taken off. The file is a copy written alongside, not something the clip is read
+back from. *New clip from selection* (`Document::addClipFromRange`) carries the
 source clip's volume for the same reason split-out does: a sentence cut from a take
 must sound as it did in the take, including a volume set by hand or by a match.
 
@@ -1779,6 +1797,13 @@ reduce + residue == original. It also logs the throughput (≈37× realtime).
 **Timbre and volume in one step** (2 checks): volumes measured through the new EQs
 leave the clips matched (measured without them, a clip is left to change), and one
 undo takes back both.
+
+**The EQ and the history** (4 checks): visiting a reopened history state reuses the
+render a clip already has (the same buffer, not a re-filtered copy); a render made
+from other audio of the same length is refused and the clip's own made; with a
+history state stored by name only between stored ones, the stored ones keep their
+EQs (the section's per-node lists stay aligned); and a curve of the wrong size is
+dropped on load while the other clips keep theirs.
 
 **The timbre EQ as a setting** (14 checks): a match yields a curve and the audio
 through it, and `applyEq` of the stored curve reproduces that audio (to 6e-8); the

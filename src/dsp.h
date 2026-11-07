@@ -157,7 +157,8 @@ TimbreProfile computeTimbreProfile(const AudioBuffer& buf);
 // ignored.
 TimbreProfile averageTimbre(const std::vector<TimbreProfile>& profiles);
 
-// Filter `buf` so its long-term spectrum matches `target`. The correction is
+// The EQ that takes `buf`'s long-term spectrum onto `target` (see designTimbreEq
+// below for what it returns). The correction is
 // smoothed over `smoothingOctaves`, forced to average 0 dB, and then clamped to
 // +/- maxCorrectionDb. It is applied **zero-phase** (a real, symmetric gain on
 // each STFT frame), so nothing is smeared in time.
@@ -176,9 +177,6 @@ TimbreProfile averageTimbre(const std::vector<TimbreProfile>& profiles);
 // `curveDbOut`, if given, receives the correction actually applied, per bin, in
 // dB -- useful for reporting how far a clip had to move. Returns nullptr if the
 // target is invalid, its rate doesn't match, or `buf` is too short to measure.
-AudioBufferPtr matchTimbre(const AudioBuffer& buf, const TimbreProfile& target,
-                           const TimbreMatchOptions& opts,
-                           std::vector<float>* curveDbOut = nullptr);
 
 // The EQ a match designs, kept apart from the audio so a clip can carry it as a
 // setting (Clip::eq) rather than as rewritten samples.
@@ -187,10 +185,10 @@ struct TimbreEq {
     // loudness (opts.preserveLoudness) and keeps peaks under full scale. Applied to
     // the same audio with applyEq it reproduces `result` exactly.
     std::vector<float> curveDb;
-    std::vector<float> shapeDb;     // the correction alone: what matchTimbre reports
+    std::vector<float> shapeDb;     // the correction alone: where and how much it moves
     AudioBufferPtr result;          // the audio through curveDb; null if no match
 };
-// matchTimbre, returning the EQ as well as the audio. `keepLoudness` is the speech
+// Design the EQ and apply it, returning both. `keepLoudness` is the speech
 // loudness the result should have when opts.preserveLoudness is set; <= 0 means
 // `buf`'s own. (A clip that already has an EQ is matched from its unequalised audio
 // but should keep the level it is *heard* at, which is what this is for.)
@@ -219,7 +217,7 @@ int timbreBins();
 // top octave. Returns -1 if the profiles aren't comparable.
 double timbreDistanceDb(const TimbreProfile& a, const TimbreProfile& b);
 
-// Hz per bin of a TimbreProfile / of the curve `matchTimbre` reports, so a
+// Hz per bin of a TimbreProfile / of an EQ curve, so a
 // caller can say *where* the largest correction landed. "8 dB at 250 Hz" and
 // "8 dB at 40 Hz" mean completely different things.
 double timbreBinHz(int sampleRate);

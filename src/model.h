@@ -53,6 +53,10 @@ struct ClipEq {
     int clipId = -1;
     EqCurve eq;
     AudioBufferPtr heard;           // may be null: Document renders it
+    // The audio `heard` was rendered from. A render is only adopted for a clip whose
+    // audio is still exactly this (a shared_ptr, so the identity can't be reused by
+    // another buffer meanwhile); anything else is re-rendered.
+    AudioBufferPtr source;
 };
 
 // A clip instance placed on a track at a timeline position (in project frames).

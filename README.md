@@ -243,8 +243,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   submenu — this clip or all clips — or a track header's menu) takes it off
   exactly, back to the clip's own audio. Everything you hear, see and export —
   previews, the timeline, the waveform, *Export clip*, the mixdown — goes through
-  the EQ. Projects save the EQs; an older version of the app opens such a project
-  fine, just without them.
+  the EQ — *Split selection out to a WAV file* too, at the clip's own volume.
+  Projects save the EQs; an older version of the app opens such a project fine,
+  just without them.
 
   The correction only covers the range speech actually occupies (about
   90 Hz – 11 kHz). Below and above that a recording is mostly its own rumble and
