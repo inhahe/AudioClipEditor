@@ -349,6 +349,14 @@ VolumeResult matchVolume(const Project& p, const ClipSet& s, int reference) {
     return r;
 }
 
+VolumeResult matchVolumeWithEq(const Project& p, const ClipSet& s, int reference,
+                               const std::vector<ClipEq>& eqs) {
+    Project withEq = p;   // cheap: clips share their audio through shared_ptr
+    for (const ClipEq& e : eqs)
+        if (Clip* c = withEq.findClip(e.clipId)) { c->eq = e.eq; c->eqBuffer = e.heard; }
+    return matchVolume(withEq, s, reference);
+}
+
 // ---------------------------------------------------------------- timbre
 
 namespace {

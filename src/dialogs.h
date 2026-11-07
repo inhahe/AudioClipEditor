@@ -84,6 +84,8 @@ struct MatchTracks {
 // finely the EQ may move. Returns true on Apply.
 struct TimbreMatchContext {
     dsp::TimbreMatchOptions* opts = nullptr;   // in/out (session-scoped)
+    bool* alsoVolume = nullptr;                // in/out: also match volume, in the same step
+                                               // (null: the option isn't offered)
     MatchReference ref;
     MatchTracks tracks;
     std::wstring scopeLabel;                   // in/out: what Apply will act on

@@ -62,8 +62,10 @@ static int runDialogTest(HINSTANCE hInst, int which, bool withSelection) {
         };
         if (which == 5) {
             dsp::TimbreMatchOptions o;
+            bool alsoVolume = true;
             dlg::TimbreMatchContext ctx;
-            ctx.opts = &o; ctx.ref = ref; ctx.tracks = tracks; ctx.scopeLabel = matchScope;
+            ctx.opts = &o; ctx.alsoVolume = &alsoVolume;
+            ctx.ref = ref; ctx.tracks = tracks; ctx.scopeLabel = matchScope;
             dlg::timbreMatch(p, ctx);
         } else {
             dlg::VolumeMatchContext ctx;

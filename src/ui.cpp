@@ -185,6 +185,9 @@ struct App {
 
     // Timbre matching options, persisted for the session.
     dsp::TimbreMatchOptions tmOpts;
+    // Whether the timbre dialog also matches volume, in the same step. Session-scoped,
+    // like the rest of the dialog's settings.
+    bool tmAlsoVolume = false;
     // The clip last set as the standard to match to, by either matcher; -1 = the
     // average. Shared, because choosing a standard is a statement about the take
     // ("this one sounds right"), so matching tone and then volume to it shouldn't
@@ -1994,59 +1997,36 @@ struct App {
         return std::to_wstring(n) + (n == 1 ? L" clip" : L" clips");
     }
 
-    void matchVolumeClips(const match::ClipSet& initial, const TrackPick& pick = {}) {
-        if (!initial.usable()) {
-            MessageBoxW(hwnd,
-                L"Matching volume needs at least two clips with audio \u2014 it makes them as "
-                L"loud as each other, so there has to be something to match.",
-                L"Match volume", MB_ICONINFORMATION);
-            return;
-        }
-        auto cur = std::make_shared<match::ClipSet>(initial);
-        dlg::VolumeMatchContext ctx;
-        ctx.ref = matchReferenceFor(initial);
-        ctx.scopeLabel = initial.label;
-        ctx.tracks = trackPicker(pick, cur);
-        if (!dlg::volumeMatch(hwnd, ctx)) return;
-        const match::ClipSet& s = *cur;   // as the dialog's tick-list left it
-        const int ref = takeReference(s, ctx.ref);
-
-        HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
-        const match::VolumeResult r = match::matchVolume(doc.project(), s, ref);
-        SetCursor(old);
+    // Why a volume match couldn't be made. Names the clip that is actually the
+    // problem: blaming the one being matched when it is the others that are silent
+    // sends the user to fix the wrong thing.
+    std::wstring volumeFailure(const match::ClipSet& s, const match::VolumeResult& r, int ref) const {
         const int subject = s.single() ? s.firstChanged() : -1;
-        if (!r.ok()) {
-            // Name the clip that is actually the problem: blaming the one being
-            // matched when it is the others that are silent sends the user to fix
-            // the wrong thing.
-            const wchar_t* silent = L" \u2014 it is silent, or its volume is all the way down.";
-            std::wstring why;
-            switch (r.failure) {
-            case match::Failure::Subject:
-                why = L"'" + s.names[subject] + L"' has no speech to measure" + silent; break;
-            case match::Failure::Reference:
-                why = L"'" + s.names[ref] + L"' has no speech to measure" + silent; break;
-            case match::Failure::Pool:
-                why = std::wstring(subject >= 0 ? L"None of the other clips" : L"None of these clips")
-                    + L" has any speech to measure \u2014 they are silent, or their volumes are "
-                      L"all the way down.";
-                break;
-            default: {   // Alone
-                int only = -1;
-                for (int i = 0; i < s.size(); ++i) if (r.measured[i]) only = i;
-                why = (only >= 0 ? L"Only '" + s.names[only] + L"'" : std::wstring(L"Only one clip"))
-                    + L" has any speech to measure; the others are silent or turned all the way "
-                      L"down, so there is nothing to match it to.";
-            }
-            }
-            MessageBoxW(hwnd, why.c_str(), L"Match volume", MB_ICONWARNING);
-            return;
+        const wchar_t* silent = L" \u2014 it is silent, or its volume is all the way down.";
+        switch (r.failure) {
+        case match::Failure::Subject:
+            return L"'" + s.names[subject] + L"' has no speech to measure" + silent;
+        case match::Failure::Reference:
+            return L"'" + s.names[ref] + L"' has no speech to measure" + silent;
+        case match::Failure::Pool:
+            return std::wstring(subject >= 0 ? L"None of the other clips" : L"None of these clips")
+                 + L" has any speech to measure \u2014 they are silent, or their volumes are "
+                   L"all the way down.";
+        default: {   // Alone
+            int only = -1;
+            for (int i = 0; i < s.size(); ++i) if (r.measured[i]) only = i;
+            return (only >= 0 ? L"Only '" + s.names[only] + L"'" : std::wstring(L"Only one clip"))
+                 + L" has any speech to measure; the others are silent or turned all the way "
+                   L"down, so there is nothing to match it to.";
         }
+        }
+    }
 
-        const std::wstring target = matchTargetText(s, ref);
-        const bool changed = doc.setClipGains(r.gains, L"Match volume of " + s.what + L" to " + target);
-        refresh();
-
+    // What a volume match did, for its summary box (and the volume half of a
+    // timbre-and-volume match). `changed`: whether any volume moved.
+    std::wstring volumeSummary(const match::ClipSet& s, const match::VolumeResult& r, int ref,
+                               bool changed, const std::wstring& target) const {
+        const int subject = s.single() ? s.firstChanged() : -1;
         std::wstring msg;
         if (subject >= 0) {
             const std::wstring who = L"'" + s.names[subject] + L"'";
@@ -2127,76 +2107,79 @@ struct App {
             msg += L"). Track volume applies on top of clip volume, so in the mix they will "
                    L"still differ by that.";
         }
-        if (changed) msg += L"\n\nUndo (Ctrl+Z) to go back.";
         if (r.unmeasured)
             msg += L"\n\nLeft out " + std::to_wstring(r.unmeasured)
                  + (r.unmeasured == 1 ? L" clip that is" : L" clips that are")
                  + L" silent or turned all the way down.";
-        MessageBoxW(hwnd, msg.c_str(), L"Match volume", MB_ICONINFORMATION);
+        return msg;
     }
 
-    void matchTimbreClips(const match::ClipSet& initial, const TrackPick& pick = {}) {
+    void matchVolumeClips(const match::ClipSet& initial, const TrackPick& pick = {}) {
         if (!initial.usable()) {
             MessageBoxW(hwnd,
-                L"Matching timbre needs at least two clips with audio \u2014 it makes them sound "
-                L"like each other, so there has to be something to match.",
-                L"Match timbre", MB_ICONINFORMATION);
+                L"Matching volume needs at least two clips with audio \u2014 it makes them as "
+                L"loud as each other, so there has to be something to match.",
+                L"Match volume", MB_ICONINFORMATION);
             return;
         }
         auto cur = std::make_shared<match::ClipSet>(initial);
-        dlg::TimbreMatchContext ctx;
-        ctx.opts = &tmOpts;
+        dlg::VolumeMatchContext ctx;
         ctx.ref = matchReferenceFor(initial);
         ctx.scopeLabel = initial.label;
         ctx.tracks = trackPicker(pick, cur);
-        if (!dlg::timbreMatch(hwnd, ctx)) return;
+        if (!dlg::volumeMatch(hwnd, ctx)) return;
         const match::ClipSet& s = *cur;   // as the dialog's tick-list left it
         const int ref = takeReference(s, ctx.ref);
 
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
-        const match::TimbreResult r = match::matchTimbre(doc.project(), s, ref, tmOpts);
+        const match::VolumeResult r = match::matchVolume(doc.project(), s, ref);
         SetCursor(old);
-        const int subject = s.single() ? s.firstChanged() : -1;
-        if (!r.ok() || r.updates.empty()) {
-            // Name the clip that is actually the problem, and the actual reason:
-            // "the clips are too short" is misleading when the rest are fine, and
-            // "too short" is wrong when the clip is at another sample rate.
-            const wchar_t* tooShort = L" \u2014 it is too short (under about 0.05 s) or silent.";
-            std::wstring why;
-            switch (r.failure) {
-            case match::Failure::Subject:
-                why = L"Couldn't measure the tone colour of '" + s.names[subject] + L"'" + tooShort;
-                break;
-            case match::Failure::Reference:
-                why = r.otherRate[ref]
-                    ? L"'" + s.names[ref] + L"' is at a different sample rate from the clips "
-                      L"being matched, so their spectra can't be compared."
-                    : L"Couldn't measure the tone colour of '" + s.names[ref] + L"'" + tooShort;
-                break;
-            case match::Failure::Pool:
-                why = std::wstring(L"Couldn't measure a tone colour to match to \u2014 ")
-                    + (subject >= 0 ? L"the other clips" : L"the clips")
-                    + L" are too short (under about 0.05 s), silent, or at a different sample rate.";
-                break;
-            case match::Failure::Alone: {
-                int only = -1;
-                for (int i = 0; i < s.size(); ++i) if (r.measured[i]) only = i;
-                why = (only >= 0 ? L"Only '" + s.names[only] + L"'" : std::wstring(L"Only one clip"))
-                    + L" could be measured \u2014 the others are too short, silent, or at a "
-                      L"different sample rate \u2014 so there is nothing to match it to.";
-                break;
-            }
-            default:
-                why = L"Nothing could be matched.";
-            }
-            MessageBoxW(hwnd, why.c_str(), L"Match timbre", MB_ICONWARNING);
+        if (!r.ok()) {
+            MessageBoxW(hwnd, volumeFailure(s, r, ref).c_str(), L"Match volume", MB_ICONWARNING);
             return;
         }
-        stopAll();   // buffers are changing under any active playback
         const std::wstring target = matchTargetText(s, ref);
-        doc.applyMatch(r.updates, {}, L"Match timbre of " + s.what + L" to " + target);
+        const bool changed = doc.setClipGains(r.gains, L"Match volume of " + s.what + L" to " + target);
         refresh();
+        std::wstring msg = volumeSummary(s, r, ref, changed, target);
+        if (changed) msg += L"\n\nUndo (Ctrl+Z) to go back.";
+        MessageBoxW(hwnd, msg.c_str(), L"Match volume", MB_ICONINFORMATION);
+    }
 
+    // Why a timbre match couldn't be made -- the clip that is actually the problem,
+    // and the actual reason: "the clips are too short" is misleading when the rest
+    // are fine, and "too short" is wrong when the clip is at another sample rate.
+    std::wstring timbreFailure(const match::ClipSet& s, const match::TimbreResult& r, int ref) const {
+        const int subject = s.single() ? s.firstChanged() : -1;
+        const wchar_t* tooShort = L" \u2014 it is too short (under about 0.05 s) or silent.";
+        switch (r.failure) {
+        case match::Failure::Subject:
+            return L"Couldn't measure the tone colour of '" + s.names[subject] + L"'" + tooShort;
+        case match::Failure::Reference:
+            return r.otherRate[ref]
+                ? L"'" + s.names[ref] + L"' is at a different sample rate from the clips "
+                  L"being matched, so their spectra can't be compared."
+                : L"Couldn't measure the tone colour of '" + s.names[ref] + L"'" + tooShort;
+        case match::Failure::Pool:
+            return std::wstring(L"Couldn't measure a tone colour to match to \u2014 ")
+                 + (subject >= 0 ? L"the other clips" : L"the clips")
+                 + L" are too short (under about 0.05 s), silent, or at a different sample rate.";
+        case match::Failure::Alone: {
+            int only = -1;
+            for (int i = 0; i < s.size(); ++i) if (r.measured[i]) only = i;
+            return (only >= 0 ? L"Only '" + s.names[only] + L"'" : std::wstring(L"Only one clip"))
+                 + L" could be measured \u2014 the others are too short, silent, or at a "
+                   L"different sample rate \u2014 so there is nothing to match it to.";
+        }
+        default:
+            return L"Nothing could be matched.";
+        }
+    }
+
+    // What a timbre match did, for its summary box.
+    std::wstring timbreSummary(const match::ClipSet& s, const match::TimbreResult& r, int ref,
+                               const std::wstring& target) const {
+        const int subject = s.single() ? s.firstChanged() : -1;
         wchar_t whereBuf[64];
         swprintf(whereBuf, 64, r.worstHz >= 1000.0 ? L" (at %.1f kHz)" : L" (at %.0f Hz)",
                  r.worstHz >= 1000.0 ? r.worstHz / 1000.0 : r.worstHz);
@@ -2205,8 +2188,8 @@ struct App {
         // question the user can actually act on.
         const std::wstring worstWho = (subject < 0 && r.worstClip >= 0)
                                     ? L", to '" + s.names[r.worstClip] + L"'" : std::wstring();
-        std::wstring msg = (subject >= 0 ? L"Matched '" + s.names[subject] + L"'"
-                                         : L"Matched " + clipCount((int)r.updates.size()))
+        std::wstring msg = (subject >= 0 ? L"Matched the tone of '" + s.names[subject] + L"'"
+                                         : L"Matched the tone of " + clipCount((int)r.updates.size()))
                          + L" to " + target + L".";
         if (ref >= 0 && subject < 0) msg += L" '" + s.names[ref] + L"' itself was left as it is.";
         msg += L"\n\nThe largest correction applied was "
@@ -2249,7 +2232,6 @@ struct App {
                        L"tone-colour difference \u2014 reverb, compression on some clips but "
                        L"not others, or background noise, none of which EQ can reach.";
         }
-        msg += L"\n\nUndo (Ctrl+Z) to go back.";
         if (r.unmeasured || r.mismatched) {
             msg += L"\n\nLeft out ";
             if (r.unmeasured) msg += std::to_wstring(r.unmeasured) + L" clip(s) too short to measure";
@@ -2257,7 +2239,58 @@ struct App {
             if (r.mismatched) msg += std::to_wstring(r.mismatched) + L" clip(s) of a different sample rate";
             msg += L".";
         }
-        MessageBoxW(hwnd, msg.c_str(), L"Match timbre", MB_ICONINFORMATION);
+        return msg;
+    }
+
+    void matchTimbreClips(const match::ClipSet& initial, const TrackPick& pick = {}) {
+        if (!initial.usable()) {
+            MessageBoxW(hwnd,
+                L"Matching timbre needs at least two clips with audio \u2014 it makes them sound "
+                L"like each other, so there has to be something to match.",
+                L"Match timbre", MB_ICONINFORMATION);
+            return;
+        }
+        auto cur = std::make_shared<match::ClipSet>(initial);
+        dlg::TimbreMatchContext ctx;
+        ctx.opts = &tmOpts;
+        ctx.alsoVolume = &tmAlsoVolume;
+        ctx.ref = matchReferenceFor(initial);
+        ctx.scopeLabel = initial.label;
+        ctx.tracks = trackPicker(pick, cur);
+        if (!dlg::timbreMatch(hwnd, ctx)) return;
+        const match::ClipSet& s = *cur;   // as the dialog's tick-list left it
+        const int ref = takeReference(s, ctx.ref);
+
+        HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+        const match::TimbreResult r = match::matchTimbre(doc.project(), s, ref, tmOpts);
+        // Matching volume too: measured with the new EQs on, since those are what will
+        // be heard -- on a copy of the project, so nothing is committed until both
+        // halves are known and they go in as one step.
+        match::VolumeResult vr;
+        if (tmAlsoVolume && r.ok() && !r.updates.empty())
+            vr = match::matchVolumeWithEq(doc.project(), s, ref, r.updates);
+        SetCursor(old);
+        if (!r.ok() || r.updates.empty()) {
+            MessageBoxW(hwnd, timbreFailure(s, r, ref).c_str(), L"Match timbre", MB_ICONWARNING);
+            return;
+        }
+        stopAll();   // clips' audio is changing under any active playback
+        const std::wstring target = matchTargetText(s, ref);
+        const bool both = tmAlsoVolume && vr.ok();
+        static const std::vector<std::pair<int, float>> kNoGains;
+        doc.applyMatch(r.updates, both ? vr.gains : kNoGains,
+                       (both ? L"Match timbre and volume of " : L"Match timbre of ") + s.what
+                       + L" to " + target);
+        refresh();
+
+        std::wstring msg = timbreSummary(s, r, ref, target);
+        if (tmAlsoVolume)
+            msg += both ? L"\n\n" + volumeSummary(s, vr, ref, !vr.gains.empty(), target)
+                        : L"\n\nThe volumes weren't matched: " + volumeFailure(s, vr, ref);
+        msg += both ? L"\n\nUndo (Ctrl+Z) takes back the tone and the volumes together."
+                    : L"\n\nUndo (Ctrl+Z) to go back.";
+        MessageBoxW(hwnd, msg.c_str(), both ? L"Match timbre and volume" : L"Match timbre",
+                    MB_ICONINFORMATION);
     }
 
     // Take the timbre EQ off clips. Their own audio is untouched underneath, so this

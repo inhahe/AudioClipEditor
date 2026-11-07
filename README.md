@@ -222,6 +222,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   the correction curve is, and *Keep each clip's loudness* makes sure this
   changes only tone, never level. One undo step for the whole set.
 
+  **Match timbre and volume in one go:** tick *Also match their volume, in the same
+  step* in the *Match timbre* dialog. The volumes are measured with the new EQs on
+  — what you'll actually hear — against the same target, and one undo takes back
+  both. The summary reports the tone and the volume halves together.
+
   **The EQ is a setting on each clip, not a change to its audio.** A clip that has
   one shows an **EQ** tag on its card and on its blocks in the timeline, so you can
   always see whether a match (or the undo of one) is in effect. Matching again

@@ -3226,6 +3226,43 @@ int runSelfTest() {
               L"match tracks: with nothing ticked there is nothing to match");
     }
 
+    // ---- matching timbre and volume in one step
+    // The volumes have to be measured through the new EQs. With "keep loudness" off
+    // an EQ moves a clip's level, so volumes measured before it would be off by that.
+    {
+        auto noise = [](double amp, double tilt, double seconds, uint32_t seed) {
+            auto b = std::make_shared<AudioBuffer>();
+            b->sampleRate = 48000; b->channels = 1;
+            const int64_t n = (int64_t)(48000 * seconds);
+            b->samples.resize((size_t)n);
+            uint32_t s = seed; double y = 0.0, prev = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                s = s * 1664525u + 1013904223u;
+                const double w = (double)(int32_t)(s >> 1) / 1073741824.0 - 1.0;
+                y = 0.7 * y + 0.3 * w;
+                const double v = y - tilt * prev; prev = y;
+                b->samples[(size_t)i] = (float)(amp * v);
+            }
+            return b;
+        };
+        Document d; d.init(48000);
+        const int dark = d.addClip(L"dark", noise(0.1, 0.0, 3.0, 81), L"", L"add");
+        const int bright = d.addClip(L"bright", noise(0.3, 0.6, 3.0, 82), L"", L"add");
+        dsp::TimbreMatchOptions opt; opt.preserveLoudness = false;
+        const match::ClipSet s = match::librarySet(d.project());
+        const match::TimbreResult r = match::matchTimbre(d.project(), s, s.indexOf(dark), opt);
+        const match::VolumeResult vr = match::matchVolumeWithEq(d.project(), s, s.indexOf(dark), r.updates);
+        const bool applied = r.ok() && vr.ok() && d.applyMatch(r.updates, vr.gains, L"both");
+        const match::VolumeResult after = match::matchVolume(d.project(), s, s.indexOf(dark));
+        check(applied && d.project().findClip(bright)->hasEq() && after.ok() && after.changed == 0,
+              L"timbre and volume: volumes measured through the new EQs leave the clips matched",
+              after.ok() ? std::to_wstring(after.changed) + L" still to change" : L"no result");
+        d.undo();
+        const Clip* b = d.project().findClip(bright);
+        check(b && !b->hasEq() && b->gain == 1.0f,
+              L"timbre and volume: one undo takes back both the EQ and the volume");
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);

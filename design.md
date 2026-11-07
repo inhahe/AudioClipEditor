@@ -609,6 +609,21 @@ clips'. (Offsets are 64-bit; project files of float audio pass 2 GB.)
 Projects matched before this (0.36.x and earlier) have their EQ baked into the
 audio; that audio is simply each clip's own audio now, so it stays as it was.
 
+### Timbre and volume in one step
+
+The timbre dialog's *Also match their volume, in the same step* (`App::tmAlsoVolume`,
+session-scoped) runs both matchers on the same set and reference and commits them
+with one `Document::applyMatch` — one undo takes back both. The volume half has to
+measure the clips **through their new EQs**, since that is what will be heard, but
+nothing may be committed until both halves are known; `match::matchVolumeWithEq`
+measures on a copy of the project with the timbre match's EQs (and their renders)
+put on. Copying a `Project` is cheap — clips share their audio. With *Keep each
+clip's loudness* on, the EQ barely moves levels and the order hardly matters; with it
+off, volumes measured before the EQ would be off by whatever the EQ did, which the
+selftest pins (measured without the EQs, one clip is still left to change). If the
+volume half can't be made (no speech to measure), the tone match is still applied
+and the summary says why the volumes weren't.
+
 The summary box reports the largest correction applied — **at what frequency and to
 which clip**, since "8 dB at 250 Hz" is a mic distance and "8 dB at 40 Hz" is a fan,
 and since across two dozen takes the figure is set by a single outlier that the user
@@ -1747,7 +1762,11 @@ bump / shuffle / room tone each attenuated ≥ 20 dB (measured −60 dB, i.e. th
 full requested reduction), exactly one detected voice segment, and
 reduce + residue == original. It also logs the throughput (≈37× realtime).
 
-**The timbre EQ as a setting** (13 checks): a match yields a curve and the audio
+**Timbre and volume in one step** (2 checks): volumes measured through the new EQs
+leave the clips matched (measured without them, a clip is left to change), and one
+undo takes back both.
+
+**The timbre EQ as a setting** (14 checks): a match yields a curve and the audio
 through it, and `applyEq` of the stored curve reproduces that audio (to 6e-8); the
 match is one undo step, leaves the clip's own buffer untouched and plays through the
 EQ, and exports with it; **matching again lands on the same curve** (0 dB apart —

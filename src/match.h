@@ -151,6 +151,12 @@ struct VolumeResult {
 // (dsp::speechLoudness), at each clip's *current* volume, so the reference keeps the
 // volume it has and a clip already at the target stays put. Commits nothing.
 VolumeResult matchVolume(const Project& p, const ClipSet& s, int reference);
+// matchVolume as the clips will sound once `eqs` -- a timbre match's results, each
+// with its audio already rendered -- are applied: the volume half of "match timbre
+// and volume in one step", which has to measure the clips through their new EQs
+// before either half is committed.
+VolumeResult matchVolumeWithEq(const Project& p, const ClipSet& s, int reference,
+                               const std::vector<ClipEq>& eqs);
 
 // ---------------------------------------------------------------- timbre
 struct TimbreResult {

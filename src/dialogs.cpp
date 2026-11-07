@@ -767,7 +767,9 @@ struct MDState {
     std::wstring* scope = nullptr;
     const wchar_t* prefix = nullptr;             // "Sound like " / "As loud as "
     dsp::TimbreMatchOptions* opts = nullptr;     // null: the volume dialog
+    bool* alsoVolume = nullptr;                  // null: not offered
     HWND cbRef = 0, list = 0, stScope = 0, btnOk = 0, edDb = 0, edSmooth = 0, ckLoud = 0;
+    HWND ckVolume = 0;
     bool populating = false;                     // ignore the list's own notifications
     bool ok = false;
 };
@@ -850,6 +852,8 @@ static LRESULT CALLBACK MDProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 o.smoothingOctaves = (float)vcReadDouble(st->edSmooth, 0.05, 2.0, 0.5);
                 o.preserveLoudness = SendMessageW(st->ckLoud, BM_GETCHECK, 0, 0) == BST_CHECKED;
             }
+            if (st->alsoVolume)
+                *st->alsoVolume = SendMessageW(st->ckVolume, BM_GETCHECK, 0, 0) == BST_CHECKED;
             const int ri = (int)SendMessageW(st->cbRef, CB_GETCURSEL, 0, 0);
             st->ref->choice = ri > 0 ? ri - 1 : -1;   // item 0 is the average
             st->ok = true; DestroyWindow(h); return 0;
@@ -862,7 +866,8 @@ static LRESULT CALLBACK MDProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
 static bool matchDialog(HWND parent, const wchar_t* title, const wchar_t* info,
                         const wchar_t* prefix, MatchReference& ref, MatchTracks& tracks,
-                        std::wstring& scopeLabel, dsp::TimbreMatchOptions* opts) {
+                        std::wstring& scopeLabel, dsp::TimbreMatchOptions* opts,
+                        bool* alsoVolume) {
     static bool reg = false;
     HINSTANCE hInst = GetModuleHandleW(nullptr);
     if (!reg) {
@@ -874,7 +879,7 @@ static bool matchDialog(HWND parent, const wchar_t* title, const wchar_t* info,
         InitCommonControlsEx(&icc);
     }
     MDState st; st.ref = &ref; st.tracks = &tracks; st.scope = &scopeLabel;
-    st.prefix = prefix; st.opts = opts;
+    st.prefix = prefix; st.opts = opts; st.alsoVolume = alsoVolume;
     DlgUI ui(parent);
     const bool picker = !tracks.labels.empty();
 
@@ -887,11 +892,17 @@ static bool matchDialog(HWND parent, const wchar_t* title, const wchar_t* info,
     static const wchar_t* kTimbre[] = { L"Maximum change (0\u201324 dB):",
                                         L"Smoothing (0.05\u20132 octaves):", L"Level:" };
     static const wchar_t* kCheck = L"Keep each clip's loudness";
+    // Matching tone and then volume is the usual pair, so it can be one step: the
+    // volumes are measured with the new EQs on, and one undo takes back both.
+    static const wchar_t* kVolLabel = L"Volume:";
+    static const wchar_t* kVolCheck = L"Also match their volume, in the same step";
 
     int labelW = std::max(ui.textW(kMatchTo), picker ? ui.textW(kTracks) : 0);
     if (opts) for (auto* s : kTimbre) labelW = std::max(labelW, ui.textW(s));
+    if (alsoVolume) labelW = std::max(labelW, ui.textW(kVolLabel));
     int ctlW = refComboW(ui, ref, prefix);
     if (opts) ctlW = std::max(ctlW, ui.checkW(kCheck));
+    if (alsoVolume) ctlW = std::max(ctlW, ui.checkW(kVolCheck));
     for (const std::wstring& s : tracks.labels) ctlW = std::max(ctlW, std::min(ui.textW(s.c_str()) + ui.S(48), ui.S(320)));
     int contentW = std::max(labelW + ui.gap + ctlW, ui.S(380));
     ScopeLine scope(scopeLabel);
@@ -910,7 +921,8 @@ static bool matchDialog(HWND parent, const wchar_t* title, const wchar_t* info,
 
     const int clientH = ui.margin + infoSz.cy + ui.S(10) + scope.step(ui)
                       + (picker ? listH + ui.rowGap : 0)
-                      + step + (opts ? 3 * step : 0) + ui.S(8) + bh + ui.margin;
+                      + step + (opts ? 3 * step : 0) + (alsoVolume ? step : 0)
+                      + ui.S(8) + bh + ui.margin;
     HWND h = ui.create(L"ACE_MD", title, parent, ui.margin * 2 + contentW, clientH);
     SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
 
@@ -960,6 +972,12 @@ static bool matchDialog(HWND parent, const wchar_t* title, const wchar_t* info,
         SendMessageW(st.ckLoud, BM_SETCHECK, opts->preserveLoudness ? BST_CHECKED : BST_UNCHECKED, 0);
         y += step;
     }
+    if (alsoVolume) {
+        ui.rowLabel(kVolLabel, ui.margin, y, labelW, rowH);
+        st.ckVolume = ui.check(kVolCheck, ctlX, y, ctlW);
+        SendMessageW(st.ckVolume, BM_SETCHECK, *alsoVolume ? BST_CHECKED : BST_UNCHECKED, 0);
+        y += step;
+    }
     y += ui.S(8);
 
     const int right = ui.margin + contentW;
@@ -980,7 +998,7 @@ bool timbreMatch(HWND parent, TimbreMatchContext& ctx) {
         L"replaces it, and it can be removed. It cannot fix differences in reverb, background "
         L"noise or delivery.";
     return matchDialog(parent, L"Match Timbre", kInfo, L"Sound like ", ctx.ref, ctx.tracks,
-                       ctx.scopeLabel, ctx.opts);
+                       ctx.scopeLabel, ctx.opts, ctx.alsoVolume);
 }
 
 bool volumeMatch(HWND parent, VolumeMatchContext& ctx) {
@@ -992,7 +1010,7 @@ bool volumeMatch(HWND parent, VolumeMatchContext& ctx) {
         L"weighs loudness. The audio itself isn't changed: this moves the clips' volume "
         L"sliders, which you can still adjust afterwards.";
     return matchDialog(parent, L"Match Volume", kInfo, L"As loud as ", ctx.ref, ctx.tracks,
-                       ctx.scopeLabel, nullptr);
+                       ctx.scopeLabel, nullptr, nullptr);
 }
 
 // ------------------------------------------------------------------ history
