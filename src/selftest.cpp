@@ -3446,7 +3446,31 @@ int runSelfTest() {
         check(launch::sameFile(dir + L"\\_selftest_gone_\u00E9.acep", dir + L"\\_SELFTEST_GONE_\u00C9.ACEP") &&
                   !launch::sameFile(dir + L"\\_selftest_gone_1.acep", dir + L"\\_selftest_gone_2.acep"),
               L"launch: files that can't be opened compare by path, ignoring case as Windows does");
+        // The identity the app keeps for the open project is the file as it was then. A
+        // file changed since -- an earlier version from Previous Versions has the same
+        // volume serial and id as the file, but not its time -- isn't the one open.
+        const launch::FileIdentity asOpened = launch::fileIdentity(proj);
+        if (FILE* f = _wfopen(proj.c_str(), L"ab")) { fwrite("more", 1, 4, f); fclose(f); }
+        const HANDLE ph = CreateFileW(proj.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, 0, nullptr);
+        if (ph != INVALID_HANDLE_VALUE) {   // a clearly later time, whatever the clock's resolution
+            FILETIME later{}; GetSystemTimeAsFileTime(&later);
+            later.dwHighDateTime += 1;
+            SetFileTime(ph, nullptr, nullptr, &later);
+            CloseHandle(ph);
+        }
+        check(asOpened.known && !launch::sameFile(proj, launch::fileIdentity(proj), proj, asOpened) &&
+                  launch::sameFile(link, launch::fileIdentity(link), proj, launch::fileIdentity(proj)),
+              L"launch: a file changed since it was opened isn't the one open; the same file as it is now is");
         DeleteFileW(link.c_str()); DeleteFileW(proj.c_str()); DeleteFileW(other.c_str());
+        // An id of 0, or all ones, names no file in particular: a volume that reports
+        // that for every file must not make every file the same one.
+        FILE_ID_128 some{}; some.Identifier[3] = 7;
+        check(!launch::usableFileId(launch::fileIdFromIndex(0)) &&
+                  !launch::usableFileId(launch::fileIdFromIndex(~0ULL)) &&
+                  launch::usableFileId(launch::fileIdFromIndex(12345)) && launch::usableFileId(some) &&
+                  !launch::usableFileId(FILE_ID_128{}),
+              L"launch: file ids of 0 or all ones (64-bit or 128-bit) aren't used to tell files apart");
     }
 
     // ---- double-click opens projects here (assoc.h), against a scratch registry

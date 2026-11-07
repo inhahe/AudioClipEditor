@@ -42,35 +42,74 @@ inline bool looksLikeProject(const std::wstring& path) {
     return project;
 }
 
-// Whether `a` and `b` name the same file -- whether a project asked for is the one
-// already open. By the file itself, its volume and its id there, when both can be
-// opened: an 8.3 short name, another case, a mapped drive and its UNC path, a junction
-// or a hard link all reach the same file by a different string. Otherwise (one is
-// missing, say) by the path, ignoring case the way Windows does.
-inline bool sameFile(const std::wstring& a, const std::wstring& b) {
-    auto open = [](const std::wstring& p) {
-        return CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    };
-    const HANDLE ha = open(a), hb = open(b);
-    int same = -1;   // not known from the files
-    if (ha != INVALID_HANDLE_VALUE && hb != INVALID_HANDLE_VALUE) {
-        FILE_ID_INFO ia{}, ib{};
-        BY_HANDLE_FILE_INFORMATION fa{}, fb{};
-        if (GetFileInformationByHandleEx(ha, FileIdInfo, &ia, sizeof(ia)) &&
-            GetFileInformationByHandleEx(hb, FileIdInfo, &ib, sizeof(ib)))
-            same = ia.VolumeSerialNumber == ib.VolumeSerialNumber &&
-                   std::memcmp(&ia.FileId, &ib.FileId, sizeof(ia.FileId)) == 0;
-        else if (GetFileInformationByHandle(ha, &fa) && GetFileInformationByHandle(hb, &fb))
-            // File systems without 128-bit ids (FAT, some network shares).
-            same = fa.dwVolumeSerialNumber == fb.dwVolumeSerialNumber &&
-                   fa.nFileIndexHigh == fb.nFileIndexHigh && fa.nFileIndexLow == fb.nFileIndexLow;
+// A file, as it is now, told apart from every other: read from the file itself.
+struct FileIdentity {
+    bool known = false;     // false: it couldn't be opened, or its file system gives no usable id
+    ULONGLONG volume = 0;   // the volume's serial number
+    FILE_ID_128 id{};       // the file's id on that volume
+    ULONGLONG written = 0;  // last write time
+    ULONGLONG size = 0;
+};
+
+// A file system's 64-bit file index as a 128-bit id: in the low bytes, or all ones
+// if it is all ones (FILE_INVALID_FILE_ID), so usableFileId sees it either way.
+inline FILE_ID_128 fileIdFromIndex(ULONGLONG index) {
+    FILE_ID_128 id{};
+    if (index == ~0ULL) std::memset(id.Identifier, 0xFF, sizeof(id.Identifier));
+    else std::memcpy(id.Identifier, &index, sizeof(index));
+    return id;
+}
+// Whether a file id names one file. Some redirectors (WebDAV, some cloud and FUSE
+// mounts) give 0 for every file, and all ones is FILE_INVALID_FILE_ID: either would
+// make every file on such a volume the same file.
+inline bool usableFileId(const FILE_ID_128& id) {
+    bool zero = true, ones = true;
+    for (const BYTE b : id.Identifier) { zero = zero && b == 0; ones = ones && b == 0xFF; }
+    return !zero && !ones;
+}
+
+// The identity of the file at `path`; not `known` if it can't be read.
+inline FileIdentity fileIdentity(const std::wstring& path) {
+    FileIdentity r;
+    const HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                 OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return r;
+    BY_HANDLE_FILE_INFORMATION fi{};
+    if (GetFileInformationByHandle(h, &fi)) {
+        r.written = ((ULONGLONG)fi.ftLastWriteTime.dwHighDateTime << 32) | fi.ftLastWriteTime.dwLowDateTime;
+        r.size = ((ULONGLONG)fi.nFileSizeHigh << 32) | fi.nFileSizeLow;
+        FILE_ID_INFO ii{};
+        if (GetFileInformationByHandleEx(h, FileIdInfo, &ii, sizeof(ii))) {
+            r.volume = ii.VolumeSerialNumber;
+            r.id = ii.FileId;
+        } else {   // file systems without 128-bit ids (FAT, some network shares)
+            r.volume = fi.dwVolumeSerialNumber;
+            r.id = fileIdFromIndex(((ULONGLONG)fi.nFileIndexHigh << 32) | fi.nFileIndexLow);
+        }
+        r.known = usableFileId(r.id);
     }
-    if (ha != INVALID_HANDLE_VALUE) CloseHandle(ha);
-    if (hb != INVALID_HANDLE_VALUE) CloseHandle(hb);
-    if (same >= 0) return same == 1;
+    CloseHandle(h);
+    return r;
+}
+
+// Whether `a` and `b` are the same file, unchanged -- whether a project asked for is
+// the one already open. `ia` and `ib` are their identities, read whenever suits the
+// caller (fileIdentity). When both are known: the same volume and id, last written at
+// the same time, at the same size. An 8.3 short name, another case, a mapped drive and
+// its UNC path, a junction or a hard link all reach the same file by a different
+// string; a shadow copy (Previous Versions) or a restored image keeps the volume serial
+// and the id but not, once the file has been changed since, the time. Otherwise by the
+// path, ignoring case the way Windows does.
+inline bool sameFile(const std::wstring& a, const FileIdentity& ia,
+                     const std::wstring& b, const FileIdentity& ib) {
+    if (ia.known && ib.known)
+        return ia.volume == ib.volume && std::memcmp(&ia.id, &ib.id, sizeof(ia.id)) == 0 &&
+               ia.written == ib.written && ia.size == ib.size;
     return CompareStringOrdinal(a.c_str(), (int)a.size(), b.c_str(), (int)b.size(), TRUE) == CSTR_EQUAL;
+}
+inline bool sameFile(const std::wstring& a, const std::wstring& b) {
+    return sameFile(a, fileIdentity(a), b, fileIdentity(b));
 }
 
 // Whether a command-line argument names a file. Switches ("--...") are the developer

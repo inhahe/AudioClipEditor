@@ -238,6 +238,11 @@ struct App {
     // names it, and is checked against it each time the File menu opens.
     const std::wstring exe = exePath();
     HMENU fileMenu = nullptr;   // the menu bar's File menu (buildMenu)
+    // The project file as it was when last opened or saved here (setProjectPath), so
+    // a request can tell whether it names that file without reaching for it: a
+    // project on a share that has gone away would hold the window up for the
+    // network's timeout.
+    launch::FileIdentity projectIdentity;
 
     // The clip last set as the standard to match to, by either matcher; -1 = the
     // average. Shared, because choosing a standard is a statement about the take
@@ -2561,7 +2566,7 @@ struct App {
         rate = nativeRate;
         engine.setSourceRate(rate);
         doc.init(rate);
-        projectPath.clear();
+        setProjectPath(L"");
         resetForAnotherProject();
         setTitle(); clampScroll(); refresh();
     }
@@ -2611,7 +2616,7 @@ struct App {
         // Follow the loaded project's internal rate so playback resamples correctly.
         rate = doc.project().sampleRate > 0 ? doc.project().sampleRate : rate;
         engine.setSourceRate(rate);
-        projectPath = path;
+        setProjectPath(path);
         restoreViewState();   // selection + playhead saved with the project
         setTitle(); clampScroll(); refresh();
         return true;
@@ -2648,7 +2653,8 @@ struct App {
         const launch::Request req = launch::parse(files, launch::looksLikeProject);
         if (!req.projects.empty()) {
             const std::wstring& first = req.projects[0];
-            if (!projectPath.empty() && launch::sameFile(first, projectPath)) {
+            if (!projectPath.empty() &&
+                launch::sameFile(first, launch::fileIdentity(first), projectPath, projectIdentity)) {
                 // Double-clicking the project that is already open: this window coming
                 // forward is the answer, not a reload over the work in it.
                 toast(L"'" + std::wstring(PathFindFileNameW(first.c_str())) + L"' is already open");
@@ -2746,7 +2752,7 @@ struct App {
         if (path.empty()) return false;
         storeViewState();
         if (!doc.saveProject(path, saveHistory)) { MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING); return false; }
-        projectPath = path; setTitle(); reportHistoryCost(); return true;
+        setProjectPath(path); setTitle(); reportHistoryCost(); return true;
     }
     bool saveProjectFile() {
         if (projectPath.empty()) return saveProjectAs();
@@ -2755,9 +2761,16 @@ struct App {
             MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING);
             return false;
         }
+        setProjectPath(projectPath);   // the file has changed
         setTitle();
         reportHistoryCost();
         return true;
+    }
+    // The file this project is opened from and saved to, and what it is like now
+    // (projectIdentity). Called whenever either changes: opened, saved, a new project.
+    void setProjectPath(const std::wstring& path) {
+        projectPath = path;
+        projectIdentity = path.empty() ? launch::FileIdentity{} : launch::fileIdentity(path);
     }
     // A save that quietly grew the file by a gigabyte, or quietly dropped the steps
     // that answer "did I apply that?", is exactly the kind of thing you only find

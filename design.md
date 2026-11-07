@@ -79,14 +79,28 @@ any file that won't decode — several can arrive at once.
   other open — one can arrive at any time, not only at startup. If its first project is
   the one already open, the answer is the window coming forward and a toast, not a
   reload. "The one already open" is decided by the file, not by how its path is
-  spelled (`launch::sameFile`: volume serial and file id, from
+  spelled (`launch::sameFile` on two `FileIdentity`s: volume serial and file id, from
   `GetFileInformationByHandleEx(FileIdInfo)`, or the 64-bit index where a file system
-  has no 128-bit ids; the path, compared as Windows does — `CompareStringOrdinal`,
-  ignoring case beyond ASCII — only when a file can't be opened). An 8.3 short name, a
-  mapped drive and its UNC path, a junction, a hard link or another case all reach
-  the open project by a different string, and a string comparison treated them as
-  another project: a reload that threw away the clip editor, the scroll and the
-  selection history, or a *Save changes?* box for the very file asked for.
+  has no 128-bit ids, plus the last write time and the size; the path, compared as
+  Windows does — `CompareStringOrdinal`, ignoring case beyond ASCII — when either
+  identity is unknown). An 8.3 short name, a mapped drive and its UNC path, a
+  junction, a hard link or another case all reach the open project by a different
+  string, and a string comparison treated them as another project: a reload that threw
+  away the clip editor, the scroll and the selection history, or a *Save changes?* box
+  for the very file asked for.
+  - **The time and size are part of it** because a shadow copy (*Previous Versions*)
+    or a restored image keeps the volume serial and the file id: without them, an
+    earlier version of the open project — usually opened precisely to get it back —
+    would count as already open. Changed since, it differs in time.
+  - **An id of 0 or all ones counts as unknown** (`usableFileId`): some redirectors
+    (WebDAV, some cloud and FUSE mounts) report 0 for every file, which would make
+    every project on the volume "the one already open".
+  - **The open project's identity is read when it is opened or saved**
+    (`App::setProjectPath`, `projectIdentity`), not when a request arrives: a project
+    on a share that has since gone away (a laptop that left the network) would hold
+    the window up for the network's timeout before anything was asked. A file changed
+    on disk by something else since then reads as a different file, so the request
+    asks about unsaved changes and reloads it, which is what that change calls for.
 - **Only the main message loop opens them, and only when nothing holds them up**
   (`openLaunchRequests`, called by `runApp`'s loop after every message;
   `readyForLaunch`). A hand-off can arrive while a dialog, a message box or a context
@@ -2039,7 +2053,7 @@ correction lands between 60 Hz and 14 kHz. It measured **1.4 dB at 70 Hz**;
 before the weights, over 20 dB at 30 Hz. DC and Nyquist are separately asserted
 to come out at exactly 0 dB.
 
-**Starting with files** (16 checks): `launch::parse` takes `.acep` files (in any case)
+**Starting with files** (18 checks): `launch::parse` takes `.acep` files (in any case)
 as projects in order and other files as clips, and skips switches; a project is told
 by its contents (a `.acep.bak` with the `ACEP` header is one, a `.wav` isn't) or, when
 it can't be read, by its extension; and `parse` uses whatever test it is given;
@@ -2048,7 +2062,10 @@ through `CommandLineToArgvW` with spaces, a drive's root, quotes and backslashes
 one (plain quoting fails it on the last three); `launch::sameFile` finds the open
 project through a hard link and through its name in other case (`café` / `CAFÉ`) and
 tells another file apart, and compares files it can't open by path, ignoring case
-beyond ASCII (the `_wcsicmp` it replaced fails both). `assoc`, against a scratch
+beyond ASCII (the `_wcsicmp` it replaced fails both); a file changed since its identity
+was read (appended to, written later) is no longer the one open, while the same file
+as it is now still is (an identity of volume and id alone fails it); and ids of 0 or
+all ones, 64-bit or 128-bit, are not used (accepting every id fails it). `assoc`, against a scratch
 registry root: nothing registered to begin with; registering makes `.acep` open with
 this copy and not another; the open command quotes program and file; unregistering
 stops it and leaves no empty keys; and with another app's claim on `.acep` made after
