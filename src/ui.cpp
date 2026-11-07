@@ -1,6 +1,7 @@
 #include "app.h"
 #include "assoc.h"
 #include "document.h"
+#include "exepath.h"
 #include "engine.h"
 #include "decoder.h"
 #include "encoder.h"
@@ -25,6 +26,21 @@
 #define WM_APP_PLAYEND (WM_APP + 1)
 // Posted once the window is up: open what the command line asked for.
 #define WM_APP_LAUNCH (WM_APP + 2)
+
+// The WM_COPYDATA tag for "open these", sent by a second copy of the app.
+static const ULONG_PTR kLaunchCopyData = 0x50454341;   // "ACEP"
+
+// A path given on a command line, made absolute against this process's working
+// directory: the project path is kept (title, Save, where exports default to), and
+// a copy handing files over runs in a different directory from the one receiving.
+static std::wstring fullPath(const std::wstring& p) {
+    const DWORD need = GetFullPathNameW(p.c_str(), 0, nullptr, nullptr);
+    if (need == 0) return p;
+    std::wstring out(need, L'\0');
+    const DWORD n = GetFullPathNameW(p.c_str(), need, &out[0], nullptr);
+    out.resize(n < need ? n : 0);
+    return out.empty() ? p : out;
+}
 
 // ----------------------------------------------------------------- theme colors
 namespace col {
@@ -1592,16 +1608,21 @@ struct App {
 
     // --------------------------------------------------------- actions
     void addFiles() { addAudioPaths(dlg::openAudioFiles(hwnd)); }
-    // Decode each file and add it to the library as a clip, as Add Files does.
+    // Decode each file and add it to the library as a clip, as Add Files does. A file
+    // that won't decode is named in the message: several can arrive at once from a
+    // command line, and "unsupported or missing" alone doesn't say which.
     void addAudioPaths(const std::vector<std::wstring>& paths) {
-        int lastId = -1;
         for (auto& p : paths) {
             std::wstring err;
             auto buf = mfio::decodeFile(p, rate, &err);
-            if (!buf) { MessageBoxW(hwnd, err.c_str(), L"Could not load", MB_ICONWARNING); continue; }
+            if (!buf) {
+                MessageBoxW(hwnd, (std::wstring(PathFindFileNameW(p.c_str())) + L":\n" + err).c_str(),
+                            L"Could not load", MB_ICONWARNING);
+                continue;
+            }
             std::wstring name = PathFindFileNameW(p.c_str());
             size_t dot = name.find_last_of(L'.'); if (dot != std::wstring::npos) name = name.substr(0, dot);
-            lastId = doc.addClip(name, buf, p, L"Add clip '" + name + L"'");
+            doc.addClip(name, buf, p, L"Add clip '" + name + L"'");
         }
         clampScroll(); refresh();
     }
@@ -2573,36 +2594,43 @@ struct App {
         return true;
     }
 
-    // What the app was started with: a project to open (double-clicking a .acep file,
-    // "Open with", dropping it on the exe) and audio files to add as clips -- to the
-    // project just opened, if there was one. Paths are made absolute first, since the
-    // project path is kept (title, Save, where exports default to) and a relative one
-    // would mean something else once anything changed the working directory.
+    // Open what a command line asked for: projects (double-clicking a .acep file, "Open
+    // with", dropping it on the exe) and audio files to add as clips -- to the project
+    // just opened, if one was. Runs at startup, and when another copy of the app hands
+    // its command line over (see handToRunningCopy), so it asks about unsaved changes
+    // like any other open.
     void openLaunchRequest() {
-        const launch::Request req = launch::parse(launchArgs);
-        auto full = [](const std::wstring& p) {
-            wchar_t buf[MAX_PATH * 4];
-            const DWORD n = GetFullPathNameW(p.c_str(), (DWORD)std::size(buf), buf, nullptr);
-            return n > 0 && n < std::size(buf) ? std::wstring(buf) : p;
-        };
-        if (!req.project.empty()) openProjectPath(full(req.project));
+        // Taken, not read: a request is handled once, so a stray repeat of the message
+        // can't reopen anything over later work.
+        const std::vector<std::wstring> args = std::exchange(launchArgs, {});
+        if (args.empty()) return;
+        const launch::Request req = launch::parse(args, launch::looksLikeProject);
+        if (!req.projects.empty()) {
+            const std::wstring first = fullPath(req.projects[0]);
+            if (!projectPath.empty() && _wcsicmp(first.c_str(), projectPath.c_str()) == 0) {
+                // Double-clicking the project that is already open: this window coming
+                // forward is the answer, not a reload over the work in it.
+                toast(L"'" + std::wstring(PathFindFileNameW(first.c_str())) + L"' is already open");
+            } else {
+                if (!confirmDiscardChanges()) return;   // kept what they have: nothing else either
+                // Tried in turn, so a missing first project doesn't leave the app empty.
+                size_t opened = req.projects.size();
+                for (size_t i = 0; i < req.projects.size() && opened == req.projects.size(); ++i)
+                    if (openProjectPath(fullPath(req.projects[i]))) opened = i;
+                const size_t notTried = opened < req.projects.size() ? req.projects.size() - 1 - opened : 0;
+                if (notTried > 0)
+                    toast(L"Only one project can be open at a time \u2014 "
+                          + std::to_wstring(notTried) + (notTried == 1 ? L" other wasn't" : L" others weren't")
+                          + L" opened");
+            }
+        }
         if (!req.audio.empty()) {
             std::vector<std::wstring> paths;
-            for (const std::wstring& a : req.audio) paths.push_back(full(a));
+            for (const std::wstring& p : req.audio) paths.push_back(fullPath(p));
             addAudioPaths(paths);
         }
-        if (req.extraProjects > 0)
-            toast(L"Only one project can be open at a time \u2014 opened the first of "
-                  + std::to_wstring(req.extraProjects + 1));
     }
 
-    // This copy of the app, for the file association.
-    static std::wstring exePath() {
-        std::wstring p(32768, L'\0');
-        const DWORD n = GetModuleFileNameW(nullptr, &p[0], (DWORD)p.size());
-        p.resize(n < p.size() ? n : 0);
-        return p;
-    }
     // File menu: make double-clicking a .acep project open it with this copy of the
     // app, or stop doing so. Per user (HKEY_CURRENT_USER), no admin rights, and only
     // on request -- it changes how Windows behaves outside the app.
@@ -4351,6 +4379,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND: if (HIWORD(wp) == 0 && lp == 0) { a->onCommand(LOWORD(wp)); return 0; } break;
     case WM_TIMER: a->onTimer(); return 0;
     case WM_APP_LAUNCH: if (a) a->openLaunchRequest(); return 0;
+    case WM_COPYDATA: {
+        const auto* cds = (const COPYDATASTRUCT*)lp;
+        if (a && cds && cds->dwData == kLaunchCopyData && cds->lpData) {
+            // Copy out and answer at once: the sender is waiting on this, and opening
+            // a project may first ask about unsaved changes.
+            const wchar_t* p = (const wchar_t*)cds->lpData;
+            const size_t n = cds->cbData / sizeof(wchar_t);
+            for (size_t i = 0; i < n; ) {
+                size_t j = i;
+                while (j < n && p[j]) ++j;
+                if (j > i) a->launchArgs.emplace_back(p + i, j - i);
+                i = j + 1;
+            }
+            PostMessageW(hwnd, WM_APP_LAUNCH, 0, 0);
+            return TRUE;
+        }
+        break;
+    }
     case WM_APP_PLAYEND: a->onPlayEnd(); return 0;
     case WM_CLOSE:
         if (a && !a->confirmDiscardChanges()) return 0;  // user cancelled exit
@@ -4387,7 +4433,30 @@ static void saveWindowPlacement(HWND hwnd) {
     RegCloseKey(k);
 }
 
+// A copy started with files while another is running hands them over and exits.
+// Double-clicking a project that is already open has to bring that window forward,
+// not open the same file in a second copy -- each would save over the other without
+// a word. Returns false (start normally) when there are no files to hand over, no
+// copy is running, or it doesn't answer.
+static bool handToRunningCopy(const std::vector<std::wstring>& args) {
+    std::wstring payload;   // absolute paths, each NUL-terminated
+    for (const std::wstring& a : args)
+        if (!a.empty() && a.rfind(L"--", 0) != 0) { payload += fullPath(a); payload.push_back(L'\0'); }
+    if (payload.empty()) return false;
+    HWND other = FindWindowW(L"AudioClipEditorMain", nullptr);
+    if (!other) return false;
+    COPYDATASTRUCT cds{ kLaunchCopyData, (DWORD)(payload.size() * sizeof(wchar_t)), (PVOID)payload.data() };
+    DWORD_PTR answer = 0;
+    if (!SendMessageTimeoutW(other, WM_COPYDATA, 0, (LPARAM)&cds, SMTO_ABORTIFHUNG, 5000, &answer) ||
+        answer != TRUE) return false;
+    // This process was just started by the user, so it may hand the foreground on.
+    if (IsIconic(other)) ShowWindow(other, SW_RESTORE);
+    SetForegroundWindow(other);
+    return true;
+}
+
 int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args) {
+    if (handToRunningCopy(args)) return 0;
     // Tooltips are a "bar" class; the matching dialogs' track list a list view.
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_LISTVIEW_CLASSES };
     InitCommonControlsEx(&icc);

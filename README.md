@@ -327,7 +327,10 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   app — if you move the app, tick it again from the new copy. You can also open a
   project, or add audio files as clips, from the command line or by dropping them
   onto `AudioClipEditor.exe`: `AudioClipEditor.exe "My show.acep" "pickup 3.wav"`
-  opens the project and adds the WAV to it.
+  opens the project and adds the WAV to it. If the app is already running, the files
+  go to that window instead of a second copy: double-clicking the project that's
+  already open just brings it to the front, and another project opens there (asking
+  first if there are unsaved changes).
 - **Save / load projects.** Projects are saved as a single `.acep` file with the
   whole library and timeline (audio embedded), so a project is fully
   self-contained — and, unless you turn it off, the **edit history** as well.

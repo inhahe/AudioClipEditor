@@ -37,16 +37,42 @@ sync with behavior changes.
 "Open with" or a drop onto the exe — opens the project and adds the audio files to it
 as clips (`App::openLaunchRequest`, via `launch::parse`). It runs from a message
 posted after the window is shown, so a project that fails to load is reported over the
-app rather than before it exists, and paths are made absolute first: the project path
-is kept (title, Save, where exports default to) and a relative one would change
-meaning with the working directory. Only one project can be open: further `.acep`
-arguments are counted and the toast says the first was opened. Opening shares
-`openProjectPath` with *File ▸ Open Project*, and adding shares `addAudioPaths` with
-*Add Files*.
+app rather than before it exists, and paths are made absolute first (`fullPath`): the
+project path is kept (title, Save, where exports default to) and a relative one would
+change meaning with the working directory. Opening shares `openProjectPath` with
+*File ▸ Open Project*, and adding shares `addAudioPaths` with *Add Files*, which names
+any file that won't decode — several can arrive at once.
+
+- **One copy per user session, for files.** A copy started *with files* while another
+  is running hands them over and exits (`handToRunningCopy`: `FindWindow` on the main
+  window class, then `WM_COPYDATA` with the absolute paths, NUL-separated, tagged
+  `kLaunchCopyData`; it brings that window forward, which a just-launched process is
+  allowed to do). Double-clicking a project that is already open must bring it
+  forward, not open the same file in a second copy where each would save over the
+  other without a word. The receiver copies the paths out and answers at once — the
+  sender waits on the message — and posts itself `WM_APP_LAUNCH`. Started *without*
+  files, a second copy opens normally; and if the running copy doesn't answer within
+  5 s, the new one opens normally too.
+- **A request is handled once** (`std::exchange` on `launchArgs`), so a stray repeat
+  of the message can't reopen anything over later work, and it **asks about unsaved
+  changes** like any other open — it can arrive at any time now, not only at startup.
+  If the first project is the one already open, the answer is the window coming
+  forward and a toast, not a reload.
+- **Projects are tried in order** until one opens, so a missing first project doesn't
+  leave the app empty; any after the opened one are counted in a toast, since only one
+  can be open.
+- **A project is told by its contents** (`launch::looksLikeProject`: the extension, or
+  else the file's first four bytes, `ACEP`), so one reached by an 8.3 short name
+  (`SHOW~1.ACE`) or kept as `show.acep.bak` opens as a project rather than failing as
+  audio. `launch::parse` takes the test as a parameter, so the selftest checks the
+  rules without files.
 
 `main.cpp` splits the command line with `CommandLineToArgvW` and matches switches
 exactly. It used to look for "--selftest" *anywhere* in the raw command line, so a
 project whose path merely contained that text would have run the test suite instead.
+`--dialogtest` keeps both of its forms: `--dialogtest1sel` and `--dialogtest 1 sel`.
+`exepath.h` is the one place that knows where the exe is (long paths included), for
+the association and for the selftest's log.
 
 **The association is opt-in** — *File ▸ Open .acep projects with this app when
 double-clicked*, ticked while `.acep` opens with this copy — because it changes how
@@ -1927,16 +1953,19 @@ correction lands between 60 Hz and 14 kHz. It measured **1.4 dB at 70 Hz**;
 before the weights, over 20 dB at 30 Hz. DC and Nyquist are separately asserted
 to come out at exactly 0 dB.
 
-**Starting with files** (8 checks): `launch::parse` takes the first `.acep` (in any
-case) as the project and other files as clips, skips switches and counts further
-projects; a project is told by its extension alone. `assoc`, against a scratch
+**Starting with files** (10 checks): `launch::parse` takes `.acep` files (in any case)
+as projects in order and other files as clips, and skips switches; a project is told
+by its contents (a `.acep.bak` with the `ACEP` header is one, a `.wav` isn't) or, when
+it can't be read, by its extension; and `parse` uses whatever test it is given. `assoc`, against a scratch
 registry root: nothing registered to begin with; registering makes `.acep` open with
 this copy and not another; the open command quotes program and file; unregistering
 stops it and leaves no empty keys; and with another app's claim on `.acep` made after
 ours, unregistering removes our ProgID but leaves its claim. The main window opened
 from a command line was checked by rendering it (`PrintWindow`, launched without
 activation): the project's EQ tags, and after an undo the two-line message and the
-History badge.
+History badge. The hand-off was checked live, with no other copy running: a second
+copy given the open project exits and the first says it is already open; a third given
+another project exits and the first opens it, leaving one copy.
 
 **History position** (5 checks): the cheap counts the toolbar repaints with
 (`historyCounts`, pointer hops only) agree with the full position; a new project has no steps; at the latest step undo

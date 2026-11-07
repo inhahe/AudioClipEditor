@@ -97,8 +97,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     }
     if (!args.empty() && args[0] == L"--selftest")
         return runSelfTest();
-    if (!args.empty() && args[0] == L"--dialogtest") {
-        const std::wstring which = args.size() > 1 ? args[1] : std::wstring();
+    // "--dialogtest1sel", "--dialogtest 1sel" and "--dialogtest 1 sel" all name
+    // dialog 1 with the long selection label.
+    if (!args.empty() && args[0].rfind(L"--dialogtest", 0) == 0) {
+        std::wstring which = args[0].substr(12);
+        for (size_t i = 1; i < args.size(); ++i) which += L" " + args[i];
         return runDialogTest(hInst, _wtoi(which.c_str()), which.find(L"sel") != std::wstring::npos);
     }
     return runApp(hInst, nCmdShow, args);

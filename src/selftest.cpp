@@ -8,6 +8,7 @@
 #include "document.h"
 #include "engine.h"
 #include "assoc.h"
+#include "exepath.h"
 #include "launch.h"
 #include "layout.h"
 #include "match.h"
@@ -22,11 +23,6 @@
 #include <cstdio>
 #include <vector>
 #include <algorithm>
-
-static std::wstring exeDir() {
-    wchar_t path[MAX_PATH]; GetModuleFileNameW(nullptr, path, MAX_PATH);
-    PathRemoveFileSpecW(path); return path;
-}
 
 static AudioBufferPtr makeSine(int rate, double seconds, double freq) {
     auto b = std::make_shared<AudioBuffer>();
@@ -3396,12 +3392,25 @@ int runSelfTest() {
     {
         const launch::Request r = launch::parse({ L"take 1.wav", L"--selftest", L"Show.ACEP",
                                                   L"b.mp3", L"other.acep", L"" });
-        check(r.project == L"Show.ACEP" && r.audio.size() == 2 && r.audio[0] == L"take 1.wav" &&
-              r.audio[1] == L"b.mp3" && r.extraProjects == 1,
-              L"launch: the first .acep (any case) is the project, other files are clips, switches skipped");
+        check(r.projects.size() == 2 && r.projects[0] == L"Show.ACEP" && r.projects[1] == L"other.acep" &&
+              r.audio.size() == 2 && r.audio[0] == L"take 1.wav" && r.audio[1] == L"b.mp3",
+              L"launch: .acep files (any case) are projects in order, other files are clips, switches skipped");
         check(!launch::isProjectPath(L".acep.wav") && launch::isProjectPath(L"x.acep") &&
-              !launch::isProjectPath(L"acep") && launch::parse({}).project.empty(),
-              L"launch: a project is told by its extension alone");
+              !launch::isProjectPath(L"acep") && launch::parse({}).projects.empty(),
+              L"launch: the extension test");
+        // A project is recognised by its contents too: reached by an 8.3 short name or
+        // kept under another name, it is still a project, not audio to decode.
+        const std::wstring bak = dir + L"\\_selftest_launch.acep.bak";
+        const std::wstring wav = dir + L"\\_selftest_launch.wav";
+        if (FILE* f = _wfopen(bak.c_str(), L"wb")) { fwrite("ACEP", 1, 4, f); fclose(f); }
+        if (FILE* f = _wfopen(wav.c_str(), L"wb")) { fwrite("RIFF", 1, 4, f); fclose(f); }
+        check(launch::looksLikeProject(bak) && !launch::looksLikeProject(wav) &&
+              launch::looksLikeProject(dir + L"\\_selftest_missing.acep"),
+              L"launch: a project is told by its contents, or by its extension when it can't be read");
+        const launch::Request byContent = launch::parse({ bak, wav }, launch::looksLikeProject);
+        check(byContent.projects.size() == 1 && byContent.audio.size() == 1,
+              L"launch: ...and parse uses whatever test it is given");
+        DeleteFileW(bak.c_str()); DeleteFileW(wav.c_str());
     }
 
     // ---- double-click opens projects here (assoc.h), against a scratch registry
