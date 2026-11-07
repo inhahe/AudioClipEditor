@@ -29,6 +29,10 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   already handed to the sound card, moving smoothly at the screen refresh rate
   instead of hopping in lumps — so it lines up with the waveform under it even at
   the fine-tune strips' zoom.
+- **Playback follows your output device.** Unplug the headphones and it carries on
+  through the speakers; plug them in, or pick another output in Windows' settings, and
+  it moves there — from where it was, without stopping. With no output device at all,
+  the app still runs, silently.
 - **Select a section** of any clip by dragging across its waveform. While a
   selection is active the card shows **Crop** and **New clip** buttons, and the
   card's play button auditions **only the selected part** (so you can preview

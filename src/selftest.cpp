@@ -1422,6 +1422,18 @@ int runSelfTest() {
         p.reset(0);
         p.push(480, 480, 480);
         p.push(480, 0, 480);
+        {
+            // Moving to another device: its clock starts from 0, and what is heard next
+            // carries on from where the source is.
+            RenderTimeline q;
+            q.push(480, 480, 480); q.push(480, 480, 960);
+            q.restartDevice(960);
+            const bool fresh = q.devWritten == 0 && q.recCount == 0 && q.sourceAt(0) == 960;
+            q.push(480, 480, 1440);
+            check(fresh && q.sourceAt(240) == 1200 && q.sourceAt(480) == 1440,
+                  L"playback position restarts with a new device's clock, from where the source was",
+                  std::to_wstring(q.sourceAt(240)));
+        }
         check(p.sourceAt(720) == 480, L"playback position holds still through a silent fill",
               std::to_wstring(p.sourceAt(720)));
     }
@@ -1563,6 +1575,50 @@ int runSelfTest() {
                     out(line);
                 }
             }
+
+            // Moving to the default device mid-playback -- what the engine does when the
+            // device goes away or the default output changes -- carries on playing from
+            // where it was. The device frames written start again from 0 (it is a new
+            // stream, with a new clock), the playhead goes on forward at about real time,
+            // and the tone still reaches the mixer.
+            eng.play(std::make_shared<BufferSource>(faint, 0, faint->frames()), 0);
+            Sleep(300);
+            int64_t last = eng.position();   // which also refreshes posDiag
+            const PlaybackEngine::PosDiag beforeReopen = eng.posDiag();
+            const int64_t atReopen = last;
+            const double tReopen = nowSec();
+            eng.reopenDevice();
+            bool forward = true;
+            float peakAfter = 0.0f;
+            Microsoft::WRL::ComPtr<IAudioMeterInformation> meterAfter;
+            for (int i = 0; i < 40; ++i) {
+                Sleep(20);
+                const int64_t p = eng.position();
+                if (p < last) forward = false;
+                last = p;
+                if (i == 20) meterAfter = ownSessionMeter();   // the new stream's session
+                float pk = 0.0f;
+                if (i > 20 && meterAfter && SUCCEEDED(meterAfter->GetPeakValue(&pk))) peakAfter = std::max(peakAfter, pk);
+            }
+            const PlaybackEngine::PosDiag afterReopen = eng.posDiag();
+            const bool stillPlaying = eng.isPlaying();
+            const double sinceReopen = nowSec() - tReopen;
+            const double advanced = (double)(last - atReopen) / eng.sampleRate() / sinceReopen;
+            // A new stream has been written no more than the time since the reopen (and
+            // a buffer); the old one would count everything since init on top.
+            const bool counted = afterReopen.devEnd <= (int64_t)((sinceReopen + 0.1) * eng.sampleRate()) &&
+                                 beforeReopen.devEnd > (int64_t)(0.1 * eng.sampleRate());
+            eng.stop();
+            check(counted,
+                  L"playback moves to the default device: a new stream, its device frames counted from 0",
+                  std::to_wstring(beforeReopen.devEnd) + L" -> " + std::to_wstring(afterReopen.devEnd) +
+                      L" at " + std::to_wstring(eng.sampleRate()) + L" Hz");
+            check(stillPlaying && forward && advanced > 0.6 && advanced < 1.2,
+                  L"playback moves to the default device: it carries on forward, at about real time",
+                  std::to_wstring(advanced) + L"x");
+            check(peakAfter > kFaint * 0.1f && peakAfter < kFaint * 10.0f,
+                  L"playback moves to the default device: the tone still reaches the mixer",
+                  L"peak " + std::to_wstring(peakAfter));
             eng.shutdown();
         }
     }

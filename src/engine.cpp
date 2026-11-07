@@ -78,6 +78,44 @@ int TimelineSource::render(float* out, int frames) {
 }
 
 // ---------------- PlaybackEngine ----------------
+// Told by Windows when the default output device changes (headphones plugged in, a
+// choice in Settings). Windows calls it on a thread of its own, which must not block,
+// so it only raises the flag and wakes the audio thread, which does the moving.
+class DeviceNotifier : public IMMNotificationClient {
+public:
+    DeviceNotifier(std::atomic<bool>* reopen, HANDLE wake) : reopen_(reopen), wake_(wake) {}
+    ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG)InterlockedIncrement(&refs_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const LONG left = InterlockedDecrement(&refs_);
+        if (left == 0) delete this;
+        return (ULONG)left;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IMMNotificationClient)) {
+            *out = static_cast<IMMNotificationClient*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR) override {
+        if (flow == eRender && role == eConsole) {   // the one openStream opens
+            reopen_->store(true);
+            SetEvent(wake_);
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
+private:
+    LONG refs_ = 1;
+    std::atomic<bool>* reopen_;
+    HANDLE wake_;
+};
+
 struct PlaybackEngine::Impl {
     // The device's COM objects (and `clock` below): created, used and released on the
     // audio thread only (threadMain), which is in the multithreaded apartment.
@@ -88,6 +126,12 @@ struct PlaybackEngine::Impl {
     WAVEFORMATEX* mix = nullptr;    // CoTaskMem
     HANDLE hEvent = nullptr;
     UINT32 bufferFrames = 0;
+
+    // Registered with `enumr` for its life: raises `reopen` when the default output
+    // device changes.
+    ComPtr<IMMNotificationClient> notifier;
+    // Set by the notifier or by reopenDevice(): renderLoop moves to the default device.
+    std::atomic<bool> reopen{ false };
 
     std::thread thread;
     std::atomic<bool> running{ false };
@@ -217,12 +261,20 @@ bool PlaybackEngine::init(std::wstring* err) {
     return false;
 }
 
-std::wstring PlaybackEngine::openDevice() {
+std::wstring PlaybackEngine::openEnumerator() {
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
         __uuidof(IMMDeviceEnumerator), (void**)d_->enumr.GetAddressOf());
     if (FAILED(hr)) return L"No audio device enumerator.";
+    // Without it a device that goes away is still noticed (renderLoop); only a new
+    // default output wouldn't be followed.
+    d_->notifier.Attach(new DeviceNotifier(&d_->reopen, d_->hEvent));
+    if (FAILED(d_->enumr->RegisterEndpointNotificationCallback(d_->notifier.Get())))
+        d_->notifier.Reset();
+    return std::wstring();
+}
 
-    hr = d_->enumr->GetDefaultAudioEndpoint(eRender, eConsole, &d_->device);
+std::wstring PlaybackEngine::openStream() {
+    HRESULT hr = d_->enumr->GetDefaultAudioEndpoint(eRender, eConsole, &d_->device);
     if (FAILED(hr)) return L"No default audio output device.";
 
     hr = d_->device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
@@ -232,6 +284,7 @@ std::wstring PlaybackEngine::openDevice() {
     hr = d_->client->GetMixFormat(&d_->mix);
     if (FAILED(hr)) return L"Could not get device mix format.";
 
+    // The format is the audio thread's alone (writeFrames), so it needs no lock.
     WAVEFORMATEX* wf = d_->mix;
     d_->dchannels = wf->nChannels;
     d_->bits = wf->wBitsPerSample;
@@ -243,14 +296,16 @@ std::wstring PlaybackEngine::openDevice() {
     } else {
         d_->isFloat = false; // assume PCM int
     }
-    sampleRate_ = (int)wf->nSamplesPerSec;
+    const int rate = (int)wf->nSamplesPerSec;
 
     REFERENCE_TIME dur = 30 * 10000; // 30 ms
     hr = d_->client->Initialize(AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK, dur, 0, wf, nullptr);
     if (FAILED(hr)) return L"Could not initialize audio client.";
 
-    d_->client->SetEventHandle(d_->hEvent);
+    // Without it renderLoop would only wake on its 200 ms timeout, far slower than the
+    // 30 ms buffer drains: playback would stutter without a word.
+    if (FAILED(d_->client->SetEventHandle(d_->hEvent))) return L"Could not set the audio event.";
 
     hr = d_->client->GetBufferSize(&d_->bufferFrames);
     if (FAILED(hr)) return L"Could not get buffer size.";
@@ -261,36 +316,74 @@ std::wstring PlaybackEngine::openDevice() {
 
     // Optional: without it position() falls back to the render position, which
     // is what it always used to report -- less smooth, but playback still works.
+    UINT64 clockFreq = 0;
     if (SUCCEEDED(d_->client->GetService(__uuidof(IAudioClock),
                                          (void**)d_->clock.GetAddressOf()))) {
-        if (FAILED(d_->clock->GetFrequency(&d_->clockFreq))) d_->clockFreq = 0;
+        if (FAILED(d_->clock->GetFrequency(&clockFreq))) clockFreq = 0;
     }
 
     d_->mixbuf.resize((size_t)d_->bufferFrames * 2);
-    // apply any source rate requested before init()
-    d_->rsActive = (srcRate_ > 0 && srcRate_ != sampleRate_);
-    d_->rsRatio = (srcRate_ > 0) ? (double)srcRate_ / (double)sampleRate_ : 1.0;
+    {
+        // What the UI thread reads as well -- the rate, the resampler, the clock and the
+        // heard timeline -- under the lock: on a reopen it may be asking right now.
+        std::lock_guard<std::mutex> lk(d_->mtx);
+        sampleRate_ = rate;
+        d_->rsActive = (srcRate_ > 0 && srcRate_ != rate);
+        d_->rsRatio = (srcRate_ > 0) ? (double)srcRate_ / (double)rate : 1.0;
+        d_->resetRs();
+        d_->clockFreq = clockFreq;
+        d_->clkPos = d_->clkQpc = 0;
+        // This device's clock starts from 0; what plays next carries on from where the
+        // source is.
+        d_->heard.restartDevice(d_->source ? d_->source->position() : 0);
+    }
     if (FAILED(d_->client->Start())) return L"Could not start the audio stream.";
     return std::wstring();
 }
 
-// Undoes openDevice, however far it got.
-void PlaybackEngine::closeDevice() {
+// Undoes openStream, however far it got.
+void PlaybackEngine::closeStream() {
+    {
+        // The playhead stops following this device's clock (position() falls back to
+        // the render position) until another is open.
+        std::lock_guard<std::mutex> lk(d_->mtx);
+        d_->clockFreq = 0;
+    }
     if (d_->client) d_->client->Stop();
     d_->clock.Reset();
     d_->render.Reset();
     d_->client.Reset();
     d_->device.Reset();
-    d_->enumr.Reset();
     if (d_->mix) { CoTaskMemFree(d_->mix); d_->mix = nullptr; }
 }
 
-void PlaybackEngine::setSourceRate(int rate) {
-    srcRate_ = rate;
+void PlaybackEngine::closeEnumerator() {
+    if (d_->enumr && d_->notifier) d_->enumr->UnregisterEndpointNotificationCallback(d_->notifier.Get());
+    d_->notifier.Reset();
+    d_->enumr.Reset();
+}
+
+// Play on whatever the default output is now. If there is none (the last device just
+// went away), the stream stays closed and renderLoop tries again when it next wakes,
+// at most its 200 ms timeout later.
+void PlaybackEngine::reopenStream() {
+    closeStream();
+    if (!openStream().empty()) closeStream();
+}
+
+void PlaybackEngine::reopenDevice() {
     if (!d_) return;
+    d_->reopen = true;
+    SetEvent(d_->hEvent);
+}
+
+void PlaybackEngine::setSourceRate(int rate) {
+    if (!d_) { srcRate_ = rate; return; }   // no audio thread yet, or none any more
     std::lock_guard<std::mutex> lk(d_->mtx);
-    d_->rsActive = (rate > 0 && rate != sampleRate_);
-    d_->rsRatio = (rate > 0) ? (double)rate / (double)sampleRate_ : 1.0;
+    srcRate_ = rate;
+    const int dev = sampleRate_;
+    d_->rsActive = (rate > 0 && rate != dev);
+    d_->rsRatio = (rate > 0) ? (double)rate / (double)dev : 1.0;
     d_->resetRs();
 }
 
@@ -337,7 +430,8 @@ void PlaybackEngine::writeFrames(void* dst, const float* stereo, int frames) {
 
 void PlaybackEngine::threadMain() {
     const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const std::wstring why = SUCCEEDED(co) ? openDevice() : L"COM could not start on the audio thread.";
+    std::wstring why = SUCCEEDED(co) ? openEnumerator() : L"COM could not start on the audio thread.";
+    if (why.empty()) why = openStream();
     const bool opened = why.empty();
     d_->opened.set_value(why);   // init returns now
     if (opened) {
@@ -346,23 +440,40 @@ void PlaybackEngine::threadMain() {
         renderLoop();
         if (hTask) AvRevertMmThreadCharacteristics(hTask);
     }
-    closeDevice();
+    closeStream();
+    closeEnumerator();
     if (SUCCEEDED(co)) CoUninitialize();
+}
+
+// Whether `hr` says the stream's device is gone for good -- unplugged, disabled, or the
+// audio service restarted -- so only a new stream on the default device will play.
+static bool streamLost(HRESULT hr) {
+    return hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_SERVICE_NOT_RUNNING
+#ifdef AUDCLNT_E_RESOURCES_INVALIDATED
+        || hr == AUDCLNT_E_RESOURCES_INVALIDATED
+#endif
+        ;
 }
 
 void PlaybackEngine::renderLoop() {
     while (d_->running) {
-        DWORD w = WaitForSingleObject(d_->hEvent, 200);
+        // A timeout isn't skipped: a device that has gone away stops signalling, and
+        // asking the client is how that is found out.
+        WaitForSingleObject(d_->hEvent, 200);
         if (!d_->running) break;
-        if (w != WAIT_OBJECT_0) continue;
+        if (d_->reopen.exchange(false) || !d_->client) { reopenStream(); continue; }
 
         UINT32 padding = 0;
-        if (FAILED(d_->client->GetCurrentPadding(&padding))) continue;
+        HRESULT hr = d_->client->GetCurrentPadding(&padding);
+        if (streamLost(hr)) { reopenStream(); continue; }
+        if (FAILED(hr)) continue;
         UINT32 avail = d_->bufferFrames - padding;
         if (avail == 0) continue;
 
         BYTE* pData = nullptr;
-        if (FAILED(d_->render->GetBuffer(avail, &pData))) continue;
+        hr = d_->render->GetBuffer(avail, &pData);
+        if (streamLost(hr)) { reopenStream(); continue; }
+        if (FAILED(hr)) continue;
 
         bool endReached = false;
         int produced = 0;

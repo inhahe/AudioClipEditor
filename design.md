@@ -314,6 +314,30 @@ came back normal-sized.) The saved size and position always apply.
   that worked before. The selftest checks the UI thread's apartment, and that the
   engine's output reaches Windows' mixer: it plays a 440 Hz tone at −80 dBFS, far below
   hearing, and reads this process's audio-session peak meter.
+- **Playback follows the default output device** (`reopenDevice`, `reopenStream`). The
+  audio thread keeps the device enumerator for its whole life, with an
+  `IMMNotificationClient` registered on it (`DeviceNotifier`), and opens the *stream*
+  (`openStream`: device, client, format, clock) per device. When the default output
+  changes (headphones plugged in, a choice in Settings) the notifier — called on a
+  thread of Windows', which must not block — only raises `reopen` and wakes the loop;
+  when the device in use goes away (`AUDCLNT_E_DEVICE_INVALIDATED`,
+  `AUDCLNT_E_SERVICE_NOT_RUNNING`, from `GetCurrentPadding` or `GetBuffer`), the loop
+  finds out itself. Either way it closes the stream and opens one on the default
+  device; with none (the last one just went away) it tries again on each wake-up, at
+  most 200 ms apart. The loop no longer skips a wait that timed out, since a device
+  that has gone stops signalling and asking the client is how that shows. What was
+  playing carries on from where the source is: the new device's clock starts from 0
+  (`RenderTimeline::restartDevice`), and the rate, resampler ratio and clock frequency
+  — which the UI thread reads — are published under the lock, as the new device may
+  run at another rate (`sampleRate_` is atomic for that reason). The playhead holds
+  still meanwhile (`closeStream` drops the clock, so `position()` falls back to the
+  render position). Checked in the selftest on the real device: after `reopenDevice`
+  mid-tone, the device frames are counted afresh, playback carries on forward at
+  about real time, and the tone still reaches the mixer; without the reopen the first
+  fails. An unplugged device can't be simulated here.
+- **No device is not a crash**: after a failed `init` (or before one, or after
+  `shutdown`) every engine call is a quiet no-op, since the app goes on, silently, and
+  its timer asks `isPlaying()` from the start.
 
 ## DSP: noise reduction (`dsp.{h,cpp}`)
 

@@ -1,5 +1,6 @@
 #pragma once
 #include "audio_buffer.h"
+#include <atomic>
 #include <memory>
 #include <functional>
 #include <cstdint>
@@ -80,6 +81,8 @@ struct RenderTimeline {
     // `devWritten` deliberately keeps counting -- it is tied to the device clock,
     // which never restarts.
     void reset(int64_t srcPos) { recCount = 0; recHead = 0; srcAtReset = srcPos; }
+    // Playing on to another device, whose clock starts from 0 again.
+    void restartDevice(int64_t srcPos) { reset(srcPos); devWritten = 0; }
 
     // `srcLen` is recorded rather than derived from `devLen` so that resampling
     // and a source draining part-way through a chunk are both handled exactly.
@@ -124,12 +127,21 @@ public:
     bool init(std::wstring* err = nullptr);
     void shutdown();
 
-    int sampleRate() const { return sampleRate_; }   // audio device (output) rate
+    // The output device's rate. It can change while playing, if the device goes away
+    // or the default output changes and the engine moves to another (reopenDevice).
+    int sampleRate() const { return sampleRate_.load(); }
 
     // Rate of the audio in the sources (the project/internal rate). If it differs
     // from the device rate, the engine linear-resamples on the audio thread so the
     // internal project rate can stay >= 48 kHz regardless of the device mix rate.
     void setSourceRate(int rate);
+
+    // Move to the default output device, keeping what is playing: it carries on from
+    // where it was, and the playhead holds still meanwhile. The engine does this by
+    // itself when the device it plays to goes away (headphones unplugged) or the
+    // default output changes (plugged in, chosen in Settings); returns at once, the
+    // audio thread does the work.
+    void reopenDevice();
 
     // Called (from the audio thread) when the active source drains fully.
     void setEndCallback(std::function<void()> cb) { endCb_ = std::move(cb); }
@@ -162,17 +174,25 @@ public:
     PosDiag posDiag() const;
 
 private:
-    // The audio thread: openDevice, then (once init has been told how that went)
-    // renderLoop until shutdown, then closeDevice -- all on that thread.
+    // The audio thread: openEnumerator and openStream, then (once init has been told
+    // how that went) renderLoop until shutdown, then closeStream and closeEnumerator --
+    // all on that thread.
     void threadMain();
-    std::wstring openDevice();   // empty if it opened, else why not
+    // The audio thread's halves of opening and closing: the device enumerator (and the
+    // notification of default-device changes) once for the thread's life, the stream on
+    // the default device each time it is (re)opened. Each open returns an empty string
+    // if it worked, else why not.
+    std::wstring openEnumerator();
+    std::wstring openStream();
+    void closeStream();
+    void closeEnumerator();
+    void reopenStream();
     void renderLoop();
-    void closeDevice();
     void writeFrames(void* dst, const float* stereo, int frames);
 
     struct Impl;
     std::unique_ptr<Impl> d_;
     std::function<void()> endCb_;
-    int sampleRate_ = 48000;    // device output rate
-    int srcRate_ = 0;           // project/source rate (0 = same as device)
+    std::atomic<int> sampleRate_{ 48000 };   // device output rate; set under the engine's lock
+    int srcRate_ = 0;           // project/source rate (0 = same as device); under the lock once open
 };
