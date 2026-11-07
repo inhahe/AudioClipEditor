@@ -20,6 +20,7 @@
 #include <windowsx.h>
 #include <string>
 #include <vector>
+#include <deque>
 #include <algorithm>
 #include <climits>
 
@@ -40,6 +41,16 @@ static std::wstring fullPath(const std::wstring& p) {
     const DWORD n = GetFullPathNameW(p.c_str(), need, &out[0], nullptr);
     out.resize(n < need ? n : 0);
     return out.empty() ? p : out;
+}
+
+// The files a command line names (launch::isFileArg), each made absolute. A request is
+// kept in this form from the moment it arrives: it may be opened only after a file
+// dialog has moved the working directory, or by another copy of the app.
+static std::vector<std::wstring> launchFiles(const std::vector<std::wstring>& args) {
+    std::vector<std::wstring> files;
+    for (const std::wstring& a : args)
+        if (launch::isFileArg(a)) files.push_back(fullPath(a));
+    return files;
 }
 
 // ----------------------------------------------------------------- theme colors
@@ -215,9 +226,13 @@ struct App {
     // Whether the timbre dialog also matches volume, in the same step. Session-scoped,
     // like the rest of the dialog's settings.
     bool tmAlsoVolume = false;
-    // The command-line arguments after the program name (see launch.h), opened once
-    // the window exists.
-    std::vector<std::wstring> launchArgs;
+    // Command lines still to open, oldest first, each as its files' absolute paths
+    // (launchFiles): this copy's own, then any that later copies handed over. Opened
+    // only from the main message loop -- see openLaunchRequests.
+    std::deque<std::vector<std::wstring>> launchQueue;
+    // A launch message reached the window from inside a modal loop, so the main loop
+    // has to post it again once that loop is over.
+    bool launchDeferred = false;
 
     // The clip last set as the standard to match to, by either matcher; -1 = the
     // average. Shared, because choosing a standard is a statement about the take
@@ -2598,19 +2613,30 @@ struct App {
         return true;
     }
 
-    // Open what a command line asked for: projects (double-clicking a .acep file, "Open
-    // with", dropping it on the exe) and audio files to add as clips -- to the project
-    // just opened, if one was. Runs at startup, and when another copy of the app hands
-    // its command line over (see handToRunningCopy), so it asks about unsaved changes
-    // like any other open.
-    void openLaunchRequest() {
-        // Taken, not read: a request is handled once, so a stray repeat of the message
-        // can't reopen anything over later work.
-        const std::vector<std::wstring> args = std::exchange(launchArgs, {});
-        if (args.empty()) return;
-        const launch::Request req = launch::parse(args, launch::looksLikeProject);
+    // Open every request in launchQueue, in the order they came. Called by the main
+    // message loop only (runApp), never from inside a modal loop -- a dialog, a message
+    // box, a menu: whoever opened that holds clip ids and state from the project in
+    // the window, and replacing the project under it would aim its result at another
+    // project's clips (ids start at 1 in every project). Requests that arrive while
+    // these ask something are opened too, after the ones before them.
+    void openLaunchRequests() {
+        while (!launchQueue.empty()) {
+            // Taken, not read: a request is handled once, so a stray repeat of the
+            // message can't reopen anything over later work.
+            const std::vector<std::wstring> files = std::move(launchQueue.front());
+            launchQueue.pop_front();
+            openLaunchRequest(files);
+        }
+    }
+    // Open what one command line asked for: projects (double-clicking a .acep file,
+    // "Open with", dropping it on the exe) and audio files to add as clips -- to the
+    // project just opened, if one was. `files` are absolute paths (launchFiles). It may
+    // come from another copy of the app at any time (see handToRunningCopy), so it asks
+    // about unsaved changes like any other open.
+    void openLaunchRequest(const std::vector<std::wstring>& files) {
+        const launch::Request req = launch::parse(files, launch::looksLikeProject);
         if (!req.projects.empty()) {
-            const std::wstring first = fullPath(req.projects[0]);
+            const std::wstring& first = req.projects[0];
             if (!projectPath.empty() && _wcsicmp(first.c_str(), projectPath.c_str()) == 0) {
                 // Double-clicking the project that is already open: this window coming
                 // forward is the answer, not a reload over the work in it.
@@ -2620,7 +2646,7 @@ struct App {
                 // Tried in turn, so a missing first project doesn't leave the app empty.
                 size_t opened = req.projects.size();
                 for (size_t i = 0; i < req.projects.size() && opened == req.projects.size(); ++i)
-                    if (openProjectPath(fullPath(req.projects[i]))) opened = i;
+                    if (openProjectPath(req.projects[i])) opened = i;
                 const size_t notTried = opened < req.projects.size() ? req.projects.size() - 1 - opened : 0;
                 if (notTried > 0)
                     toast(L"Only one project can be open at a time \u2014 "
@@ -2628,11 +2654,7 @@ struct App {
                           + L" opened");
             }
         }
-        if (!req.audio.empty()) {
-            std::vector<std::wstring> paths;
-            for (const std::wstring& p : req.audio) paths.push_back(fullPath(p));
-            addAudioPaths(paths);
-        }
+        if (!req.audio.empty()) addAudioPaths(req.audio);
     }
 
     // File menu: make double-clicking a .acep project open it with this copy of the
@@ -4404,21 +4426,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         a->onKey(wp); return 0;
     case WM_COMMAND: if (HIWORD(wp) == 0 && lp == 0) { a->onCommand(LOWORD(wp)); return 0; } break;
     case WM_TIMER: a->onTimer(); return 0;
-    case WM_APP_LAUNCH: if (a) a->openLaunchRequest(); return 0;
+    // The main loop opens launch requests itself (runApp), so one that arrives here was
+    // dispatched by a modal loop, and waits until that is over (openLaunchRequests).
+    case WM_APP_LAUNCH: if (a) a->launchDeferred = true; return 0;
     case WM_INITMENUPOPUP: if (a) a->refreshAssocCheck(); break;
     case WM_COPYDATA: {
         const auto* cds = (const COPYDATASTRUCT*)lp;
         if (a && cds && cds->dwData == kLaunchCopyData && cds->lpData) {
-            // Copy out and answer at once: the sender is waiting on this, and opening
-            // a project may first ask about unsaved changes.
+            // Copied out and answered at once: the sender is waiting on this, and
+            // opening a project may first ask about unsaved changes. A request of its
+            // own rather than added to one waiting, so it is opened as the
+            // double-click it was.
             const wchar_t* p = (const wchar_t*)cds->lpData;
             const size_t n = cds->cbData / sizeof(wchar_t);
+            std::vector<std::wstring> files;
             for (size_t i = 0; i < n; ) {
                 size_t j = i;
                 while (j < n && p[j]) ++j;
-                if (j > i) a->launchArgs.emplace_back(p + i, j - i);
+                if (j > i) files.emplace_back(p + i, j - i);
                 i = j + 1;
             }
+            if (!files.empty()) a->launchQueue.push_back(std::move(files));
             PostMessageW(hwnd, WM_APP_LAUNCH, 0, 0);
             return TRUE;
         }
@@ -4467,8 +4495,7 @@ static void saveWindowPlacement(HWND hwnd) {
 // copy is running, or it doesn't answer.
 static bool handToRunningCopy(const std::vector<std::wstring>& args) {
     std::wstring payload;   // absolute paths, each NUL-terminated
-    for (const std::wstring& a : args)
-        if (!a.empty() && a.rfind(L"--", 0) != 0) { payload += fullPath(a); payload.push_back(L'\0'); }
+    for (const std::wstring& f : launchFiles(args)) { payload += f; payload.push_back(L'\0'); }
     if (payload.empty()) return false;
     HWND other = FindWindowW(L"AudioClipEditorMain", nullptr);
     if (!other) return false;
@@ -4482,6 +4509,18 @@ static bool handToRunningCopy(const std::vector<std::wstring>& args) {
     return true;
 }
 
+// Start another copy of the app to open `files`.
+static void startCopy(const std::vector<std::wstring>& files) {
+    const std::wstring exe = exePath();
+    std::wstring cmd = L"\"" + exe + L"\" " + launch::commandLine(files);
+    STARTUPINFOW si{}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+}
+
 int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args) {
     if (handToRunningCopy(args)) return 0;
     // Tooltips are a "bar" class; the matching dialogs' track list a list view.
@@ -4490,7 +4529,8 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
     if (!mfio::startup()) { MessageBoxW(nullptr, L"Media Foundation failed to start.", L"Error", MB_ICONERROR); return 1; }
 
     App app;
-    app.launchArgs = args;
+    if (std::vector<std::wstring> files = launchFiles(args); !files.empty())
+        app.launchQueue.push_back(std::move(files));
     std::wstring engErr;
     if (!app.engine.init(&engErr))
         MessageBoxW(nullptr, (L"Audio output unavailable: " + engErr + L"\nPlayback will be silent.").c_str(),
@@ -4548,9 +4588,23 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        if (msg.message == WM_APP_LAUNCH && msg.hwnd == hwnd) {
+            app.openLaunchRequests();
+        } else {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+        // Whatever this message started has returned, so any modal loop it ran is over
+        // and a request that waited for it can be opened.
+        if (app.launchDeferred) {
+            app.launchDeferred = false;
+            if (!app.launchQueue.empty()) PostMessageW(hwnd, WM_APP_LAUNCH, 0, 0);
+        }
     }
+    // Requests that came while the window was closing -- its "Save changes?" box is a
+    // modal loop, so they waited -- were never opened. Each goes to a fresh copy rather
+    // than the double-click being lost.
+    for (const std::vector<std::wstring>& files : app.launchQueue) startCopy(files);
     app.engine.shutdown();
     mfio::shutdown();
     return 0;

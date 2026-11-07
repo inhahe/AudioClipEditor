@@ -41,19 +41,42 @@ inline bool looksLikeProject(const std::wstring& path) {
     return project;
 }
 
-// `args` are the command-line arguments after the program name. Switches ("--...")
-// are the developer modes main.cpp handles before the window exists; they are not
-// files. `isProject` decides what is a project (looksLikeProject in the app; a
-// stand-in in tests).
+// Whether a command-line argument names a file. Switches ("--...") are the developer
+// modes main.cpp handles before the window exists.
+inline bool isFileArg(const std::wstring& arg) { return !arg.empty() && arg.rfind(L"--", 0) != 0; }
+
+// `args` are the command-line arguments after the program name; only the files among
+// them count (isFileArg). `isProject` decides what is a project (looksLikeProject in
+// the app; a stand-in in tests).
 template <class IsProject>
 Request parse(const std::vector<std::wstring>& args, IsProject isProject) {
     Request r;
-    for (const std::wstring& a : args) {
-        if (a.empty() || a.rfind(L"--", 0) == 0) continue;
-        (isProject(a) ? r.projects : r.audio).push_back(a);
-    }
+    for (const std::wstring& a : args)
+        if (isFileArg(a)) (isProject(a) ? r.projects : r.audio).push_back(a);
     return r;
 }
 inline Request parse(const std::vector<std::wstring>& args) { return parse(args, isProjectPath); }
+
+// `args` written as the arguments part of a command line, which CommandLineToArgvW
+// splits back into exactly `args`: each one quoted, a quote inside escaped, and the
+// backslashes before a quote (or before the closing quote, as in "C:\") doubled.
+inline std::wstring commandLine(const std::vector<std::wstring>& args) {
+    std::wstring out;
+    for (const std::wstring& a : args) {
+        if (!out.empty()) out += L' ';
+        out += L'"';
+        size_t slashes = 0;
+        for (const wchar_t ch : a) {
+            if (ch == L'\\') { ++slashes; continue; }
+            if (ch == L'"') slashes = slashes * 2 + 1;
+            out.append(slashes, L'\\');
+            slashes = 0;
+            out += ch;
+        }
+        out.append(slashes * 2, L'\\');
+        out += L'"';
+    }
+    return out;
+}
 
 } // namespace launch

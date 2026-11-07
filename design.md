@@ -37,9 +37,10 @@ sync with behavior changes.
 "Open with" or a drop onto the exe — opens the project and adds the audio files to it
 as clips (`App::openLaunchRequest`, via `launch::parse`). It runs from a message
 posted after the window is shown, so a project that fails to load is reported over the
-app rather than before it exists, and paths are made absolute first (`fullPath`): the
-project path is kept (title, Save, where exports default to) and a relative one would
-change meaning with the working directory. Opening shares `openProjectPath` with
+app rather than before it exists, and paths are made absolute as the request arrives
+(`launchFiles`): the project path is kept (title, Save, where exports default to), and
+a relative one would change meaning with the working directory, which a file dialog
+can move before the request is opened. Opening shares `openProjectPath` with
 *File ▸ Open Project*, and adding shares `addAudioPaths` with *Add Files*, which names
 any file that won't decode — several can arrive at once.
 
@@ -53,11 +54,29 @@ any file that won't decode — several can arrive at once.
   sender waits on the message — and posts itself `WM_APP_LAUNCH`. Started *without*
   files, a second copy opens normally; and if the running copy doesn't answer within
   5 s, the new one opens normally too.
-- **A request is handled once** (`std::exchange` on `launchArgs`), so a stray repeat
-  of the message can't reopen anything over later work, and it **asks about unsaved
-  changes** like any other open — it can arrive at any time now, not only at startup.
-  If the first project is the one already open, the answer is the window coming
-  forward and a toast, not a reload.
+- **Requests wait in a queue** (`App::launchQueue`, oldest first: this copy's own
+  command line, then each one handed over, kept apart so each opens as the double-click
+  it was). Each is taken off as it is opened, so a stray repeat of the message can't
+  reopen anything over later work, and each **asks about unsaved changes** like any
+  other open — one can arrive at any time, not only at startup. If its first project is
+  the one already open, the answer is the window coming forward and a toast, not a
+  reload.
+- **Only the main message loop opens them** (`openLaunchRequests`, called from
+  `runApp`'s loop, which takes `WM_APP_LAUNCH` before dispatching). A hand-off can
+  arrive while a dialog, a message box or a context menu is open, and the modal loop
+  running it dispatches posted messages too; but whoever opened it holds clip ids and
+  state from the project in the window — the target clips of *Remove non-voice*, the
+  voice cleaner's noise profile, a matcher's reference — and swapping the project under
+  it would aim its result at the new project's clips, whose ids also start at 1. So a
+  `WM_APP_LAUNCH` that reaches the window procedure only sets `launchDeferred`, and the
+  main loop posts it again once the message that started the modal loop has returned.
+  Requests that arrive while one is being opened (its own message boxes) are opened
+  after it.
+- **One that arrives as the window closes is handed on** (`startCopy`): the *Save
+  changes?* box on close is a modal loop too, so the request waited and was never
+  opened; after the window is gone, a fresh copy is started with it
+  (`launch::commandLine` quotes it so `CommandLineToArgvW` splits it back exactly)
+  rather than the double-click being lost.
 - **Projects are tried in order** until one opens, so a missing first project doesn't
   leave the app empty; any after the opened one are counted in a toast, since only one
   can be open.
@@ -1970,10 +1989,13 @@ correction lands between 60 Hz and 14 kHz. It measured **1.4 dB at 70 Hz**;
 before the weights, over 20 dB at 30 Hz. DC and Nyquist are separately asserted
 to come out at exactly 0 dB.
 
-**Starting with files** (12 checks): `launch::parse` takes `.acep` files (in any case)
+**Starting with files** (14 checks): `launch::parse` takes `.acep` files (in any case)
 as projects in order and other files as clips, and skips switches; a project is told
 by its contents (a `.acep.bak` with the `ACEP` header is one, a `.wav` isn't) or, when
-it can't be read, by its extension; and `parse` uses whatever test it is given. `assoc`, against a scratch
+it can't be read, by its extension; and `parse` uses whatever test it is given;
+switches and empty arguments are not files; `launch::commandLine` survives a round trip
+through `CommandLineToArgvW` with spaces, a drive's root, quotes and backslashes before
+one (plain quoting fails it on the last three). `assoc`, against a scratch
 registry root: nothing registered to begin with; registering makes `.acep` open with
 this copy and not another; the open command quotes program and file; unregistering
 stops it and leaves no empty keys; and with another app's claim on `.acep` made after
@@ -1984,7 +2006,11 @@ from a command line was checked by rendering it (`PrintWindow`, launched without
 activation): the project's EQ tags, and after an undo the two-line message and the
 History badge. The hand-off was checked live, with no other copy running: a second
 copy given the open project exits and the first says it is already open; a third given
-another project exits and the first opens it, leaving one copy.
+another project exits and the first opens it, leaving one copy. With *Export Mixdown*'s
+file dialog open, a project handed over waits — the title still names the old one —
+and opens once the dialog closes (before the fix it replaced the project under the
+dialog). Handed over while the window asks *Save changes?* on close, it opens in a
+fresh copy once the window is gone.
 
 **History position** (5 checks): the cheap counts the toolbar repaints with
 (`historyCounts`, pointer hops only) agree with the full position; a new project has no steps; at the latest step undo

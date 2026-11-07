@@ -17,6 +17,7 @@
 #include "snap.h"
 #include "waveform.h"
 #include <windows.h>
+#include <shellapi.h>
 #include <shlwapi.h>
 #include <string>
 #include <cmath>
@@ -3411,6 +3412,21 @@ int runSelfTest() {
         check(byContent.projects.size() == 1 && byContent.audio.size() == 1,
               L"launch: ...and parse uses whatever test it is given");
         DeleteFileW(bak.c_str()); DeleteFileW(wav.c_str());
+        check(launch::isFileArg(L"a.wav") && !launch::isFileArg(L"--selftest") && !launch::isFileArg(L""),
+              L"launch: switches and empty arguments are not files");
+
+        // A request that came in as the window closed is handed to a fresh copy on its
+        // command line, and must arrive as the same files: spaces, a drive's root (a
+        // trailing backslash before the closing quote), quotes, backslashes before one.
+        const std::vector<std::wstring> awkward = { L"C:\\My Takes\\take 1.wav", L"D:\\",
+                                                   L"say \"hi\".acep", L"x\\\\\"y", L"" };
+        const std::wstring line = L"prog " + launch::commandLine(awkward);
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(line.c_str(), &argc);
+        bool same = argv && argc == (int)awkward.size() + 1;
+        for (int i = 1; same && i < argc; ++i) same = awkward[(size_t)i - 1] == argv[i];
+        if (argv) LocalFree(argv);
+        check(same, L"launch: a command line handed on splits back into the same files", line);
     }
 
     // ---- double-click opens projects here (assoc.h), against a scratch registry
