@@ -2947,6 +2947,28 @@ int runSelfTest() {
               L"volume slider: louder all the way along, and clamped at both ends");
     }
 
+    // ---- a new clip cut from a take keeps the take's volume
+    // Its volume is part of how the take sounds -- set by hand or by a match -- so a
+    // sentence cut out of it must not come out 12 dB quieter than it played.
+    {
+        Document d; d.init(rate);
+        auto src = makeSine(rate, 1.0, 440.0);
+        const int take = d.addClip(L"take", src, L"", L"add");
+        d.setClipGain(take, 4.0f, L"vol");
+        const int cut = d.addClipFromRange(take, 1000, 5000, L"take (clip)", L"new clip");
+        const Clip* c = d.project().findClip(cut);
+        check(c && c->gain == 4.0f && c->frames() == 4000 && c->buffer &&
+              c->buffer->samples[0] == src->samples[2000] && c->peaks,
+              L"new clip from a selection: that range of the take, at the take's volume",
+              c ? L"gain " + std::to_wstring(c->gain) : L"no clip");
+        check(d.undoDesc() == L"new clip" && d.project().findClip(take)->buffer == src,
+              L"new clip from a selection: one undo step, the take itself untouched");
+        check(d.addClipFromRange(take, 5000, 5000, L"x", L"x") == -1 &&
+              d.addClipFromRange(take + 999, 0, 10, L"x", L"x") == -1 &&
+              d.undoDesc() == L"new clip",
+              L"new clip from a selection: an empty range or a missing clip adds nothing");
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);

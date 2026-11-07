@@ -1634,8 +1634,8 @@ struct App {
         if (!c || !c->buffer) return;
         std::wstring name = c->name + L" (clip)";
         if (!dlg::promptText(hwnd, L"New clip from selection", L"Clip name:", name)) return;
-        auto slice = sliceBuffer(*c->buffer, selStart, selEnd);
-        doc.addClip(name, slice, L"", L"New clip '" + name + L"' from selection");
+        doc.addClipFromRange(selClipId, selStart, selEnd, name,
+                             L"New clip '" + name + L"' from selection");
         clampScroll(); refresh();
     }
 

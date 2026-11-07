@@ -43,7 +43,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
 - **Make a new clip out of a selection** — the **New clip** button on the card
   (or right-click → *New clip from selection*, or the same button in the
   full-window editor) slices the selection into a separate library clip you name,
-  leaving the original untouched. This is the intended way to get "just this bit"
+  leaving the original untouched. The new clip keeps the original's **volume**, so
+  a sentence cut from a take you turned up (or volume-matched) sounds as it did in
+  the take. This is the intended way to get "just this bit"
   of a recording as something you can arrange, rename, clean up, or export on its
   own. Note it makes a *clip*, not a file — for a file, use *Export selection…*.
 - **Full-window clip editor.** Double-click a clip card (or right-click

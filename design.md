@@ -1075,7 +1075,9 @@ written as its `sourcePath`, which makes it a normal file-backed clip: a later
 mtime. For the same reason the file is written **without** the clip's volume,
 unlike *Export clip*: it is the new clip's audio, and the new clip carries the
 volume on top, so baking it in as well would apply it twice to anything that later
-reads the file back.
+reads the file back. *New clip from selection* (`Document::addClipFromRange`) carries the
+source clip's volume for the same reason split-out does: a sentence cut from a take
+must sound as it did in the take, including a volume set by hand or by a match.
 
 Placements of the replaced clip are removed with it — their audio no longer
 exists in the project. That is the one consequence the user might not have

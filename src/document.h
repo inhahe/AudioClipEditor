@@ -50,6 +50,12 @@ public:
     // --- Library operations (each commits an undo step) ---
     int  addClip(const std::wstring& name, AudioBufferPtr buf,
                  const std::wstring& sourcePath, const std::wstring& undoDesc);
+    // A new library clip cut from frames [begin, end) of `srcClipId` (clamped), at
+    // the source clip's volume: a sentence cut from a take sounds as the take did,
+    // including a volume the user set or a match chose. One undo step. Returns the
+    // new clip's id, or -1 if there is no such clip or nothing of the range is left.
+    int  addClipFromRange(int srcClipId, int64_t begin, int64_t end,
+                          const std::wstring& name, const std::wstring& undoDesc);
     void renameClip(int id, const std::wstring& name);
     void removeClip(int id);
     // Swap one library clip out for a brand-new clip, in a *single* undo step: the

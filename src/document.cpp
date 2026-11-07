@@ -58,6 +58,25 @@ int Document::addClip(const std::wstring& name, AudioBufferPtr buf,
     return id;
 }
 
+int Document::addClipFromRange(int srcClipId, int64_t begin, int64_t end,
+                               const std::wstring& name, const std::wstring& undoDesc) {
+    const Clip* src = project_.findClip(srcClipId);
+    if (!src || !src->buffer) return -1;
+    AudioBufferPtr slice = sliceBuffer(*src->buffer, begin, end);
+    if (slice->frames() == 0) return -1;
+    Clip c;
+    c.id = project_.nextClipId++;
+    c.name = name;
+    c.buffer = slice;
+    c.peaks = buildPeaks(slice);
+    c.gain = src->gain;
+    c.timestamp = clipTimestampFor(L"");   // a derived clip: when it was made
+    const int id = c.id;
+    project_.library.push_back(std::move(c));   // `src` may dangle from here on
+    commit(undoDesc);
+    return id;
+}
+
 void Document::renameClip(int id, const std::wstring& name) {
     Clip* c = project_.findClip(id);
     if (!c || c->name == name) return;
