@@ -78,6 +78,12 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   (*"Undone: Match timbre of 23 clips to their average"*), including when there
   is nothing left to undo — effects change how clips sound without changing
   anything on screen, so otherwise undoing one looks like a key that did nothing.
+  A second line says **where that leaves you**: *"3 of 12 steps undone · Ctrl+Z
+  next: Add 'take 5' to Track 1 · Ctrl+Shift+Z brings it back"*. Once that has
+  gone, the **≡ History** button keeps a **↶3** badge for as long as you are
+  behind the latest step, and hovering **Undo** or **Redo** names exactly what
+  each would do. Clips with a timbre EQ on show an **EQ** tag, so whether a match
+  is in effect is visible on the clips themselves.
 - **History** — the **≡ History** button in the toolbar right next to Undo and
   Redo, or `Edit ▸ History…` / `Ctrl+H`. It lists every step taken in this
   project, oldest first, so you can see whether an effect like timbre matching or

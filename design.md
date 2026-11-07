@@ -1848,6 +1848,10 @@ correction lands between 60 Hz and 14 kHz. It measured **1.4 dB at 70 Hz**;
 before the weights, over 20 dB at 30 Hz. DC and Nyquist are separately asserted
 to come out at exactly 0 dB.
 
+**History position** (4 checks): a new project has no steps; at the latest step undo
+names the last edit; two undos back it counts 2 of 3 and names the next undo and redo;
+a fork reports that redo will ask which.
+
 **History** (14 checks) is tested for the flags rather than the plumbing, because
 a step listed as applied when it has actually been undone is worse than no list
 at all: a new project is one current, saved step; three edits list four steps
@@ -1988,6 +1992,27 @@ only as long as a session; now that it accumulates across reopens it grows
 without bound, and the crash would land on whoever had used the app longest. The
 selftest builds a 20 000-step history and destroys it; without the iterative
 destructor that test kills the process (verified).
+
+**Where you are, said every time.** Naming the step just undone wasn't enough: after a
+few presses the user has lost count, and for an effect nothing on screen shows what is
+still in effect — "Ctrl+Z on an equalization gives no indication of where exactly you
+are in the history, what's left done or undone" was the report. Four pieces, all from
+`Document::historyPosition()` (steps on the walkable chain, how many are undone, what
+undo and redo would each do next, and whether redo forks):
+
+- **The toast has a second line** (`App::historyDetail`, `toastDetail`, drawn dimmer
+  in the small font): *"3 of 12 steps undone · Ctrl+Z next: … · Ctrl+Shift+Z brings
+  it back"* — or *"At the latest step"* after the last redo. A two-line toast stays up
+  4.5 s instead of 2.6, being more to read.
+- **The History button carries a ↶N badge** while the project is behind its latest
+  step — the one fact that should outlast the toast. The button is 118 px for it.
+- **Undo, Redo and History have tooltips** naming exactly what each would do, with
+  the shortcut (`App::tooltipFor`). One tooltip control, one tool per painted button
+  rectangle (`TTF_SUBCLASS`, text via `TTN_GETDISPINFO` so it is current whenever it
+  shows); the rectangles follow layout (`updateTooltipRects`, after every
+  `computeLayout`, skipping unchanged ones).
+- **Clips show whether a timbre EQ is on** (the EQ tag, see *The EQ is a setting on
+  the clip*) — the per-clip answer to "is that match still applied?".
 
 **Undo/redo toast** (`App::toast`, `paintToast`, expiry in `onTimer`): a
 transient badge, centred under the *tracks pane*, naming what just moved — *"Undone:

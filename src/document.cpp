@@ -957,6 +957,22 @@ int Document::historyIndex() const {
     return cur;
 }
 
+Document::HistoryPosition Document::historyPosition() const {
+    HistoryPosition p;
+    int cur = 0;
+    const std::vector<const UndoNode*> chain = undo_.chain(&cur);
+    if (!chain.empty()) {
+        p.steps = (int)chain.size() - 1;
+        p.undone = (int)chain.size() - 1 - cur;
+    }
+    if (canUndo()) p.nextUndo = undoDesc();
+    if (canRedo()) {
+        p.nextRedo = redoChildDesc(defaultRedoBranch());
+        p.redoChoices = redoBranchCount();
+    }
+    return p;
+}
+
 // The index is re-resolved against a freshly built chain rather than taking a node
 // pointer from the caller: the History window hands back a row number it was given
 // earlier, and a node pointer held across that boundary would be a dangling one the

@@ -174,6 +174,18 @@ public:
     std::vector<HistoryEntry> history() const;
     // Where in history() the project currently is.
     int historyIndex() const;
+    // Where the project stands in its history, for saying so after an undo or redo
+    // and on the toolbar: an effect like a timbre match changes nothing visible, so
+    // "you are 3 steps back, and the next undo would take out X" is otherwise
+    // something the user can only find out by opening the History window.
+    struct HistoryPosition {
+        int steps = 0;              // edits on the walkable line (the start isn't one)
+        int undone = 0;             // how many of them are undone right now
+        std::wstring nextUndo;      // what undo would take out now; empty: nothing
+        std::wstring nextRedo;      // what redo would bring back now; empty: nothing
+        int redoChoices = 0;        // >1: redo will ask which of several to take
+    };
+    HistoryPosition historyPosition() const;
     // Move to history()[index]; false if the index is out of range or already current.
     bool gotoHistory(int index);
 

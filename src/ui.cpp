@@ -119,7 +119,13 @@ struct App {
     // changes only how the audio sounds, and nothing on screen moves -- so they say
     // what they just did instead of appearing to do nothing. Expires on the timer.
     std::wstring toastText;
+    std::wstring toastDetail;   // a dimmer second line; empty for a one-line toast
     DWORD toastUntil = 0;
+    // The toolbar's tooltips (Undo / Redo / History name what they would do), and
+    // the text handed to the one being shown.
+    HWND tip = nullptr;
+    std::wstring tipText;
+    RECT tipRects[TB_COUNT]{};
 
     // scroll / zoom
     int libScroll = 0, libContentH = 0;
@@ -638,7 +644,7 @@ struct App {
         const int scaleLabW = S(46), zsW = S(120);
         const int leftW = S(96) + gap + S(96) + S(16) + S(140) + gap + S(70);
         const int rightW = scaleLabW + S(4) + zsW + S(12) +
-                           S(70) + gap + S(70) + gap + S(92);
+                           S(70) + gap + S(70) + gap + S(118);
         const auto f = layout::flowTransport(width, margin, gap,
                                              leftW, timeGap, timeW, rightW);
         auto rowY = [&](int row) { return y0 + row * (h + gap); };
@@ -653,7 +659,7 @@ struct App {
 
         const int ry = rowY(f.rightRow);
         int rx = f.rightX + rightW;
-        tbRects[TB_HISTORY] = { rx - S(92), ry, rx, ry + h }; rx -= S(92) + gap;
+        tbRects[TB_HISTORY] = { rx - S(118), ry, rx, ry + h }; rx -= S(118) + gap;
         tbRects[TB_REDO] = { rx - S(70), ry, rx, ry + h }; rx -= S(70) + gap;
         tbRects[TB_UNDO] = { rx - S(70), ry, rx, ry + h }; rx -= S(70) + S(12);
         zoomRc = { rx - zsW, ry + h / 2 - S(7), rx, ry + h / 2 + S(7) };
@@ -926,9 +932,11 @@ struct App {
 
     // Show a short message for a couple of seconds. Long enough to read a clip name
     // in it, short enough that it never has to be dismissed.
-    void toast(const std::wstring& s) {
+    void toast(const std::wstring& s, const std::wstring& detail = std::wstring()) {
         toastText = s;
-        toastUntil = GetTickCount() + 2600;
+        toastDetail = detail;
+        // A second line is more to read, so it stays up a little longer.
+        toastUntil = GetTickCount() + (detail.empty() ? 2600 : 4500);
         refresh();
     }
     bool toastExpired() const {
@@ -952,21 +960,31 @@ struct App {
         // it will be drawn with: the two disagree by a pixel or two on overhang, and
         // a box sized one pixel short makes DT_END_ELLIPSIS eat the last word --
         // which on "Nothing left to undo" turns the message into a different one.
-        HGDIOBJ of = SelectObject(h, fNorm);
-        RECT m{ 0, 0, 0, 0 };
-        DrawTextW(h, toastText.c_str(), -1, &m, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-        SelectObject(h, of);
-        const int padX = S(14), padY = S(8);
-        const int tw = m.right - m.left + S(2), th = m.bottom - m.top;
+        auto measure = [&](const std::wstring& txt, HFONT f) {
+            HGDIOBJ of = SelectObject(h, f);
+            RECT m{ 0, 0, 0, 0 };
+            DrawTextW(h, txt.c_str(), -1, &m, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(h, of);
+            return SIZE{ m.right - m.left + S(2), m.bottom - m.top };
+        };
+        const SIZE m1 = measure(toastText, fNorm);
+        const SIZE m2 = toastDetail.empty() ? SIZE{ 0, 0 } : measure(toastDetail, fSmall);
+        const int padX = S(14), padY = S(8), lineGap = toastDetail.empty() ? 0 : S(3);
+        const int tw = std::max(m1.cx, m2.cx);
         int w = std::min<int>(tw + padX * 2, std::max<int>(S(120), client.right - S(40)));
-        int ht = th + padY * 2;
+        int ht = m1.cy + lineGap + m2.cy + padY * 2;
         int cx = client.right / 2;
         int top = (editorActive() ? edToolbarH : rcTimeline.bottom) + S(10);
         RECT box = { cx - w / 2, top, cx + w / 2, top + ht };
         roundFill(h, box, col::transport, col::accent, S(8));
-        RECT tr = { box.left + padX, box.top, box.right - padX, box.bottom };
+        RECT tr = { box.left + padX, box.top + padY, box.right - padX, box.top + padY + m1.cy };
         textOut(h, tr, toastText, col::text, fNorm,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (!toastDetail.empty()) {
+            RECT dr = { tr.left, tr.bottom + lineGap, tr.right, tr.bottom + lineGap + m2.cy };
+            textOut(h, dr, toastDetail, col::dim, fSmall,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
     }
 
     static void fill(HDC h, const RECT& r, COLORREF c) {
@@ -1103,8 +1121,26 @@ struct App {
         // looking for "what have I done to this project", so that is where the
         // answer belongs -- it was previously only under Edit and Ctrl+H, which is
         // easy to miss entirely (the menu-bar "Timeline" entry got mistaken for it).
-        button(h, tbRects[TB_HISTORY], L"\u2261 History", col::btn,
-               doc.history().empty() ? col::dim : col::text, hotTB == TB_HISTORY, fNorm);
+        //
+        // While the project is behind its latest step, the button carries how far
+        // back: the one thing about the history that should stay visible after the
+        // undo's toast has gone, since an undone effect changes nothing on screen.
+        const int undone = doc.historyPosition().undone;
+        const RECT& hr = tbRects[TB_HISTORY];
+        if (undone == 0) {
+            button(h, hr, L"\u2261 History", col::btn,
+                   doc.history().empty() ? col::dim : col::text, hotTB == TB_HISTORY, fNorm);
+        } else {
+            button(h, hr, L"", col::btn, col::text, hotTB == TB_HISTORY, fNorm);
+            const std::wstring badge = L"\u21B6" + std::to_wstring(undone);
+            const int bw = std::max<int>(S(26), (int)badge.size() * S(8) + S(6));
+            RECT b = { hr.right - S(6) - bw, hr.top + S(6), hr.right - S(6), hr.bottom - S(6) };
+            roundFill(h, b, col::accentDk, col::accent, S(8));
+            textOut(h, b, badge, col::text, fSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            RECT lr = { hr.left + S(6), hr.top, b.left - S(2), hr.bottom };
+            textOut(h, lr, L"\u2261 History", col::text, fNorm,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
     }
 
     void paintLibrary(HDC h) {
@@ -2924,10 +2960,10 @@ struct App {
             toast(L"Undone: selection change");
             return;
         }
-        if (!doc.canUndo()) { toast(L"Nothing left to undo"); return; }
+        if (!doc.canUndo()) { toast(L"Nothing left to undo", historyDetail(false)); return; }
         const std::wstring what = doc.undoDesc();
         doc.undo(); afterHistory();
-        toast(L"Undone: " + what);
+        toast(L"Undone: " + what, historyDetail(true));
     }
     void doRedo() {
         if (canSelRedo()) {
@@ -2935,7 +2971,7 @@ struct App {
             toast(L"Redone: selection change");
             return;
         }
-        if (!doc.canRedo()) { toast(L"Nothing left to redo"); return; }
+        if (!doc.canRedo()) { toast(L"Nothing left to redo", historyDetail(false)); return; }
         int branch = doc.defaultRedoBranch();
         if (doc.redoBranchCount() > 1) {
             HMENU m = CreatePopupMenu();
@@ -2955,7 +2991,76 @@ struct App {
         }
         const std::wstring what = doc.redoChildDesc(branch);
         doc.redo(branch); afterHistory();
-        toast(L"Redone: " + what);
+        toast(L"Redone: " + what, historyDetail(false));
+    }
+
+    // The second line under "Undone: ..." / "Redone: ...": where that leaves the
+    // project in its history and what the next press of each key would do. Naming
+    // the step just undone isn't enough on its own -- after a few presses the user
+    // has lost count, and for an effect nothing on screen shows what is still in
+    // effect. `undid`: the step just taken out is the one redo would bring back.
+    std::wstring historyDetail(bool undid) const {
+        const Document::HistoryPosition p = doc.historyPosition();
+        std::wstring s = p.undone == 0 ? std::wstring(L"At the latest step")
+                       : std::to_wstring(p.undone) + L" of " + std::to_wstring(p.steps)
+                         + (p.steps == 1 ? L" step" : L" steps") + L" undone";
+        const wchar_t* sep = L"   \u00B7   ";
+        s += sep + (p.nextUndo.empty() ? std::wstring(L"nothing more to undo")
+                                       : L"Ctrl+Z next: " + p.nextUndo);
+        if (!p.nextRedo.empty())
+            s += sep + (undid ? std::wstring(L"Ctrl+Shift+Z brings it back")
+                              : L"Ctrl+Shift+Z next: " + p.nextRedo);
+        return s;
+    }
+
+    // What the toolbar's Undo / Redo / History buttons would do, for their tooltips.
+    std::wstring tooltipFor(int id) const {
+        const Document::HistoryPosition p = doc.historyPosition();
+        switch (id) {
+        case TB_UNDO:
+            if (canSelUndo()) return L"Undo: selection change (Ctrl+Z)";
+            return p.nextUndo.empty() ? std::wstring(L"Nothing to undo")
+                                      : L"Undo: " + p.nextUndo + L" (Ctrl+Z)";
+        case TB_REDO:
+            if (canSelRedo()) return L"Redo: selection change (Ctrl+Shift+Z)";
+            if (p.nextRedo.empty()) return L"Nothing to redo";
+            return L"Redo: " + p.nextRedo + L" (Ctrl+Shift+Z)"
+                 + (p.redoChoices > 1 ? L"\n" + std::to_wstring(p.redoChoices)
+                                        + L" alternatives \u2014 Redo asks which" : std::wstring());
+        case TB_HISTORY:
+            return L"Everything done to this project, and what is still in effect (Ctrl+H)"
+                 + (p.undone > 0 ? L"\nYou are " + std::to_wstring(p.undone)
+                                   + (p.undone == 1 ? L" step" : L" steps")
+                                   + L" back from the latest" : std::wstring());
+        }
+        return std::wstring();
+    }
+    // One tooltip control for the three buttons, each a rectangle of the main window
+    // (they are painted, not child windows); the text is asked for when one shows.
+    void makeTooltips() {
+        tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                              WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                              CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                              hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!tip) return;
+        SendMessageW(tip, TTM_SETMAXTIPWIDTH, 0, S(460));
+        for (int id : { (int)TB_UNDO, (int)TB_REDO, (int)TB_HISTORY }) {
+            TOOLINFOW ti{}; ti.cbSize = sizeof(ti);
+            ti.uFlags = TTF_SUBCLASS; ti.hwnd = hwnd; ti.uId = (UINT_PTR)id;
+            ti.rect = tbRects[id]; ti.lpszText = LPSTR_TEXTCALLBACKW;
+            SendMessageW(tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+            tipRects[id] = tbRects[id];
+        }
+    }
+    void updateTooltipRects() {
+        if (!tip) return;
+        for (int id : { (int)TB_UNDO, (int)TB_REDO, (int)TB_HISTORY }) {
+            if (EqualRect(&tipRects[id], &tbRects[id])) continue;
+            TOOLINFOW ti{}; ti.cbSize = sizeof(ti);
+            ti.hwnd = hwnd; ti.uId = (UINT_PTR)id; ti.rect = tbRects[id];
+            SendMessageW(tip, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
+            tipRects[id] = tbRects[id];
+        }
     }
 
     // The History window. Jumping is done through the callback rather than by
@@ -4081,22 +4186,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         a->buildMenu();
         a->setTitle();
         a->computeLayout();
+        a->makeTooltips();
         SetTimer(hwnd, 1, 33, nullptr);    // idle rate; onTimer speeds it up while playing
         return 0;
     }
-    case WM_SIZE: a->computeLayout(); a->clampScroll(); a->refresh(); return 0;
+    case WM_SIZE: a->computeLayout(); a->updateTooltipRects(); a->clampScroll(); a->refresh(); return 0;
+    case WM_NOTIFY:
+        if (a && ((NMHDR*)lp)->code == TTN_GETDISPINFOW && ((NMHDR*)lp)->hwndFrom == a->tip) {
+            auto* di = (NMTTDISPINFOW*)lp;
+            a->tipText = a->tooltipFor((int)di->hdr.idFrom);
+            di->lpszText = (LPWSTR)a->tipText.c_str();
+            return 0;
+        }
+        break;
     case WM_DPICHANGED: {
         a->sc = LOWORD(wp) / 96.0f; a->makeFonts();
         RECT* pr = (RECT*)lp;
         SetWindowPos(hwnd, nullptr, pr->left, pr->top, pr->right - pr->left, pr->bottom - pr->top,
             SWP_NOZORDER | SWP_NOACTIVATE);
-        a->computeLayout(); a->refresh(); return 0;
+        a->computeLayout(); a->updateTooltipRects(); a->refresh(); return 0;
     }
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc; GetClientRect(hwnd, &rc);
         a->computeLayout();
+        a->updateTooltipRects();
         a->paint(hdc, rc);
         EndPaint(hwnd, &ps);
         return 0;
@@ -4171,7 +4286,8 @@ static void saveWindowPlacement(HWND hwnd) {
 }
 
 int runApp(HINSTANCE hInst, int nCmdShow) {
-    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES };
+    // Tooltips are a "bar" class; the matching dialogs' track list a list view.
+    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_LISTVIEW_CLASSES };
     InitCommonControlsEx(&icc);
     if (!mfio::startup()) { MessageBoxW(nullptr, L"Media Foundation failed to start.", L"Error", MB_ICONERROR); return 1; }
 

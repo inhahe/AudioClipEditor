@@ -3263,6 +3263,30 @@ int runSelfTest() {
               L"timbre and volume: one undo takes back both the EQ and the volume");
     }
 
+    // ---- where the project stands in its history (said after every undo and redo)
+    {
+        Document d; d.init(rate);
+        Document::HistoryPosition p = d.historyPosition();
+        check(p.steps == 0 && p.undone == 0 && p.nextUndo.empty() && p.nextRedo.empty(),
+              L"history position: a new project has no steps and nothing to undo or redo");
+        d.addClip(L"a", makeSine(rate, 0.1, 300.0), L"", L"one");
+        d.addClip(L"b", makeSine(rate, 0.1, 300.0), L"", L"two");
+        d.addClip(L"c", makeSine(rate, 0.1, 300.0), L"", L"three");
+        p = d.historyPosition();
+        check(p.steps == 3 && p.undone == 0 && p.nextUndo == L"three" && p.nextRedo.empty(),
+              L"history position: at the latest step, undo would take out the last edit");
+        d.undo(); d.undo();
+        p = d.historyPosition();
+        check(p.steps == 3 && p.undone == 2 && p.nextUndo == L"one" && p.nextRedo == L"two",
+              L"history position: two undos back, it counts them and names the next undo and redo",
+              std::to_wstring(p.undone) + L" undone, next undo '" + p.nextUndo + L"', next redo '" + p.nextRedo + L"'");
+        d.addClip(L"d", makeSine(rate, 0.1, 300.0), L"", L"branch");
+        d.undo();
+        p = d.historyPosition();
+        check(p.redoChoices == 2 && p.undone == 1,
+              L"history position: a fork says redo will ask which", std::to_wstring(p.redoChoices) + L" choices");
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);
