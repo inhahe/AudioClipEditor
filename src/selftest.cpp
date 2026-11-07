@@ -3576,6 +3576,27 @@ int runSelfTest() {
               L"assoc: unregistering hands .acep back to what it opened with before", back);
         check(iconRegistered, L"assoc: projects are given the project icon", iconValue);
 
+        // A registration from an earlier build, without the icon: brought up to date once,
+        // then left alone. With nothing registered, nothing is written.
+        RegDeleteTreeW(HKEY_CURRENT_USER, top.c_str());
+        const bool nothingToRefresh = !assoc::refreshRegistration(root, exe);
+        HKEY none = nullptr;
+        const bool untouched = RegOpenKeyExW(HKEY_CURRENT_USER, top.c_str(), 0, KEY_READ, &none) ==
+                               ERROR_FILE_NOT_FOUND;
+        if (none) RegCloseKey(none);
+        assoc::registerProjects(root, exe);
+        RegDeleteKeyW(HKEY_CURRENT_USER, (root + L"\\" + assoc::kProgId + L"\\DefaultIcon").c_str());
+        const bool refreshed = assoc::refreshRegistration(root, exe);
+        wchar_t again[512]{}; DWORD asize = sizeof(again);
+        const bool iconBack =
+            RegGetValueW(HKEY_CURRENT_USER, (root + L"\\" + assoc::kProgId + L"\\DefaultIcon").c_str(),
+                         nullptr, RRF_RT_REG_SZ, nullptr, again, &asize) == ERROR_SUCCESS &&
+            assoc::projectIcon(exe) == again;
+        const bool thenLeft = !assoc::refreshRegistration(root, exe) && assoc::projectsOpenWith(root, exe);
+        check(nothingToRefresh && untouched && refreshed && iconBack && thenLeft,
+              L"assoc: an earlier build's registration gets the icon on refresh, once; none is not created");
+        assoc::unregisterProjects(root);
+
         // The icon string reads back, the way the shell reads DefaultIcon, as this exe and
         // the project icon's resource id -- and this exe has both icons, the program's
         // first (what Explorer shows for the exe), so the one named can be loaded.

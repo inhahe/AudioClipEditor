@@ -100,6 +100,12 @@ bool registerProjects(const std::wstring& root, const std::wstring& exe) {
     return ok;
 }
 
+bool refreshRegistration(const std::wstring& root, const std::wstring& exe) {
+    if (!projectsOpenWith(root, exe)) return false;
+    if (getString(progKey(root) + L"\\DefaultIcon", nullptr) == projectIcon(exe)) return false;
+    return registerProjects(root, exe);
+}
+
 bool unregisterProjects(const std::wstring& root) {
     const std::wstring previous = getString(progKey(root), kPreviousValue);
     bool ok = gone(RegDeleteTreeW(HKEY_CURRENT_USER, progKey(root).c_str()));

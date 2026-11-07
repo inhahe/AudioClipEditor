@@ -201,7 +201,11 @@ double-clicked* — because it changes how Windows behaves outside the app.
 `.acep\OpenWithProgids`, all under `HKEY_CURRENT_USER`: no administrator rights, no
 other user affected. Project files get the project icon, a page with the microphone, so
 they don't look like the program (`DefaultIcon` = `"exe",-2`: by resource id, not by
-position, so the icons' order in the exe can't change which one is shown). It
+position, so the icons' order in the exe can't change which one is shown). At
+startup a copy that finds its own registration out of date — made by an earlier build,
+without the icon — writes it again (`assoc::refreshRegistration`; it reads two values,
+writes only when something differs, and nothing at all when this copy isn't
+registered), since the item shows ticked and nothing else would. It
 remembers what `.acep` opened with before (`PreviousDefault` under the ProgID — not
 overwritten by registering twice), and it is all or nothing: if any write fails, what
 was written is taken out again, so the menu can never show it working next to a
@@ -2154,7 +2158,8 @@ in place, unregistering (after registering twice) hands `.acep` back to it; proj
 are given the project icon; and that icon's location reads back, the way the shell
 reads it (`PathParseIconLocation`, `PathUnquoteSpaces`), as this exe and resource id
 −2, and loads from the exe, which holds two icons (built without them, both checks
-fail). The main window opened
+fail). A registration without the icon gets it on refresh, once, and with nothing
+registered a refresh creates nothing (a refresh that does nothing fails it). The main window opened
 from a command line was checked by rendering it (`PrintWindow`, launched without
 activation): the project's EQ tags, and after an undo the two-line message and the
 History badge. The hand-off was checked live, with no other copy running: a second

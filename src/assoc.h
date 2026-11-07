@@ -37,6 +37,12 @@ bool projectsOpenHere(const std::wstring& exe);
 // again and false is returned.
 bool registerProjects(const std::wstring& root, const std::wstring& exe);
 
+// Bring this copy's registration up to date, if it has one: one made by an earlier
+// build lacks what later ones write (the project icon), and since the menu shows it
+// ticked, nothing else would ever rewrite it. Registers again only when something
+// differs; touches nothing if this copy isn't registered. True if it changed anything.
+bool refreshRegistration(const std::wstring& root, const std::wstring& exe);
+
 // Undo registerProjects. Removes this app's ProgID and, if .acep still names it, hands
 // .acep back to what it opened with before (or clears it, if nothing did). If another
 // app has claimed .acep since, its claim is left alone. Keys left empty are removed.

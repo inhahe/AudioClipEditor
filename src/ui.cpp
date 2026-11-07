@@ -4800,6 +4800,10 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
     // The window exists, so a copy started from here on finds it and hands over; what
     // it hands over queues behind this copy's own request, queued above.
     startup.release();
+    // A registration of .acep made by an earlier build is brought up to what this one
+    // writes (the project icon, say); nothing is written if this copy isn't registered.
+    if (assoc::refreshRegistration(assoc::kClassesRoot, app.exe))
+        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 
     // engine end-of-source -> post to UI thread
     app.engine.setEndCallback([hwnd] { PostMessageW(hwnd, WM_APP_PLAYEND, 0, 0); });
