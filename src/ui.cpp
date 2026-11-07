@@ -2566,13 +2566,12 @@ struct App {
         setTitle(); clampScroll(); refresh();
     }
     // Everything in App that points into the project just replaced, put back for the
-    // new one. Shared by New and Open so the two can't drift apart: Open used to skip
-    // closing the full-window editor, which then showed whichever clip of the new
-    // project had the same id -- ids start at 1 in every project. Every one of these
-    // referred to a clip of the old project, so they have to go with it or they name
-    // something that no longer exists (or, for an id, something else). Session
-    // *preferences* (effect options, ripple mode) deliberately survive: they are about
-    // how the user works, not about this project.
+    // new one; shared by New and Open so the two can't drift apart. Each of these
+    // refers to the old project, so it has to go with it or it names something that
+    // no longer exists -- or, for a clip id, something else, since ids start at 1 in
+    // every project (the clip editor, left open, would show whichever new clip had
+    // the old one's id). Session *preferences* (effect options, ripple mode)
+    // deliberately survive: they are about how the user works, not about this project.
     void resetForAnotherProject() {
         stopAll();
         closeClipEditor();
