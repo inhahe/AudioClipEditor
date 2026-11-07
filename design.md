@@ -220,16 +220,19 @@ what Explorer shows for the exe. The window carries copies sized for its monitor
 creation and again on `WM_DPICHANGED`, since the class icon is one size for the whole
 session; `WM_SETICON` doesn't copy an icon, so the ones replaced, and the last ones on
 `WM_DESTROY`, are destroyed. The waiting window of a copy handing files over has its
-own taskbar button, having no owner, so its class gets the icon too. The `.ico` files
+own taskbar button, having no owner, so it gets the same (`appicon.h` holds the one
+helper). The `.ico` files
 hold 16–256 px, each rendered from the vector artwork (`art/make_icon.py`): 32-bit
 bitmaps below 256, PNG at 256. The project icon's microphone takes a larger share of
-the page below 32 px, where the page's edges take up more of it.
+the page below 32 px, where the page's edges take up more of it. `resources.rc` names the `.ico`
+files and the manifest as its dependencies (`OBJECT_DEPENDS`), which a dependency scan
+of `#include`s wouldn't find.
 
 **Recent projects** (`SHAddToRecentDocs`, from `App::setProjectPath` whenever the
 project's path changes: opened, saved under a new name — not on every save, since each
 call writes a shortcut on the UI thread). That one call feeds Explorer's recent files and the *Recent* category of
 the taskbar button's jump list; the jump list shows only file types the app is a
-registered handler for, which is what the association below makes it (its ProgID in
+registered handler for, which is what the association above makes it (its ProgID in
 `.acep\OpenWithProgids`, its command naming this exe), so with the item unticked the
 projects appear in Explorer only. A jump-list entry is launched through the
 association, so it goes through the hand-off like a double-click. Windows decides what
@@ -2158,8 +2161,8 @@ ours, unregistering removes our ProgID but leaves its claim; with an earlier han
 in place, unregistering (after registering twice) hands `.acep` back to it; projects
 are given the project icon; and that icon's location reads back, the way the shell
 reads it (`PathParseIconLocation`, `PathUnquoteSpaces`), as this exe and resource id
-−2, and loads from the exe, which holds two icons (built without them, both checks
-fail). A registration without the icon gets it on refresh, once, and with nothing
+−2, and loads from the exe, whose first icon group is the program's (built without
+the icons, both checks fail). A registration without the icon gets it on refresh, once, and with nothing
 registered a refresh creates nothing (a refresh that does nothing fails it). The main window opened
 from a command line was checked by rendering it (`PrintWindow`, launched without
 activation): the project's EQ tags, and after an undo the two-line message and the

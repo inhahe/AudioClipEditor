@@ -3599,7 +3599,8 @@ int runSelfTest() {
 
         // The icon string reads back, the way the shell reads DefaultIcon, as this exe and
         // the project icon's resource id -- and this exe has both icons, the program's
-        // first (what Explorer shows for the exe), so the one named can be loaded.
+        // first (what Explorer shows for the exe is the first icon group enumerated), so
+        // the one named can be loaded.
         const std::wstring self = exePath();
         std::wstring parsed = assoc::projectIcon(self);
         parsed.push_back(L'\0');
@@ -3612,8 +3613,12 @@ int runSelfTest() {
         const bool loads = got > 0 && bigIcon && smallIcon;
         if (bigIcon) DestroyIcon(bigIcon);
         if (smallIcon) DestroyIcon(smallIcon);
-        HRSRC first = FindResourceW(nullptr, MAKEINTRESOURCEW(IDI_APP), RT_GROUP_ICON);
-        check(readsBack && icons == 2 && loads && first,
+        ULONG_PTR firstIcon = 0;
+        EnumResourceNamesW(nullptr, RT_GROUP_ICON, [](HMODULE, LPCWSTR, LPWSTR name, LONG_PTR out) -> BOOL {
+            *(ULONG_PTR*)out = IS_INTRESOURCE(name) ? (ULONG_PTR)name : ~(ULONG_PTR)0;
+            return FALSE;   // the first is all that matters
+        }, (LONG_PTR)&firstIcon);
+        check(readsBack && icons >= 2 && loads && firstIcon == IDI_APP,
               L"assoc: the project icon's location reads back as this exe and its id, and loads from it",
               assoc::projectIcon(self) + L" (" + std::to_wstring(icons) + L" icons)");
         RegDeleteTreeW(HKEY_CURRENT_USER, top.c_str());

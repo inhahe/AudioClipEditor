@@ -403,7 +403,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
 ## Building
 
 Requires Visual Studio 2022 or later (MSVC, the Build Tools will do) with a Windows
-10/11 SDK, and CMake. Without `-G`, CMake uses the newest Visual Studio it finds.
+10/11 SDK, and CMake. Without `-G`, CMake uses the newest Visual Studio it finds, unless
+a `CMAKE_GENERATOR` environment variable names another generator: `-A x64` needs a
+Visual Studio one, so then add `-G "Visual Studio 17 2022"` (or the one you have).
 
 ```sh
 cmake -S . -B build -A x64

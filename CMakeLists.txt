@@ -13,6 +13,12 @@ file(GLOB SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/src/*.cpp"
 )
 
+# The resource compiler reads these, but a dependency scan only sees #includes: without
+# this, a generator other than Visual Studio's (Ninja, say) wouldn't rebuild the
+# resources when art/make_icon.py rewrites the icons.
+set_source_files_properties("${CMAKE_SOURCE_DIR}/src/resources.rc" PROPERTIES OBJECT_DEPENDS
+    "${CMAKE_SOURCE_DIR}/src/app.ico;${CMAKE_SOURCE_DIR}/src/project.ico;${CMAKE_SOURCE_DIR}/src/app.manifest")
+
 add_executable(AudioClipEditor WIN32 ${SOURCES}
     "${CMAKE_SOURCE_DIR}/src/app.manifest"
     "${CMAKE_SOURCE_DIR}/src/resources.rc"

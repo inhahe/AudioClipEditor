@@ -20,7 +20,7 @@ SIZES = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256]
 def to_pil(surface):
     arr = surface.makeImageSnapshot().toarray(colorType=skia.kRGBA_8888_ColorType,
                                                alphaType=skia.kUnpremul_AlphaType)
-    return Image.fromarray(arr, 'RGBA')
+    return Image.fromarray(arr)   # RGBA, from its shape
 
 def mic(px):
     """The artwork rendered px x px."""

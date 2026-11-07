@@ -1,4 +1,5 @@
 #include "dialogs.h"
+#include "appicon.h"
 #include "resource.h"
 #include <commctrl.h>
 #include <commdlg.h>
@@ -1215,6 +1216,9 @@ LRESULT CALLBACK WaitProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         // out of sight. Only "Don't open" drops them.
         ShowWindow(h, SW_HIDE);
         return 0;
+    case WM_DESTROY:
+        setWindowIcons(h, true);
+        return 0;
     }
     return DefWindowProcW(h, m, w, l);
 }
@@ -1227,7 +1231,6 @@ WaitChoice waitForOtherCopy(const std::wstring& message, const std::function<boo
     if (!reg) {
         WNDCLASSW wc{}; wc.lpfnWndProc = WaitProc; wc.hInstance = hInst;
         wc.hCursor = LoadCursor(nullptr, IDC_APPSTARTING);
-        // It has no owner, so it has a taskbar button of its own.
         wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP));
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         wc.lpszClassName = L"ACE_Wait";
@@ -1247,6 +1250,8 @@ WaitChoice waitForOtherCopy(const std::wstring& message, const std::function<boo
     // Unable to ask, so not taken as "don't open": the caller opens the files itself.
     if (!h) return WaitChoice::OpenHere;
     SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
+    // It has no owner, so it has a taskbar button of its own.
+    setWindowIcons(h);
     // SS_NOPREFIX: a file name with an & in it is shown as it is, as it was measured.
     ui.label(message.c_str(), ui.margin, ui.margin, contentW, textH, SS_NOPREFIX);
     const int y = ui.margin + textH + ui.S(18), right = ui.margin + contentW;
