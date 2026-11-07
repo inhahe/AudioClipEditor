@@ -9,6 +9,7 @@
 #include "engine.h"
 #include "assoc.h"
 #include "exepath.h"
+#include "handoff.h"
 #include "launch.h"
 #include "layout.h"
 #include "match.h"
@@ -3471,6 +3472,32 @@ int runSelfTest() {
                   launch::usableFileId(launch::fileIdFromIndex(12345)) && launch::usableFileId(some) &&
                   !launch::usableFileId(FILE_ID_128{}),
               L"launch: file ids of 0 or all ones (64-bit or 128-bit) aren't used to tell files apart");
+    }
+
+    // ---- handing a command line to the running copy (handoff.h): opened once, by
+    // whichever side wins the ticket. Sender and receiver are this one process here.
+    {
+        const std::vector<std::wstring> files = { L"C:\\Takes\\show.acep", L"D:\\b 2.wav" };
+        handoff::Ticket t(files);
+        const auto got = handoff::claim(t.wparam(), t.lparam());
+        const auto again = handoff::claim(t.wparam(), t.lparam());
+        check(t.valid() && got && *got == files && !again && t.claimed() && !t.abandon(),
+              L"handoff: the receiver gets the files once; a second message for the ticket gets nothing, "
+              L"and the sender can no longer take them back");
+        handoff::Ticket u(files);
+        const bool gaveUp = u.abandon();
+        check(u.valid() && !u.claimed() && gaveUp && !handoff::claim(u.wparam(), u.lparam()),
+              L"handoff: once the sender stops waiting, a message arriving late is refused");
+        WPARAM gonePid; LPARAM goneSerial;
+        {
+            handoff::Ticket v(files);
+            gonePid = v.wparam(); goneSerial = v.lparam();
+        }
+        handoff::Ticket w(files);
+        check(!handoff::claim(gonePid, goneSerial) && !handoff::claim(w.wparam(), w.lparam() + 1) &&
+                  !handoff::claim(0, w.lparam()) && !w.claimed(),
+              L"handoff: a ticket whose sender has gone, or that never existed, gives nothing");
+        check(handoff::message() != 0, L"handoff: the message is registered");
     }
 
     // ---- double-click opens projects here (assoc.h), against a scratch registry

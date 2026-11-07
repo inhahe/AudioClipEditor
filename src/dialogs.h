@@ -131,4 +131,11 @@ void history(HWND parent, HistoryContext& ctx);
 std::wstring openProject(HWND parent);
 std::wstring saveProject(HWND parent, const std::wstring& suggested);
 
+// Shown by a copy of the app that has just started, has no window of its own, and is
+// waiting on another copy: one still starting up, or busy, that is to open the files
+// it was given. `message` says what it is waiting for. `done` is asked a few times a
+// second whether the wait is over, and when it says so the window closes by itself.
+enum class WaitChoice { Done, OpenHere, Cancel };
+WaitChoice waitForOtherCopy(const std::wstring& message, const std::function<bool()>& done);
+
 } // namespace dlg

@@ -3,6 +3,7 @@
 #include "document.h"
 #include "exepath.h"
 #include "engine.h"
+#include "handoff.h"
 #include "decoder.h"
 #include "encoder.h"
 #include "waveform.h"
@@ -22,15 +23,14 @@
 #include <string>
 #include <vector>
 #include <deque>
+#include <optional>
 #include <algorithm>
 #include <climits>
 
 #define WM_APP_PLAYEND (WM_APP + 1)
-// Posted once the window is up: open what the command line asked for.
+// Wakes the main loop to open what is in App::launchQueue: posted once the window is
+// up, and whenever another copy hands a command line over.
 #define WM_APP_LAUNCH (WM_APP + 2)
-
-// The WM_COPYDATA tag for "open these", sent by a second copy of the app.
-static const ULONG_PTR kLaunchCopyData = 0x50454341;   // "ACEP"
 
 // A path given on a command line, made absolute against this process's working
 // directory: the project path is kept (title, Save, where exports default to), and
@@ -4393,6 +4393,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         explicit CallDepth(App* app) : depth(app ? &app->wndProcDepth : nullptr) { if (depth) ++*depth; }
         ~CallDepth() { if (depth) --*depth; }
     } callDepth(a);
+    // A command line handed over by a copy that has just started (handToRunningCopy).
+    // A registered message, so not a case below. Answered at once, since the sender
+    // may be waiting on it, and only queued: opening a project may first ask about
+    // unsaved changes. A request of its own rather than added to one waiting, so it is
+    // opened as the double-click it was.
+    if (a && msg != 0 && msg == handoff::message()) {
+        std::optional<std::vector<std::wstring>> files = handoff::claim(wp, lp);
+        if (!files || files->empty()) return FALSE;   // not ours: already taken, or given up on
+        a->launchQueue.push_back(std::move(*files));
+        // Wakes the main loop, which a sent message doesn't (GetMessage handles it
+        // without returning).
+        PostMessageW(hwnd, WM_APP_LAUNCH, 0, 0);
+        return TRUE;
+    }
     switch (msg) {
     case WM_CREATE: {
         auto* cs = (CREATESTRUCTW*)lp;
@@ -4476,28 +4490,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_INITMENUPOPUP:
         if (a && (HMENU)wp == a->fileMenu && !HIWORD(lp)) a->setAssocCheck(assoc::projectsOpenHere(a->exe));
         break;
-    case WM_COPYDATA: {
-        const auto* cds = (const COPYDATASTRUCT*)lp;
-        if (a && cds && cds->dwData == kLaunchCopyData && cds->lpData) {
-            // Copied out and answered at once: the sender is waiting on this, and
-            // opening a project may first ask about unsaved changes. A request of its
-            // own rather than added to one waiting, so it is opened as the
-            // double-click it was.
-            const wchar_t* p = (const wchar_t*)cds->lpData;
-            const size_t n = cds->cbData / sizeof(wchar_t);
-            std::vector<std::wstring> files;
-            for (size_t i = 0; i < n; ) {
-                size_t j = i;
-                while (j < n && p[j]) ++j;
-                if (j > i) files.emplace_back(p + i, j - i);
-                i = j + 1;
-            }
-            if (!files.empty()) a->launchQueue.push_back(std::move(files));
-            PostMessageW(hwnd, WM_APP_LAUNCH, 0, 0);
-            return TRUE;
-        }
-        break;
-    }
     case WM_APP_PLAYEND: a->onPlayEnd(); return 0;
     case WM_CLOSE:
         if (a && !a->confirmDiscardChanges()) return 0;  // user cancelled exit
@@ -4544,10 +4536,12 @@ public:
     ~StartupLock() { release(); if (h) CloseHandle(h); }
     StartupLock(const StartupLock&) = delete;
     StartupLock& operator=(const StartupLock&) = delete;
-    void acquire() {
-        if (!h || held) return;
-        const DWORD w = WaitForSingleObject(h, INFINITE);
+    // Waits up to `ms` for it. True if it is held now (or there is none to hold).
+    bool acquire(DWORD ms) {
+        if (!h || held) return true;
+        const DWORD w = WaitForSingleObject(h, ms);
         held = w == WAIT_OBJECT_0 || w == WAIT_ABANDONED;
+        return held;
     }
     void release() { if (held) { ReleaseMutex(h); held = false; } }
 private:
@@ -4555,38 +4549,112 @@ private:
     bool held = false;
 };
 
+// Every running copy's main window, frontmost first.
+static std::vector<HWND> runningCopies() {
+    std::vector<HWND> found;
+    EnumWindows([](HWND w, LPARAM out) -> BOOL {
+        wchar_t cls[64];
+        if (GetClassNameW(w, cls, 64) && wcscmp(cls, kMainClass) == 0)
+            ((std::vector<HWND>*)out)->push_back(w);
+        return TRUE;
+    }, (LPARAM)&found);
+    return found;
+}
+
+// The files of a request as a message names them: the first, and how many more.
+static std::wstring describeFiles(const std::vector<std::wstring>& files) {
+    std::wstring s = L"\u201C" + std::wstring(PathFindFileNameW(files[0].c_str())) + L"\u201D";
+    if (files.size() > 1)
+        s += L" and " + std::to_wstring(files.size() - 1) + (files.size() == 2 ? L" other file" : L" other files");
+    return s;
+}
+
+static void bringForward(HWND w) {
+    if (IsIconic(w)) ShowWindow(w, SW_RESTORE);
+    SetForegroundWindow(w);   // allowed: the user just started this process
+}
+
+// What a copy started with files did with them.
+enum class HandOff {
+    Taken,       // another copy has them: exit
+    OpenHere,    // no copy could take them, or the user chose a new window: start normally
+    Cancelled,   // the user stopped waiting and doesn't want them opened: exit
+};
+
+// How long a copy waits without a word before saying what it is waiting for.
+static const DWORD kQuietWaitMs = 1500;
+
 // A copy started with files while another is running hands them over and exits.
 // Double-clicking a project that is already open has to bring that window forward,
 // not open the same file in a second copy -- each would save over the other without
-// a word. Returns false (start normally, holding `lock`) when there are no files to
-// hand over, no copy is running, or the one running won't take them.
-static bool handToRunningCopy(const std::vector<std::wstring>& args, StartupLock& lock) {
-    std::wstring payload;   // absolute paths, each NUL-terminated
-    for (const std::wstring& f : launchFiles(args)) { payload += f; payload.push_back(L'\0'); }
-    lock.acquire();
-    if (payload.empty()) return false;
-    for (;;) {
-        HWND other = FindWindowW(kMainClass, nullptr);
-        if (!other) return false;
-        // Not held while waiting for the answer, which can take a while: a copy
-        // started without files needn't wait for it.
-        lock.release();
-        COPYDATASTRUCT cds{ kLaunchCopyData, (DWORD)(payload.size() * sizeof(wchar_t)), (PVOID)payload.data() };
-        // For as long as it takes. A copy busy with a long job (loading a big project,
-        // a denoise) answers once it is done; giving up and opening here instead would
-        // put the project in two windows, and the message would still reach that copy
-        // later. Returns 0 if it closes or dies first.
-        if (SendMessageW(other, WM_COPYDATA, 0, (LPARAM)&cds) == TRUE) {
-            // This process was started by the user, so it may hand the foreground on.
-            if (IsIconic(other)) ShowWindow(other, SW_RESTORE);
-            SetForegroundWindow(other);
-            return true;
+// a word. `files` are absolute paths (launchFiles). Takes `lock`; returns OpenHere
+// holding it, unless the user chose to open without waiting for another copy.
+//
+// A copy still starting is waited for (see StartupLock), and so is one busy with a
+// long job (loading a big project, a denoise): it answers once it is done, and
+// opening here instead would put the project in two windows. After kQuietWaitMs a
+// window says what it is waiting for and lets the user stop waiting -- open the files
+// in a new window anyway, or not at all. Stopping is safe even with the message on
+// its way, because the request carries a ticket (handoff.h) and only one side wins it.
+static HandOff handToRunningCopy(const std::vector<std::wstring>& files, StartupLock& lock) {
+    // Takes the lock, saying so if it has to wait. Without files there is nothing to
+    // hand over, so not for long: holding it only helps a copy with files that starts
+    // next to find this one's window.
+    auto waitForStartup = [&]() -> std::optional<HandOff> {
+        if (lock.acquire(kQuietWaitMs)) return std::nullopt;
+        if (files.empty()) return HandOff::OpenHere;
+        switch (dlg::waitForOtherCopy(
+                    L"Audio Clip Editor is still starting in another window. " + describeFiles(files) +
+                        L" will open there once it\u2019s ready.",
+                    [&] { return lock.acquire(0); })) {
+        case dlg::WaitChoice::Done: return std::nullopt;
+        case dlg::WaitChoice::OpenHere: return HandOff::OpenHere;
+        case dlg::WaitChoice::Cancel: break;
         }
-        lock.acquire();
-        // Still there but won't take them: Windows keeps an unelevated copy from
-        // sending to an elevated one, say. Nothing to do but open here.
-        if (IsWindow(other)) return false;
-        // It closed before taking them: look again.
+        return HandOff::Cancelled;
+    };
+    if (auto stop = waitForStartup()) return *stop;
+    if (files.empty()) return HandOff::OpenHere;
+    std::vector<HWND> refused;   // copies that won't or can't take them
+    for (;;) {
+        std::vector<HWND> copies;
+        for (HWND w : runningCopies())
+            if (std::find(refused.begin(), refused.end(), w) == refused.end()) copies.push_back(w);
+        if (copies.empty()) return HandOff::OpenHere;
+        const UINT msg = handoff::message();
+        handoff::Ticket ticket(files);
+        if (!msg || !ticket.valid()) return HandOff::OpenHere;
+        lock.release();   // not held while waiting for an answer, which can take a while
+        for (HWND other : copies) {
+            DWORD_PTR answer = 0;
+            SetLastError(ERROR_SUCCESS);
+            if (SendMessageTimeoutW(other, msg, ticket.wparam(), ticket.lparam(), SMTO_NORMAL,
+                                    kQuietWaitMs, &answer)) {
+                if (answer == TRUE) { bringForward(other); return HandOff::Taken; }
+                refused.push_back(other);   // an older build, which doesn't know the message
+                continue;
+            }
+            if (GetLastError() != ERROR_TIMEOUT) {   // never reached it: elevated, or closed
+                refused.push_back(other);
+                continue;
+            }
+            // Busy. Windows drops the sent message now that this has stopped waiting
+            // for it, so it is posted too: that one waits in the queue until the copy
+            // is free. The ticket says whether it took them.
+            PostMessageW(other, msg, ticket.wparam(), ticket.lparam());
+            const dlg::WaitChoice c = dlg::waitForOtherCopy(
+                L"Audio Clip Editor is busy in another window. " + describeFiles(files) +
+                    L" will open there as soon as it has finished.\n\nOpening in a new window "
+                    L"instead could put a project in two windows, each saving over the other.",
+                [&] { return ticket.claimed() || !IsWindow(other); });
+            // Whatever was chosen, it may have taken them in the meantime.
+            if (!ticket.abandon()) { bringForward(other); return HandOff::Taken; }
+            if (c == dlg::WaitChoice::Cancel) return HandOff::Cancelled;
+            if (c == dlg::WaitChoice::OpenHere) { lock.acquire(0); return HandOff::OpenHere; }
+            break;   // it closed without taking them
+        }
+        // None of these took them. Look again: another copy may be starting, or running.
+        if (auto stop = waitForStartup()) return *stop;
     }
 }
 
@@ -4603,20 +4671,23 @@ static void startCopy(const std::vector<std::wstring>& files) {
 }
 
 int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args) {
-    StartupLock startup;
-    if (handToRunningCopy(args, startup)) return 0;
-    // Tooltips are a "bar" class; the matching dialogs' track list a list view.
+    // Before any window, the hand-off's waiting window included. Tooltips are a "bar"
+    // class; the matching dialogs' track list a list view.
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_LISTVIEW_CLASSES };
     InitCommonControlsEx(&icc);
-    if (!mfio::startup()) { MessageBoxW(nullptr, L"Media Foundation failed to start.", L"Error", MB_ICONERROR); return 1; }
+    const std::vector<std::wstring> files = launchFiles(args);
+    StartupLock startup;
+    if (handToRunningCopy(files, startup) != HandOff::OpenHere) return 0;
+    if (!mfio::startup()) {
+        startup.release();   // not held while a message waits for someone to read it
+        MessageBoxW(nullptr, L"Media Foundation failed to start.", L"Error", MB_ICONERROR);
+        return 1;
+    }
 
     App app;
-    if (std::vector<std::wstring> files = launchFiles(args); !files.empty())
-        app.launchQueue.push_back(std::move(files));
+    if (!files.empty()) app.launchQueue.push_back(files);
     std::wstring engErr;
-    if (!app.engine.init(&engErr))
-        MessageBoxW(nullptr, (L"Audio output unavailable: " + engErr + L"\nPlayback will be silent.").c_str(),
-                    L"Audio warning", MB_ICONWARNING);
+    const bool engineOk = app.engine.init(&engErr);
     // Project runs at >= 48 kHz internally regardless of the device mix rate; the
     // engine resamples to the device on playback. Source files are decoded to this
     // rate on load, so clips of any rate/bit depth are unified into the project.
@@ -4662,6 +4733,11 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
         ShowWindow(hwnd, nCmdShow);
     }
     UpdateWindow(hwnd);
+    // Over the window, and after the startup lock is released: a copy started next
+    // would otherwise wait on a box the user may not have seen yet.
+    if (!engineOk)
+        MessageBoxW(hwnd, (L"Audio output unavailable: " + engErr + L"\nPlayback will be silent.").c_str(),
+                    L"Audio warning", MB_ICONWARNING);
     // After the window is up, so a project that fails to load is reported over it.
     PostMessageW(hwnd, WM_APP_LAUNCH, 0, 0);
 

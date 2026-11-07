@@ -335,8 +335,10 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   go to that window instead of a second copy: double-clicking the project that's
   already open just brings it to the front, and another project opens there (asking
   first if there are unsaved changes). If a dialog is open in that window, the project
-  waits until you've closed it; if the app is busy with a long job, until that's done;
-  if the window is closing, it opens in a new one.
+  waits until you've closed it, or until you've let go of whatever you're dragging; if
+  the app is busy with a long job, until that's done — a small window says so, and
+  offers to open it in a new window instead, or not at all; if the window is closing,
+  it opens in a new one.
 - **Save / load projects.** Projects are saved as a single `.acep` file with the
   whole library and timeline (audio embedded), so a project is fully
   self-contained — and, unless you turn it off, the **edit history** as well.
@@ -488,6 +490,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `ui.cpp` | Main window: menu bar, layout, painting, hit-testing, all interaction |
 | `launch.h` | What a command line asks to open: the project, and audio files to add |
 | `placement.h` | How the main window first appears: as it was when last closed, or as a shortcut's *Run* setting asks |
+| `handoff.{h,cpp}` | Handing files you open to the copy of the app that is already running |
 | `assoc.{h,cpp}` | The per-user `.acep` file association (File ▸ Open .acep projects with this app…) |
 | `selftest.cpp` | `--selftest` backend round-trip checks (decode/encode/peaks/DSP) |
 

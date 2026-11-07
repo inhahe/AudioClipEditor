@@ -29,6 +29,7 @@ sync with behavior changes.
 | `main.cpp` | `wWinMain`: splits the command line (`CommandLineToArgvW`) → `--selftest`, `--dialogtest N`, or `runApp(args)` |
 | `launch.h` | What a command line asks to open — `.acep` files are projects, tried in order, other files are clips to add, `--` switches are skipped — and the helpers around it: whether two paths are the same file (`sameFile`), and a list of files written back out as a command line (`commandLine`) |
 | `placement.h` | Pure: how the main window first appears — the placement saved when it last closed, shown the way the launcher's `nCmdShow` asks (`startupPlacement`) |
+| `handoff.{h,cpp}` | Handing a command line to the copy already running, exactly once: the ticket (files and a claim-or-abandon flag in a named file mapping) and the registered message that names it |
 | `assoc.{h,cpp}` | The per-user `.acep` file association under `HKEY_CURRENT_USER\Software\Classes`: register / unregister / "is it this copy?" |
 | `selftest.cpp` | Headless `--selftest`: decode/encode round-trips, DSP checks, writes `bin/selftest.log` |
 
@@ -46,32 +47,53 @@ can move before the request is opened. Opening shares `openProjectPath` with
 any file that won't decode — several can arrive at once.
 
 - **One copy per user session, for files.** A copy started *with files* while another
-  is running hands them over and exits (`handToRunningCopy`: `FindWindow` on the main
-  window class, then `WM_COPYDATA` with the absolute paths, NUL-separated, tagged
-  `kLaunchCopyData`; it brings that window forward, which a just-launched process is
-  allowed to do). Double-clicking a project that is already open must bring it
-  forward, not open the same file in a second copy where each would save over the
-  other without a word. The receiver copies the paths out and answers at once — the
-  sender waits on the message — and posts itself `WM_APP_LAUNCH`. Started *without*
+  is running hands them over and exits (`handToRunningCopy`: every main window of the
+  app, frontmost first, by `EnumWindows` on its class; it brings the one that took
+  them forward, which a just-launched process is allowed to do). Double-clicking a
+  project that is already open must bring it forward, not open the same file in a
+  second copy where each would save over the other without a word. Started *without*
   files, a second copy opens normally.
+  - **The request is a ticket** (`handoff.h`): a named file mapping holding the files
+    (absolute paths, NUL-separated) and a flag that the receiver claims and the sender
+    may abandon, whichever comes first (`InterlockedCompareExchange`); only the winner
+    opens the files. The message — the registered `AudioClipEditor.HandOff`, whose
+    `wParam` and `lParam` are the sender's process id and a serial, which together name
+    the mapping — carries nothing else. It is *sent* first, so a free copy answers at
+    once and one that doesn't know the message (an older build) says no at once, and
+    the next window is tried. A copy that never gets it (Windows keeps an unelevated
+    copy from sending to an elevated one; allowing that message in would let any
+    program make the elevated copy open files) is passed over too. The receiver
+    claims the ticket, copies the files out (reading the length once, and believing it
+    only as far as the mapping goes), queues them and posts itself `WM_APP_LAUNCH`,
+    since a sent message doesn't wake the main loop.
+  - **A busy copy is waited for.** When the send times out (`kQuietWaitMs`, 1.5 s), the
+    message is also *posted*: Windows drops a sent message whose sender has stopped
+    waiting for it, so without that the busy copy would never see the request (seen
+    live: frozen, then thawed, it never opened the project), while a posted one waits
+    in its queue until it is free. If both arrive, the second finds the ticket claimed
+    and is refused. Meanwhile a small window (`dlg::waitForOtherCopy`, centred on the
+    monitor under the pointer, since this copy has no window of its own) says what it
+    is waiting for and closes by itself once the ticket is claimed, offering *Open in
+    a new window* (not on Enter: it is the choice that can put a project in two
+    windows) and *Cancel*. Either abandons the ticket first, and if the busy copy won
+    it in the meantime, the files are its and this copy exits. If the busy copy closes
+    or dies first, the new one looks again and, finding none, opens normally. It used
+    to wait with `SendMessageW` and no limit, silently: a hung copy made every later
+    double-click a process that waited forever with nothing on screen.
   - **A copy still starting counts.** Every copy holds a named mutex
     (`StartupLock`, `Local\AudioClipEditor.Startup`) from the top of `runApp` until
-    its main window exists, and looks for a window only while holding it — so a copy
+    its main window exists, and looks for windows only while holding it — so a copy
     started while the first is still starting up (double-clicking again because it
     is slow to appear) waits for that window rather than finding none and opening the
     same project as well. Live, two copies started back to back on one project ended
     as two windows in 2 of 3 tries before this; after, as one in each of 5. A copy that
-    dies while starting abandons the mutex, which still passes it on.
-  - **A busy copy is waited for, however long** (`SendMessageW`, no timeout): one in
-    the middle of a long job answers once it is done. It used to be given 5 s
-    (`SMTO_ABORTIFHUNG`), after which the new copy opened the project itself — and the
-    message still reached the busy copy afterwards, so the project ended up in both.
-    The mutex is not held while waiting, so a copy started without files is not held
-    up. If the copy closes or dies first, the new one looks again and, finding none,
-    opens normally. If the window is still there but won't take the files — Windows
-    keeps an unelevated copy from sending to an elevated one — it opens normally too:
-    allowing that message into an elevated copy would let any program make it open
-    files.
+    dies while starting abandons the mutex, which still passes it on. Waiting for it
+    shows the same window after `kQuietWaitMs`. A copy without files waits only that
+    long and then starts anyway: holding the mutex only helps a copy with files that
+    starts next to find its window. The mutex is not held while a hand-off waits for
+    an answer, nor around a message box nobody may have seen yet: the startup failure
+    message is shown after releasing it, and the "Audio output unavailable" warning
+    over the main window, once it exists.
 - **Requests wait in a queue** (`App::launchQueue`, oldest first: this copy's own
   command line, then each one handed over, kept apart so each opens as the double-click
   it was). Each is taken off as it is opened, so a stray repeat of the message can't
@@ -2087,6 +2109,19 @@ fresh copy once the window is gone. With the running copy frozen (its process
 suspended) for 9 s, a copy given another project waited without a window, and once
 the first was thawed it opened the project there and exited — before, it opened the
 project itself; with the frozen copy killed instead, the waiting one opened it.
+
+**Handing over** (4 checks, `handoff`, sender and receiver in one process): the
+receiver gets the files once, a second message for the same ticket gets nothing, and
+the sender can then no longer take them back; once the sender stops waiting, a message
+arriving late is refused; a ticket whose sender has gone, or that never existed, gives
+nothing; the message is registered. A claim that ignores the flag fails the first two.
+Live, with the running copy frozen: after 1.5 s the new copy shows its waiting window;
+thawed, the running copy opens the project and the waiting copy exits (with the
+earlier sent-only message it never did); *Open in a new window* opens it in the new
+copy and the thawed one doesn't; *Cancel* opens it nowhere; killing the frozen copy
+makes the waiting one open it. With the startup mutex held from outside, the waiting
+window says the other copy is still starting, and the copy opens the project once the
+mutex is released, or exits on *Cancel*.
 
 **Window placement** (5 checks, `startupPlacement`): asked for nothing in particular,
 the window opens as saved; closed while minimized, it opens as it would have been

@@ -23,7 +23,7 @@ struct DlgUI {
     int margin = 16, gap = 12, rowGap = 10;   // scaled in the constructor
 
     explicit DlgUI(HWND parent) {
-        const UINT d = parent ? GetDpiForWindow(parent) : 0;
+        const UINT d = parent ? GetDpiForWindow(parent) : GetDpiForSystem();
         dpi = d ? d : 96;
         NONCLIENTMETRICSW ncm{}; ncm.cbSize = sizeof(ncm);
         if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi)) {
@@ -59,17 +59,26 @@ struct DlgUI {
     int comboW(const wchar_t* t) const { return textW(t) + S(38); }   // + drop-down arrow
 
     // Create the dialog window sized to hold `clientW` x `clientH` of content,
-    // centred on the parent but kept inside its monitor's work area.
+    // centred on the parent but kept inside its monitor's work area. With no parent
+    // (a copy of the app that has no window yet), centred on the monitor the pointer
+    // is on, which is where the user just double-clicked.
     HWND create(const wchar_t* cls, const wchar_t* title, HWND parent, int clientW, int clientH) {
         const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_DLGMODALFRAME;
         RECT r{ 0, 0, clientW, clientH };
         AdjustWindowRectExForDpi(&r, style, FALSE, ex, dpi);
         const int W = r.right - r.left, H = r.bottom - r.top;
-        RECT pr{}; GetWindowRect(parent, &pr);
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        const HMONITOR mon = parent ? MonitorFromWindow(parent, MONITOR_DEFAULTTONEAREST)
+                                    : MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+        const bool haveMonitor = GetMonitorInfoW(mon, &mi) != FALSE;
+        RECT pr{};
+        if (parent) GetWindowRect(parent, &pr);
+        else if (haveMonitor) pr = mi.rcWork;
         int x = pr.left + ((pr.right - pr.left) - W) / 2;
         int y = pr.top + ((pr.bottom - pr.top) - H) / 2;
-        MONITORINFO mi{}; mi.cbSize = sizeof(mi);
-        if (GetMonitorInfoW(MonitorFromWindow(parent, MONITOR_DEFAULTTONEAREST), &mi)) {
+        if (haveMonitor) {
             x = std::max((int)mi.rcWork.left, std::min(x, (int)mi.rcWork.right - W));
             y = std::max((int)mi.rcWork.top, std::min(y, (int)mi.rcWork.bottom - H));
         }
@@ -144,8 +153,9 @@ struct ScopeLine {
     }
 };
 
+// `parent` may be null: a dialog of a copy of the app that has no window yet.
 static void runModal(HWND hwnd, HWND parent) {
-    EnableWindow(parent, FALSE);
+    if (parent) EnableWindow(parent, FALSE);
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
     MSG msg;
@@ -155,8 +165,10 @@ static void runModal(HWND hwnd, HWND parent) {
             DispatchMessage(&msg);
         }
     }
-    EnableWindow(parent, TRUE);
-    SetForegroundWindow(parent);
+    if (parent) {
+        EnableWindow(parent, TRUE);
+        SetForegroundWindow(parent);
+    }
 }
 
 // ------------------------------------------------------------------ prompt text
@@ -1161,6 +1173,65 @@ void history(HWND parent, HistoryContext& ctx) {
     SetFocus(st.list);
 
     runModal(h, parent);
+}
+
+// ------------------------------------------------------------- waiting on a copy
+namespace {
+constexpr int kIdOpenHere = 100;   // not IDOK: Enter must not start a second window
+constexpr UINT_PTR kPollTimer = 1;
+
+struct WaitState {
+    const std::function<bool()>* done = nullptr;
+    WaitChoice choice = WaitChoice::Cancel;
+};
+
+LRESULT CALLBACK WaitProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    auto* st = (WaitState*)GetWindowLongPtrW(h, GWLP_USERDATA);
+    switch (m) {
+    case WM_TIMER:
+        if (st && w == kPollTimer && (*st->done)()) { st->choice = WaitChoice::Done; DestroyWindow(h); }
+        return 0;
+    case WM_COMMAND:
+        if (st && LOWORD(w) == kIdOpenHere) { st->choice = WaitChoice::OpenHere; DestroyWindow(h); return 0; }
+        if (st && LOWORD(w) == IDCANCEL) { st->choice = WaitChoice::Cancel; DestroyWindow(h); return 0; }
+        break;
+    case WM_CLOSE:
+        if (st) st->choice = WaitChoice::Cancel;
+        DestroyWindow(h);
+        return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+} // namespace
+
+WaitChoice waitForOtherCopy(const std::wstring& message, const std::function<bool()>& done) {
+    if (done()) return WaitChoice::Done;
+    static bool reg = false;
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    if (!reg) {
+        WNDCLASSW wc{}; wc.lpfnWndProc = WaitProc; wc.hInstance = hInst;
+        wc.hCursor = LoadCursor(nullptr, IDC_APPSTARTING);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"ACE_Wait"; RegisterClassW(&wc); reg = true;
+    }
+    WaitState st; st.done = &done;
+    DlgUI ui(nullptr);
+
+    const wchar_t* openHere = L"Open in a new window";
+    const int contentW = ui.S(400);
+    const int textH = ui.measure(message.c_str(), contentW).cy;
+    const int bw = ui.btnW(openHere), bwc = ui.btnW(L"Cancel"), bh = ui.btnH();
+    const int clientH = ui.margin + textH + ui.S(18) + bh + ui.margin;
+    HWND h = ui.create(L"ACE_Wait", L"Audio Clip Editor", nullptr, ui.margin * 2 + contentW, clientH);
+    if (!h) return WaitChoice::Cancel;
+    SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
+    ui.label(message.c_str(), ui.margin, ui.margin, contentW, textH);
+    const int y = ui.margin + textH + ui.S(18), right = ui.margin + contentW;
+    ui.button(openHere, right - bwc - ui.S(8) - bw, y, bw, bh, kIdOpenHere);
+    ui.button(L"Cancel", right - bwc, y, bwc, bh, IDCANCEL);
+    SetTimer(h, kPollTimer, 200, nullptr);
+    runModal(h, nullptr);
+    return st.choice;
 }
 
 // ------------------------------------------------------------------ project files
