@@ -2758,6 +2758,35 @@ int runSelfTest() {
         }
     }
 
+    // ---- exporting a clip carries its volume
+    // The volume is part of the edit: it is what the card plays and what a volume
+    // match sets. Exporting without it hands back the clip as it was before the match.
+    {
+        Document d; d.init(rate);
+        auto src = makeSine(rate, 1.0, 440.0);   // stereo, amplitude 0.5
+        const int id = d.addClip(L"x", src, L"", L"add");
+        check(d.exportAudio(id) == src,
+              L"clip export: at 100% volume the clip's own audio is written, uncopied");
+        d.setClipGain(id, 1.5f, L"vol");
+        auto louder = d.exportAudio(id);
+        double worst = 0.0;
+        if (louder && louder->samples.size() == src->samples.size())
+            for (size_t i = 0; i < src->samples.size(); ++i)
+                worst = std::max(worst, std::fabs((double)louder->samples[i] - 1.5 * src->samples[i]));
+        check(louder && louder->samples.size() == src->samples.size() && worst < 1e-6,
+              L"clip export: the clip's volume is applied, so a matched volume survives export",
+              L"worst error " + std::to_wstring(worst));
+        auto part = d.exportAudio(id, 1000, 3000);
+        check(part && part->frames() == 2000 && part->channels == 2 &&
+              std::fabs(part->samples[0] - 1.5f * src->samples[2000]) < 1e-6f,
+              L"clip export: a selection is that range of the clip, at the clip's volume");
+        auto none = d.exportAudio(id, 5000, 5000);
+        check(none && none->frames() == 0 && d.exportAudio(id + 999) == nullptr,
+              L"clip export: an empty range is empty, and a missing clip is refused");
+        check(d.project().findClip(id)->buffer == src,
+              L"clip export: exporting leaves the clip's own audio untouched");
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);

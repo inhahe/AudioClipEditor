@@ -2459,11 +2459,18 @@ struct App {
             return;
         }
         if (selectionOnly && !selectionCovers(clipId)) return;
-        AudioBufferPtr buf = selectionOnly ? sliceBuffer(*c->buffer, selStart, selEnd) : c->buffer;
+        // At the clip's volume (see Document::exportAudio): what the card plays is
+        // what the file gets, so a volume match survives being exported.
+        AudioBufferPtr buf = selectionOnly ? doc.exportAudio(clipId, selStart, selEnd)
+                                           : doc.exportAudio(clipId);
         if (!buf || buf->frames() == 0) {
             MessageBoxW(hwnd, L"The selection is empty.", L"Export selection", MB_ICONINFORMATION);
             return;
         }
+        const float gain = c->gain;
+        const std::wstring clipName = c->name;
+        float peak = 0.0f;
+        for (float v : buf->samples) peak = std::max(peak, std::fabs(v));
         // Default to the clip's own rate and channel count so a plain "export"
         // doesn't quietly resample or upmix a mono take; the dialog can override.
         mfio::ExportOptions o;
@@ -2479,7 +2486,19 @@ struct App {
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
         std::wstring err; bool ok = mfio::encodeFile(outPath, *buf, o, &err);
         SetCursor(old);
-        if (!ok) MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING);
+        if (!ok) { MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING); return; }
+        // Every format is written clamped to full scale (32-bit float too), so a
+        // volume that takes the peaks over it clips them in the file -- audibly, and
+        // with nothing else to say so.
+        if (peak > 1.0f) {
+            wchar_t msg[400];
+            swprintf(msg, 400,
+                     L"'%ls' is at %d%% volume, which takes its peaks %.1f dB past full scale, "
+                     L"so they are clipped in the exported file.\n\nTurn the clip's volume down "
+                     L"and export again for a clean copy.",
+                     clipName.c_str(), (int)(gain * 100.0f + 0.5f), 20.0 * std::log10(peak));
+            MessageBoxW(hwnd, msg, L"Export clip", MB_ICONWARNING);
+        }
     }
 
     static std::wstring parentDir(const std::wstring& path) {

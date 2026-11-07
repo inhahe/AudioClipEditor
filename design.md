@@ -997,9 +997,15 @@ which embeds raw float samples — so the only ways out are:
   tracks, defaults to the project rate and stereo.
 - **`App::exportClipAudio(clipId, selectionOnly)`** — clip menu *Export clip to
   file…* / *Export selection to file…* (`IDM_EXPORTCLIP` / `IDM_EXPORTSEL`, the
-  latter greyed via the same `sel` flag as the other selection entries). Uses
-  `sliceBuffer` for the selection case and defaults to the **clip's own** rate and
-  channel count, so a plain export neither resamples nor upmixes a mono take.
+  latter greyed via the same `sel` flag as the other selection entries). Writes
+  `Document::exportAudio(clipId, begin, end)` — the range **at the clip's volume**,
+  because the volume is part of the edit (it is what the card plays, and what volume
+  matching sets) and a file without it would hand back the clip as it was before
+  the match. The buffer is shared, not copied, when there is nothing to change.
+  The encoder clamps every format to full scale, 32-bit float included, so when the
+  volume takes the peaks over it the user is told the file is clipped there. Defaults
+  to the **clip's own** rate and channel count, so a plain export neither resamples
+  nor upmixes a mono take.
 
 Both go through `dlg::exportOptions` → `mfio::encodeFile`. The suggested file name
 passes through **`mfio::safeFileName`** because a clip name is free text but is
@@ -1042,7 +1048,10 @@ on undo would be wrong. The new clip takes the old one's **library slot** (so it
 appears where the eye already is) and its **gain**, and carries the path just
 written as its `sourcePath`, which makes it a normal file-backed clip: a later
 *Export clip* defaults to the same folder, and sort-by-time uses the file's own
-mtime.
+mtime. For the same reason the file is written **without** the clip's volume,
+unlike *Export clip*: it is the new clip's audio, and the new clip carries the
+volume on top, so baking it in as well would apply it twice to anything that later
+reads the file back.
 
 Placements of the replaced clip are removed with it — their audio no longer
 exists in the project. That is the one consequence the user might not have
@@ -1666,6 +1675,11 @@ through the filter; and **one EQ per clip** — a clip whose second half is brig
 than its first keeps exactly that difference after matching (2.229 dB before and
 after), while the control, EQ'ing each half on its own as a time-varying matcher
 would, flattens it to 0.55 dB, proving the measure can tell the two apart.
+
+**Clip export** (5 checks): `Document::exportAudio` hands back the clip's own buffer
+at 100%, applies a 150% volume sample-exactly (without it the error is 0.25 — the
+regression this pins), slices a selection at that volume, gives an empty buffer for
+an empty range and nothing for a missing clip, and leaves the clip's own audio alone.
 
 The **band limit** is pinned by a case built to break the old behaviour: `clipA`
 against a copy of itself with a loud 30 Hz tone added, i.e. two takes identical

@@ -287,6 +287,23 @@ void Document::setTrackGain(int id, float g, const std::wstring& desc) {
     commit(desc);
 }
 
+AudioBufferPtr Document::exportAudio(int clipId, int64_t begin, int64_t end) const {
+    const Clip* c = project_.findClip(clipId);
+    if (!c || !c->buffer) return nullptr;
+    const AudioBuffer& src = *c->buffer;
+    const int64_t nf = src.frames();
+    begin = std::max<int64_t>(0, std::min(begin, nf));
+    end = end < 0 ? nf : std::max(begin, std::min(end, nf));
+    if (begin == 0 && end == nf && c->gain == 1.0f) return c->buffer;
+    auto out = std::make_shared<AudioBuffer>();
+    out->sampleRate = src.sampleRate;
+    out->channels = src.channels;
+    const int ch = src.channels;
+    out->samples.assign(src.samples.begin() + begin * ch, src.samples.begin() + end * ch);
+    if (c->gain != 1.0f) for (float& v : out->samples) v *= c->gain;
+    return out;
+}
+
 AudioBufferPtr Document::renderMix() const {
     int64_t total = project_.timelineLengthFrames();
     auto out = std::make_shared<AudioBuffer>();

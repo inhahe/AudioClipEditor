@@ -103,6 +103,14 @@ public:
     static int64_t historyBudgetBytes();
     static void setHistoryBudgetBytes(int64_t bytes);
     AudioBufferPtr renderMix() const;   // all tracks mixed to one stereo buffer
+    // A clip's audio as it should leave the app in a file of its own: frames
+    // [begin, end) of it (clamped; end < 0 means to the end) **at the clip's
+    // volume**. The volume is part of the edit -- it is what the clip's card plays,
+    // and what volume matching sets -- so exporting without it would hand back the
+    // clip as it was before the match. Shares the clip's own buffer when there is
+    // nothing to change; an empty range gives an empty buffer; nullptr if there is
+    // no such clip or it has no audio.
+    AudioBufferPtr exportAudio(int clipId, int64_t begin = 0, int64_t end = -1) const;
 
     // Commit a snapshot after direct live edits (e.g. dragging a volume slider).
     void commitEdit(const std::wstring& desc) { commit(desc); }

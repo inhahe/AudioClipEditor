@@ -303,8 +303,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   *Export clip to file…* or *Export selection to file…*, which opens the same
   audio dialog as the mixdown. Edits live in the project file and the original
   source file on disk is **never written to**, so this is how you get an edited
-  (cleaned, normalized, cropped) clip back out as audio. The defaults follow the
-  clip — its own sample rate, and a mono clip stays mono. (*New clip from
+  (cleaned, cropped, timbre-matched) clip back out as audio — **at its volume**,
+  just as its card plays it, so a volume you set or matched comes with it. If that
+  volume takes the clip's peaks past full scale you're told, since the file would
+  be clipped there. The defaults follow the clip — its own sample rate, and a mono
+  clip stays mono. (*New clip from
   selection* is the in-project counterpart: it adds a clip to the library rather
   than writing a file.)
 - **Keep just the good part, in one click.** Right-click a clip card →
