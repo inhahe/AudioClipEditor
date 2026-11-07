@@ -114,8 +114,8 @@ struct DlgUI {
 // Both effect dialogs open from a right-click menu that has already chosen *what*
 // to process, so they restate it. That line is the one thing the user must be able
 // to read before pressing Apply, and it is usually longer than anything else in the
-// dialog, so it may widen the frame up to a limit, then wrap onto a second line,
-// and only something longer still gets ellipsised.
+// dialog, so it may widen the frame up to a limit, then wrap onto a second line;
+// anything longer still is cut at the end, so what matters most goes first.
 struct ScopeLine {
     std::wstring text;
     int height = 0;
@@ -135,7 +135,10 @@ struct ScopeLine {
     }
     int step(const DlgUI& ui) const { return height + ui.S(14); }
     HWND build(const DlgUI& ui, int& y, int contentW) const {
-        HWND lbl = ui.label(text.c_str(), ui.margin, y, contentW, height, SS_ENDELLIPSIS);
+        // Wraps onto the second line it may have. No SS_ENDELLIPSIS: that makes a
+        // static single-line whatever else is set, so the second line would never
+        // be used. SS_EDITCONTROL keeps a partly-visible third line from showing.
+        HWND lbl = ui.label(text.c_str(), ui.margin, y, contentW, height, SS_EDITCONTROL);
         y += step(ui);
         return lbl;
     }
@@ -759,13 +762,17 @@ bool voiceIsolate(HWND parent, VoiceIsolateContext& ctx) {
 // (the "Applies to:" line, and the tracks they come from), and what to match them to
 // -- and differ only in timbre's extra rows. Keeping them one implementation is what
 // keeps the two from coming to look or behave differently.
-enum { IDC_MD_TRACKS = 2101 };
+enum { IDC_MD_TRACKS = 2101, IDC_MD_REF = 2102 };
 
 struct MDState {
     MatchReference* ref = nullptr;
     MatchTracks* tracks = nullptr;
-    std::wstring* scope = nullptr;
     const wchar_t* prefix = nullptr;             // "Sound like " / "As loud as "
+    // The standard the user wants: preselected, or picked in the combo since. Kept
+    // apart from what the combo shows, because unticking that clip's track takes it
+    // out of the list -- and ticking the track again should bring it back, not leave
+    // the average the combo fell back to. -1 = the average.
+    int wantId = -1;
     dsp::TimbreMatchOptions* opts = nullptr;     // null: the volume dialog
     bool* alsoVolume = nullptr;                  // null: not offered
     HWND cbRef = 0, list = 0, stScope = 0, btnOk = 0, edDb = 0, edSmooth = 0, ckLoud = 0;
@@ -791,17 +798,16 @@ static int mdSelectedId(const MDState* st) {
     const int ri = (int)SendMessageW(st->cbRef, CB_GETCURSEL, 0, 0) - 1;
     return ri >= 0 && ri < (int)st->ref->clipIds.size() ? st->ref->clipIds[(size_t)ri] : -1;
 }
-// Fill the combo from *st->ref, selecting `keepId` if it is still offered (so a
-// standard the user picked survives a change of tracks), else ref->choice.
-static void mdFillRef(MDState* st, int keepId) {
+// Fill the combo from *st->ref, selecting the wanted standard if it is offered,
+// else the average.
+static void mdFillRef(MDState* st) {
     const MatchReference& r = *st->ref;
     SendMessageW(st->cbRef, CB_RESETCONTENT, 0, 0);
     SendMessageW(st->cbRef, CB_ADDSTRING, 0, (LPARAM)r.averageLabel.c_str());
     for (const std::wstring& n : r.clipNames)
         SendMessageW(st->cbRef, CB_ADDSTRING, 0, (LPARAM)refItem(st->prefix, n).c_str());
-    int sel = (r.choice >= 0 && r.choice < (int)r.clipNames.size()) ? r.choice + 1 : 0;
-    if (keepId >= 0)
-        for (size_t i = 0; i < r.clipIds.size(); ++i) if (r.clipIds[i] == keepId) sel = (int)i + 1;
+    int sel = 0;
+    for (size_t i = 0; i < r.clipIds.size(); ++i) if (r.clipIds[i] == st->wantId) sel = (int)i + 1;
     SendMessageW(st->cbRef, CB_SETCURSEL, sel, 0);
 }
 // The ticks changed: everything that depends on which clips are involved follows.
@@ -809,15 +815,11 @@ static void mdTracksChanged(MDState* st) {
     const int n = (int)st->tracks->labels.size();
     std::vector<uint8_t> ticked((size_t)n);
     for (int i = 0; i < n; ++i) ticked[(size_t)i] = ListView_GetCheckState(st->list, i) ? 1 : 0;
-    st->tracks->ticked = ticked;
-    const int keep = mdSelectedId(st);
     MatchReference r;
     std::wstring scope;
     const bool usable = st->tracks->rebuild(ticked, r, scope);
-    r.choice = -1;
     *st->ref = r;
-    *st->scope = scope;
-    mdFillRef(st, keep);
+    mdFillRef(st);
     SetWindowTextW(st->stScope, (L"Applies to: " + scope).c_str());
     EnableWindow(st->btnOk, usable);
 }
@@ -836,6 +838,10 @@ static LRESULT CALLBACK MDProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         break;
     }
     case WM_COMMAND:
+        if (st && LOWORD(w) == IDC_MD_REF && HIWORD(w) == CBN_SELCHANGE) {
+            st->wantId = mdSelectedId(st);   // the user's own pick, kept across ticks
+            return 0;
+        }
         // Snap an out-of-range entry as soon as the field loses focus, so the
         // limits are discovered by using the dialog rather than by wondering why
         // the result ignored what was typed. Ranges must match the reads below.
@@ -846,6 +852,10 @@ static LRESULT CALLBACK MDProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         if (LOWORD(w) == IDCANCEL) { st->ok = false; DestroyWindow(h); return 0; }
         if (LOWORD(w) == IDOK) {
+            // Enter reaches here through IsDialogMessage even while Apply is greyed
+            // (this window class doesn't answer DM_GETDEFID), so the button's state
+            // has to be honoured here, not just shown.
+            if (!IsWindowEnabled(st->btnOk)) { MessageBeep(MB_OK); return 0; }
             if (st->opts) {
                 dsp::TimbreMatchOptions& o = *st->opts;
                 o.maxCorrectionDb  = (float)vcReadDouble(st->edDb, 0.0, 24.0, 12.0);
@@ -866,7 +876,7 @@ static LRESULT CALLBACK MDProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
 static bool matchDialog(HWND parent, const wchar_t* title, const wchar_t* info,
                         const wchar_t* prefix, MatchReference& ref, MatchTracks& tracks,
-                        std::wstring& scopeLabel, dsp::TimbreMatchOptions* opts,
+                        const std::wstring& scopeLabel, dsp::TimbreMatchOptions* opts,
                         bool* alsoVolume) {
     static bool reg = false;
     HINSTANCE hInst = GetModuleHandleW(nullptr);
@@ -878,8 +888,10 @@ static bool matchDialog(HWND parent, const wchar_t* title, const wchar_t* info,
         INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_LISTVIEW_CLASSES };
         InitCommonControlsEx(&icc);
     }
-    MDState st; st.ref = &ref; st.tracks = &tracks; st.scope = &scopeLabel;
+    MDState st; st.ref = &ref; st.tracks = &tracks;
     st.prefix = prefix; st.opts = opts; st.alsoVolume = alsoVolume;
+    st.wantId = (ref.choice >= 0 && ref.choice < (int)ref.clipIds.size())
+              ? ref.clipIds[(size_t)ref.choice] : -1;
     DlgUI ui(parent);
     const bool picker = !tracks.labels.empty();
 
@@ -951,8 +963,8 @@ static bool matchDialog(HWND parent, const wchar_t* title, const wchar_t* info,
     }
 
     ui.rowLabel(kMatchTo, ui.margin, y, labelW, rowH);
-    st.cbRef = ui.combo(ctlX, y, ctlW, 8);
-    mdFillRef(&st, -1);
+    st.cbRef = ui.combo(ctlX, y, ctlW, 8, IDC_MD_REF);
+    mdFillRef(&st);
     y += step;
 
     if (opts) {
@@ -983,6 +995,9 @@ static bool matchDialog(HWND parent, const wchar_t* title, const wchar_t* info,
     const int right = ui.margin + contentW;
     st.btnOk = ui.button(L"Apply", right - bw * 2 - ui.S(8), y, bw, bh, IDOK, true);
     ui.button(L"Cancel", right - bw, y, bw, bh, IDCANCEL);
+    // A track-based match can open on ticks that give nothing to match yet (a clip
+    // alone on its track): the list is how to fix that, so the dialog opens anyway.
+    EnableWindow(st.btnOk, !picker || tracks.usable);
 
     SetFocus(st.cbRef);
     runModal(h, parent);

@@ -213,7 +213,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   When the clips come from tracks, the dialog lists the tracks with tick boxes, so
   you can widen or narrow the match before applying it — leave a music or effects
   track out of *all tracks*, or match a clip to the takes on two tracks instead of
-  one. The *Applies to* line and the *Match to* list follow the ticks.
+  one. The *Applies to* line and the *Match to* list follow the ticks. A clip
+  alone on its track can still open the dialog this way: tick the track whose
+  takes it should match.
 
   Then choose what to match to: **the average of them all** (the default — it
   moves each clip as little as possible and favours none) or one clip as the

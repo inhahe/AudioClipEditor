@@ -1968,10 +1968,12 @@ struct App {
     // dialog, so a music track can be left out of "all tracks" or a clip matched to
     // two tracks' worth of takes. `subject` is the clip matched to the rest (-1: a
     // set); `trackIds` are ticked to begin with. Library-wide matches have none.
-    struct TrackPick { bool on = false; int subject = -1; std::vector<int> trackIds; };
-    TrackPick pickTracks(std::vector<int> ids, int subject = -1) const {
-        return TrackPick{ true, subject, std::move(ids) };
-    }
+    struct TrackPick {
+        bool on = false; int subject = -1; std::vector<int> trackIds;
+        TrackPick() = default;
+        explicit TrackPick(std::vector<int> ids, int subj = -1)
+            : on(true), subject(subj), trackIds(std::move(ids)) {}
+    };
     std::vector<int> allTrackIds() const {
         std::vector<int> v;
         for (const Track& t : doc.project().tracks) v.push_back(t.id);
@@ -1985,13 +1987,11 @@ struct App {
         if (!pick.on) return mt;
         std::vector<int> ids;   // the listed tracks, parallel to mt.labels
         for (const Track& t : doc.project().tracks) {
-            std::vector<int> distinct;
-            for (const auto& pc : t.clips)
-                if (std::find(distinct.begin(), distinct.end(), pc.clipId) == distinct.end())
-                    distinct.push_back(pc.clipId);
-            if (distinct.empty()) continue;   // nothing to take from it
+            // Counted the way the match counts: distinct clips that have audio.
+            const int n = match::trackSet(doc.project(), t.id).size();
+            if (n == 0) continue;   // nothing to take from it
             ids.push_back(t.id);
-            mt.labels.push_back(t.name + L" (" + clipCount((int)distinct.size()) + L")");
+            mt.labels.push_back(t.name + L" (" + clipCount(n) + L")");
             mt.ticked.push_back(std::find(pick.trackIds.begin(), pick.trackIds.end(), t.id)
                                 != pick.trackIds.end() ? 1 : 0);
         }
@@ -2003,12 +2003,17 @@ struct App {
             *cur = pick.subject >= 0 ? match::clipToTracks(doc.project(), pick.subject, chosen)
                                      : match::tracksSet(doc.project(), chosen);
             ref = matchReferenceFor(*cur);
-            scope = chosen.empty() ? std::wstring(L"nothing \u2014 no tracks are ticked")
-                  : cur->usable() ? cur->label
-                  : cur->label + L" \u2014 not enough clips to match";
+            scope = scopeText(*cur, chosen.empty());
             return cur->usable();
         };
+        mt.usable = cur->usable();
         return mt;
+    }
+    // The dialog's "Applies to:" text. When there is nothing to match, the reason
+    // comes first, since a long label is cut at its end.
+    static std::wstring scopeText(const match::ClipSet& s, bool noTracks) {
+        if (noTracks) return L"nothing \u2014 no tracks are ticked";
+        return s.usable() ? s.label : L"not enough clips to match yet \u2014 " + s.label;
     }
     // Back from the dialog: the chosen set index (-1 = the average), remembered.
     int takeReference(const match::ClipSet& s, const dlg::MatchReference& r) {
@@ -2041,6 +2046,7 @@ struct App {
         const wchar_t* silent = L" \u2014 it is silent, or its volume is all the way down.";
         switch (r.failure) {
         case match::Failure::Subject:
+            if (subject < 0) return L"There is nothing to match.";
             return L"'" + s.names[subject] + L"' has no speech to measure" + silent;
         case match::Failure::Reference:
             return L"'" + s.names[ref] + L"' has no speech to measure" + silent;
@@ -2151,7 +2157,9 @@ struct App {
     }
 
     void matchVolumeClips(const match::ClipSet& initial, const TrackPick& pick = {}) {
-        if (!initial.usable()) {
+        // With a tick-list the dialog can still make something of it; without one,
+        // there is nothing to offer.
+        if (!initial.usable() && !pick.on) {
             MessageBoxW(hwnd,
                 L"Matching volume needs at least two clips with audio \u2014 it makes them as "
                 L"loud as each other, so there has to be something to match.",
@@ -2161,10 +2169,11 @@ struct App {
         auto cur = std::make_shared<match::ClipSet>(initial);
         dlg::VolumeMatchContext ctx;
         ctx.ref = matchReferenceFor(initial);
-        ctx.scopeLabel = initial.label;
+        ctx.scopeLabel = scopeText(initial, false);
         ctx.tracks = trackPicker(pick, cur);
         if (!dlg::volumeMatch(hwnd, ctx)) return;
         const match::ClipSet& s = *cur;   // as the dialog's tick-list left it
+        if (!s.usable()) return;
         const int ref = takeReference(s, ctx.ref);
 
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
@@ -2190,6 +2199,7 @@ struct App {
         const wchar_t* tooShort = L" \u2014 it is too short (under about 0.05 s) or silent.";
         switch (r.failure) {
         case match::Failure::Subject:
+            if (subject < 0) return L"There is nothing to match.";
             return L"Couldn't measure the tone colour of '" + s.names[subject] + L"'" + tooShort;
         case match::Failure::Reference:
             return r.otherRate[ref]
@@ -2279,7 +2289,9 @@ struct App {
     }
 
     void matchTimbreClips(const match::ClipSet& initial, const TrackPick& pick = {}) {
-        if (!initial.usable()) {
+        // With a tick-list the dialog can still make something of it; without one,
+        // there is nothing to offer.
+        if (!initial.usable() && !pick.on) {
             MessageBoxW(hwnd,
                 L"Matching timbre needs at least two clips with audio \u2014 it makes them sound "
                 L"like each other, so there has to be something to match.",
@@ -2291,10 +2303,11 @@ struct App {
         ctx.opts = &tmOpts;
         ctx.alsoVolume = &tmAlsoVolume;
         ctx.ref = matchReferenceFor(initial);
-        ctx.scopeLabel = initial.label;
+        ctx.scopeLabel = scopeText(initial, false);
         ctx.tracks = trackPicker(pick, cur);
         if (!dlg::timbreMatch(hwnd, ctx)) return;
         const match::ClipSet& s = *cur;   // as the dialog's tick-list left it
+        if (!s.usable()) return;
         const int ref = takeReference(s, ctx.ref);
 
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
@@ -3594,7 +3607,9 @@ struct App {
                 AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
                 // Here, unlike on a library card, "the rest" has an obvious meaning:
                 // the other clips on the lane this one was right-clicked on.
-                const UINT rest = match::clipToTrack(doc.project(), gClip, gTrack).usable()
+                // Greyed only if no track at all holds another clip to match it to:
+                // alone on its own track, the dialog's tick-list can reach others.
+                const UINT rest = match::clipToTracks(doc.project(), gClip, allTrackIds()).usable()
                                 ? 0 : MF_GRAYED;
                 AppendMenuW(m, MF_STRING | rest, IDM_TL_TIMBRE,
                             L"Match this clip's timbre to the rest of the track\u2026");
@@ -3611,10 +3626,10 @@ struct App {
                 else if (cmd == IDM_TL_RIPPLE) toggleRippleMode();
                 else if (cmd == IDM_TL_TIMBRE)
                     matchTimbreClips(match::clipToTrack(doc.project(), gClip, gTrack),
-                                     pickTracks({ gTrack }, gClip));
+                                     TrackPick({ gTrack }, gClip));
                 else if (cmd == IDM_TL_VOLUME)
                     matchVolumeClips(match::clipToTrack(doc.project(), gClip, gTrack),
-                                     pickTracks({ gTrack }, gClip));
+                                     TrackPick({ gTrack }, gClip));
                 return;
             }
             // right-click a track header or empty lane -> track menu
@@ -3681,8 +3696,10 @@ struct App {
                     L"Remove non-voice \u2014 this track\u2026");
         // Matching needs two distinct clips to have anything to match. "All tracks"
         // lives here too because this is the menu someone thinking in tracks opens.
-        const UINT trk = match::trackSet(doc.project(), trackId).usable() ? 0 : MF_GRAYED;
+        // Greyed only when no choice of tracks could give anything to match: a track
+        // with one clip can still open the dialog and tick another track.
         const UINT all = match::timelineSet(doc.project()).usable() ? 0 : MF_GRAYED;
+        const UINT trk = t->clips.empty() ? MF_GRAYED : all;
         AppendMenuW(m, MF_STRING | trk, IDM_TRK_TIMBRE, L"Match timbre \u2014 this track\u2026");
         AppendMenuW(m, MF_STRING | trk, IDM_TRK_VOLUME, L"Match volume \u2014 this track\u2026");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -3703,13 +3720,13 @@ struct App {
         if (cmd == IDM_TRK_DENOISE) voiceCleanTrack(trackId);
         else if (cmd == IDM_TRK_VOICEISO) removeNonVoiceTrack(trackId);
         else if (cmd == IDM_TRK_TIMBRE)
-            matchTimbreClips(match::trackSet(doc.project(), trackId), pickTracks({ trackId }));
+            matchTimbreClips(match::trackSet(doc.project(), trackId), TrackPick({ trackId }));
         else if (cmd == IDM_TRK_VOLUME)
-            matchVolumeClips(match::trackSet(doc.project(), trackId), pickTracks({ trackId }));
+            matchVolumeClips(match::trackSet(doc.project(), trackId), TrackPick({ trackId }));
         else if (cmd == IDM_TRK_TIMBRE_ALL)
-            matchTimbreClips(match::timelineSet(doc.project()), pickTracks(allTrackIds()));
+            matchTimbreClips(match::timelineSet(doc.project()), TrackPick(allTrackIds()));
         else if (cmd == IDM_TRK_VOLUME_ALL)
-            matchVolumeClips(match::timelineSet(doc.project()), pickTracks(allTrackIds()));
+            matchVolumeClips(match::timelineSet(doc.project()), TrackPick(allTrackIds()));
         else if (cmd == IDM_TRK_EQ_OFF) {
             std::vector<int> ids;
             for (const auto& pc : t->clips) ids.push_back(pc.clipId);
@@ -3882,11 +3899,11 @@ struct App {
         else if (cmd == IDM_VOICEISO_ALL) removeNonVoiceAllClips();
         else if (cmd == IDM_TIMBRE_ONE) matchTimbreClips(match::clipToLibrary(doc.project(), clipId));
         else if (cmd == IDM_TIMBRE_TL)
-            matchTimbreClips(match::timelineSet(doc.project()), pickTracks(allTrackIds()));
+            matchTimbreClips(match::timelineSet(doc.project()), TrackPick(allTrackIds()));
         else if (cmd == IDM_TIMBRE_LIB) matchTimbreClips(match::librarySet(doc.project()));
         else if (cmd == IDM_VOL_ONE) matchVolumeClips(match::clipToLibrary(doc.project(), clipId));
         else if (cmd == IDM_VOL_TL)
-            matchVolumeClips(match::timelineSet(doc.project()), pickTracks(allTrackIds()));
+            matchVolumeClips(match::timelineSet(doc.project()), TrackPick(allTrackIds()));
         else if (cmd == IDM_VOL_LIB) matchVolumeClips(match::librarySet(doc.project()));
         else if (cmd == IDM_EQ_OFF_ONE) {
             if (const Clip* c = doc.project().findClip(clipId)) removeEq({ clipId }, L"'" + c->name + L"'");

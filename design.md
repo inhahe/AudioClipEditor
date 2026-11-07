@@ -700,8 +700,10 @@ The pieces:
   menu choice is visible where the settings are chosen.
 - **`ScopeLine`** (`dialogs.cpp`) — lays that line out. It is normally the longest
   text in either dialog, so it may widen the frame (up to `ui.S(460)`), then wrap
-  onto a second line, and only then is ellipsised. `widen()` must be called before
-  anything else is measured against `contentW`.
+  onto a second line; anything longer is cut, so what matters most goes first. (No
+  `SS_ENDELLIPSIS`: on a static control it forces a single line, whatever else is
+  set, so the second line was never used.) `widen()` must be called before anything
+  else is measured against `contentW`.
 - **`voiceCleanClips(ids, scopeLabel, selectionOnly)` /
   `removeNonVoiceClips(ids, scopeLabel, selectionOnly)`** — `selectionOnly` is
   re-validated inside (single target + `selectionCovers`) rather than trusted.
@@ -1648,11 +1650,23 @@ them from drifting apart. Two things the other effect dialogs don't have:
   matched to two tracks' worth of takes. Ticking calls back into the app
   (`App::trackPicker`'s `rebuild`), which rebuilds the `ClipSet` with
   `match::tracksSet` / `match::clipToTracks` and returns the new reference list and
-  "Applies to:" text; the combo keeps the user's pick **by clip id** if it is still
-  offered, and Apply is disabled while nothing would be matched. The set the dialog
-  leaves behind is the one matched. The scope line always has room for two lines
-  here, since it changes while the dialog is open. Library-wide matches have no
-  tick-list: they aren't about tracks.
+  "Applies to:" text. The combo follows the standard the user *wants*
+  (`MDState::wantId` — preselected, or picked since): unticking that clip's track
+  drops it from the list, and ticking it again brings it back rather than leaving
+  the average the combo fell back to. Apply is disabled while nothing would be
+  matched — and the dialog checks that state itself on `IDOK`, because Enter reaches
+  `IDOK` through `IsDialogMessage` even while the button is greyed (the window class
+  doesn't answer `DM_GETDEFID`); the callers re-check `usable()` as well. The set the
+  dialog leaves behind is the one matched. The scope line always has room for two
+  lines here, and when there is nothing to match the reason goes first ("not enough
+  clips to match yet — …"), since a long label is cut at its end. Library-wide
+  matches have no tick-list: they aren't about tracks.
+
+  **Track-based entries are greyed only when no choice of tracks could help**: a
+  clip alone on its track, or a track with one clip, still opens the dialog — with
+  Apply off until another track is ticked — because the tick-list is exactly how to
+  match a pickup to the takes on another track. The track labels count clips the way
+  the match does (`trackSet(...).size()`: distinct clips with audio).
 
 ## Selftest
 

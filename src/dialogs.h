@@ -72,7 +72,9 @@ struct MatchReference {
 // match, which isn't about tracks).
 struct MatchTracks {
     std::vector<std::wstring> labels;        // one per track, e.g. "Narration (8 clips)"
-    std::vector<uint8_t> ticked;             // in/out, parallel to labels
+    std::vector<uint8_t> ticked;             // ticked to begin with, parallel to labels
+    bool usable = true;                      // whether the starting ticks give anything to
+                                             // match (Apply starts disabled if not)
     // Called whenever the ticks change, so the rest of the dialog follows: fills
     // `ref` and `scopeLabel` for the newly ticked tracks, and returns whether there
     // is anything to match (Apply is disabled while there isn't).
@@ -88,7 +90,7 @@ struct TimbreMatchContext {
                                                // (null: the option isn't offered)
     MatchReference ref;
     MatchTracks tracks;
-    std::wstring scopeLabel;                   // in/out: what Apply will act on
+    std::wstring scopeLabel;                   // what Apply will act on, to begin with
 };
 bool timbreMatch(HWND parent, TimbreMatchContext& ctx);
 
@@ -96,7 +98,7 @@ bool timbreMatch(HWND parent, TimbreMatchContext& ctx);
 struct VolumeMatchContext {
     MatchReference ref;
     MatchTracks tracks;
-    std::wstring scopeLabel;                   // in/out: what Apply will act on
+    std::wstring scopeLabel;                   // what Apply will act on, to begin with
 };
 bool volumeMatch(HWND parent, VolumeMatchContext& ctx);
 

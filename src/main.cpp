@@ -57,7 +57,11 @@ static int runDialogTest(HINSTANCE hInst, int which, bool withSelection) {
         tracks.rebuild = [ref](const std::vector<uint8_t>& t, dlg::MatchReference& r, std::wstring& s) {
             r = ref;
             int n = 0; for (uint8_t v : t) n += v;
-            s = std::to_wstring(n) + L" ticked track(s)";
+            // Long when there is nothing to match, to show the line wrapping onto
+            // its second line with the reason first.
+            s = n > 0 ? std::to_wstring(n) + L" ticked track(s)"
+                      : L"not enough clips to match yet -- the clips on tracks 'Narration "
+                        L"(second session, afternoon)' and 'Pickups recorded later that week' (1 clip)";
             return n > 0;
         };
         if (which == 5) {
