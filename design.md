@@ -102,9 +102,12 @@ scratch root (`assoc::kClassesRoot` is a parameter) and deletes it after; the
 `UserChoice` path can't be tested without changing the user's own settings.
 
 **Shown the way the launcher asked.** The saved window placement used to override
-`nCmdShow` entirely, so a shortcut set to *Run: Minimized* opened normally; a
-minimise or don't-activate request now wins over the saved show state (the saved size
-and position still apply).
+`nCmdShow` entirely, so a shortcut set to *Run: Minimized* opened normally. Now a
+minimise request wins over the saved show state but restores to it — maximized
+included (`WPF_RESTORETOMAXIMIZED`) — and a don't-activate request (`SW_SHOWNOACTIVATE`,
+`SW_SHOWNA`) shows a saved normal window without taking the focus. A saved maximized
+window stays maximized, since Windows can't show one maximized without activating it.
+The saved size and position always apply.
 
 ## Core invariants
 

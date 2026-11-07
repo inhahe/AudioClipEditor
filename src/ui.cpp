@@ -4525,12 +4525,19 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
     // Restore the last window size/position/maximized state if we have one.
     WINDOWPLACEMENT wp{};
     if (loadWindowPlacement(wp)) {
-        // The saved size and place, but shown the way the launcher asked when it
-        // asked for something particular: a shortcut set to "Run: Minimized", or a
-        // launch that mustn't take the focus.
+        // The saved size, place and maximized state, shown the way the launcher asked
+        // when it asked for something particular. Minimized ("Run: Minimized"):
+        // restores to how it was saved, maximized included. Not to be activated: a
+        // saved normal window shows without taking the focus; a saved maximized one
+        // stays maximized, which Windows can't show without activating it.
+        const bool savedMax = wp.showCmd == SW_SHOWMAXIMIZED;
         if (nCmdShow == SW_SHOWMINIMIZED || nCmdShow == SW_MINIMIZE ||
-            nCmdShow == SW_SHOWMINNOACTIVE || nCmdShow == SW_SHOWNOACTIVATE)
+            nCmdShow == SW_SHOWMINNOACTIVE) {
             wp.showCmd = (UINT)nCmdShow;
+            if (savedMax) wp.flags |= WPF_RESTORETOMAXIMIZED;
+        } else if ((nCmdShow == SW_SHOWNOACTIVATE || nCmdShow == SW_SHOWNA) && !savedMax) {
+            wp.showCmd = SW_SHOWNOACTIVATE;
+        }
         SetWindowPlacement(hwnd, &wp);
     } else {
         ShowWindow(hwnd, nCmdShow);
