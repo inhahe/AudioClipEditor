@@ -206,7 +206,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
 
   Then choose what to match to: **the average of them all** (the default — it
   moves each clip as little as possible and favours none) or one clip as the
-  standard (*Sound like 'take 2'*), when you know which take sounds right. The
+  standard (*Sound like 'take 2'*), when you know which take sounds right (two
+  clips with the same name are listed with where each one is, so you can tell
+  them apart). The
   standard itself is left exactly as it is, and the choice is remembered — and
   shared with *Match volume*, so matching tone and then level to the same take
   means picking it once. **Maximum change** caps how far any clip may be moved

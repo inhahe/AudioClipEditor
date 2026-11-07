@@ -3014,6 +3014,24 @@ int runSelfTest() {
               std::to_wstring(dcDb) + L" dB");
     }
 
+    // ---- clips that share a name can be told apart in matching's lists
+    {
+        Document d; d.init(rate);
+        const int a = d.addClip(L"take", makeSine(rate, 1.0, 300.0), L"", L"add");
+        const int b = d.addClip(L"take", makeSine(rate, 1.0, 300.0), L"", L"add");
+        const int c = d.addClip(L"other", makeSine(rate, 1.0, 300.0), L"", L"add");
+        d.placeClip(d.project().tracks[0].id, a, rate * 3 / 2, L"p");   // 1.5 s in
+        const match::ClipSet s = match::librarySet(d.project());
+        const std::wstring na = s.names[(size_t)s.indexOf(a)], nb = s.names[(size_t)s.indexOf(b)];
+        check(na == L"take (Track 1, 0:01.5)" && nb == L"take (library #2)" &&
+              s.names[(size_t)s.indexOf(c)] == L"other",
+              L"match sets: repeated names say where each clip is; unique names stay plain",
+              na + L" / " + nb);
+        const match::ClipSet one = match::clipToLibrary(d.project(), b);
+        check(one.what == L"'take (library #2)'",
+              L"match sets: ...including in what a one-clip match says it changed", one.what);
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);

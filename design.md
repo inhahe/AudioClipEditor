@@ -433,6 +433,11 @@ in tracks means, and the library also holds things that are not takes — the so
 recording a clip was cut from, an outtake, a noise sample — which would pull an
 average away from the voice. A clip placed twice is one clip with one volume and one
 tone colour, so it is counted once rather than given a double say in the average.
+**Repeated names are disambiguated** when the set is built (`disambiguate`): a clip
+whose name another clip in the set shares carries where it is — its first place on
+the timeline, *take (Narration, 0:12.3)*, or else its library position, *take
+(library #4)*. Done in the set rather than in each dialog, so the reference list,
+the summary and the undo description all name the same clip the same way.
 
 Where each shape is offered:
 

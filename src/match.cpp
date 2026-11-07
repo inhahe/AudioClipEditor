@@ -54,7 +54,37 @@ void add(ClipSet& s, const Clip* c, bool change, bool pool) {
     s.pool.push_back(pool ? 1 : 0);
 }
 
-void finishSet(ClipSet& s, const std::wstring& what) {
+// m:ss.s, for saying where on the timeline a clip sits.
+std::wstring timeText(int64_t frames, int rate) {
+    const double sec = rate > 0 ? (double)frames / rate : 0.0;
+    wchar_t b[32];
+    swprintf(b, 32, L"%d:%04.1f", (int)(sec / 60.0), sec - 60.0 * (int)(sec / 60.0));
+    return b;
+}
+
+// Clips that share a name can't be told apart in a list of names -- "Sound like
+// 'take'" twice over -- or in a summary that names them. So where a name repeats
+// within the set, each of those clips says where it is: its first place on the
+// timeline, or failing that its place in the library.
+void disambiguate(const Project& p, ClipSet& s) {
+    const std::vector<std::wstring> plain = s.names;
+    for (int i = 0; i < s.size(); ++i) {
+        if (std::count(plain.begin(), plain.end(), plain[(size_t)i]) < 2) continue;
+        std::wstring where;
+        for (const Track& t : p.tracks) {
+            for (const PlacedClip& pc : t.clips)   // sorted by start: the first is the earliest
+                if (pc.clipId == s.ids[(size_t)i]) { where = t.name + L", " + timeText(pc.startFrame, p.sampleRate); break; }
+            if (!where.empty()) break;
+        }
+        if (where.empty())
+            for (size_t k = 0; k < p.library.size(); ++k)
+                if (p.library[k].id == s.ids[(size_t)i]) { where = L"library #" + std::to_wstring(k + 1); break; }
+        s.names[(size_t)i] = plain[(size_t)i] + L" (" + where + L")";
+    }
+}
+
+void finishSet(const Project& p, ClipSet& s, const std::wstring& what) {
+    disambiguate(p, s);
     s.what = what;
     s.label = what + L" (" + clipCount(s.size()) + L")";
 }
@@ -69,10 +99,11 @@ ClipSet oneToRest(const Project& p, int clipId, const std::vector<const Clip*>& 
     if (s.size() == 0) return s;   // no audio: nothing to match
     for (const Clip* c : others)
         if (c && c->id != clipId) add(s, c, false, true);
+    disambiguate(p, s);
     const int n = s.poolCount();
-    s.what = quoted(subject->name);
+    s.what = quoted(s.names[0]);
     s.others = (n == 1 ? std::wstring(L"the other clip") : L"the other " + clipCount(n)) + where;
-    s.label = quoted(subject->name) + L" only, matched to " + s.others;
+    s.label = quoted(s.names[0]) + L" only, matched to " + s.others;
     return s;
 }
 
@@ -83,7 +114,7 @@ ClipSet trackSet(const Project& p, int trackId) {
     const Track* t = p.findTrack(trackId);
     if (!t) return s;
     for (const PlacedClip& pc : t->clips) add(s, p.findClip(pc.clipId), true, true);
-    finishSet(s, L"track " + quoted(t->name));
+    finishSet(p, s, L"track " + quoted(t->name));
     return s;
 }
 
@@ -91,14 +122,14 @@ ClipSet timelineSet(const Project& p) {
     ClipSet s;
     for (const Track& t : p.tracks)
         for (const PlacedClip& pc : t.clips) add(s, p.findClip(pc.clipId), true, true);
-    finishSet(s, L"the clips on all tracks");
+    finishSet(p, s, L"the clips on all tracks");
     return s;
 }
 
 ClipSet librarySet(const Project& p) {
     ClipSet s;
     for (const Clip& c : p.library) add(s, &c, true, true);
-    finishSet(s, L"all clips");
+    finishSet(p, s, L"all clips");
     return s;
 }
 

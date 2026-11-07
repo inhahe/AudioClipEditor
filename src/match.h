@@ -35,7 +35,10 @@ namespace match {
 // out of its own average; otherwise matching it would only move it part of the way.
 struct ClipSet {
     std::vector<int> ids;               // display order, no duplicates, all with audio
-    std::vector<std::wstring> names;    // parallel to ids
+    // Parallel to ids. A name that repeats within the set carries where that clip
+    // is -- "take (Narration, 0:12.3)", "take (library #4)" -- so lists and
+    // summaries never offer two indistinguishable entries.
+    std::vector<std::wstring> names;
     std::vector<uint8_t> change;        // 1 = matched: its volume or audio is rewritten
     std::vector<uint8_t> pool;          // 1 = in the average, and may be the reference
     std::wstring what;                  // the clips that change: "track 'Voice'", "'take 5'"
