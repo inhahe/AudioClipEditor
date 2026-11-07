@@ -328,7 +328,8 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   files back to whatever opened them before. If you once told Windows to *Always*
   open `.acep` files with something else, that choice comes first; the app tells you
   when this happens and how to switch it, and clicking the item again then offers to
-  remove the app's registration instead. You can also open a
+  remove the app's registration instead. While it's ticked, project files show the
+  app's project icon (a page with the microphone). You can also open a
   project, or add audio files as clips, from the command line or by dropping them
   onto `AudioClipEditor.exe`: `AudioClipEditor.exe "My show.acep" "pickup 3.wav"`
   opens the project and adds the WAV to it. If the app is already running, the files
@@ -401,14 +402,17 @@ of clips, audition them, trim/crop, and arrange them on tracks.
 
 ## Building
 
-Requires Visual Studio 2022 (MSVC) + Windows 10 SDK and CMake.
+Requires Visual Studio 2022 or later (MSVC, the Build Tools will do) with a Windows
+10/11 SDK, and CMake. Without `-G`, CMake uses the newest Visual Studio it finds.
 
 ```sh
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake -S . -B build -A x64
 cmake --build build --config Release
 ```
 
-The executable is written to `bin/AudioClipEditor.exe`.
+The executable is written to `bin/AudioClipEditor.exe`. The icons are built from
+`art/` by `python art/make_icon.py` (needs Pillow and skia-python), but the `.ico`
+files are committed, so a normal build doesn't need that.
 
 Run the headless backend self-test (decode/encode/peaks round-trip) with:
 
@@ -499,6 +503,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `placement.h` | How the main window first appears: as it was when last closed, or as a shortcut's *Run* setting asks |
 | `handoff.{h,cpp}` | Handing files you open to the copy of the app that is already running |
 | `assoc.{h,cpp}` | The per-user `.acep` file association (File ▸ Open .acep projects with this app…) |
+| `resources.rc`, `app.ico`, `project.ico` | The manifest and the icons (the program's, and the one `.acep` files show); `art/make_icon.py` builds the icons |
 | `selftest.cpp` | `--selftest` backend round-trip checks (decode/encode/peaks/DSP) |
 
 All audio is decoded to the project's internal rate (**max(48 kHz, device mix
@@ -512,3 +517,7 @@ conversion for output happens at export time.
 
 MIT - see [LICENSE](LICENSE). Free to use, modify and redistribute; provided
 as-is, with no warranty.
+
+The icon is made from the "studio microphone" of Google's
+[Noto Emoji](https://github.com/googlefonts/noto-emoji), under the Apache License 2.0;
+see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

@@ -14,6 +14,7 @@
 #include "layout.h"
 #include "match.h"
 #include "placement.h"
+#include "resource.h"
 #include "transport.h"
 #include "selhistory.h"
 #include "snap.h"
@@ -3561,11 +3562,11 @@ int runSelfTest() {
         RegSetKeyValueW(HKEY_CURRENT_USER, (root + L"\\.acep").c_str(), nullptr, REG_SZ,
                         before.c_str(), (DWORD)((before.size() + 1) * sizeof(wchar_t)));
         const bool reg2 = assoc::registerProjects(root, exe) && assoc::registerProjects(root, exe);
-        HKEY icon = nullptr;
-        const bool noIcon = RegOpenKeyExW(HKEY_CURRENT_USER,
-                                          (root + L"\\" + assoc::kProgId + L"\\DefaultIcon").c_str(),
-                                          0, KEY_READ, &icon) == ERROR_FILE_NOT_FOUND;
-        if (icon) RegCloseKey(icon);
+        wchar_t iconValue[512]{}; DWORD isize = sizeof(iconValue);
+        const bool iconRegistered =
+            RegGetValueW(HKEY_CURRENT_USER, (root + L"\\" + assoc::kProgId + L"\\DefaultIcon").c_str(),
+                         nullptr, RRF_RT_REG_SZ, nullptr, iconValue, &isize) == ERROR_SUCCESS &&
+            assoc::projectIcon(exe) == iconValue;
         const bool unreg2 = assoc::unregisterProjects(root);
         wchar_t back[256]{}; DWORD bsize = sizeof(back);
         const bool restored = RegGetValueW(HKEY_CURRENT_USER, (root + L"\\.acep").c_str(), nullptr,
@@ -3573,7 +3574,27 @@ int runSelfTest() {
                               before == back;
         check(reg2 && unreg2 && restored,
               L"assoc: unregistering hands .acep back to what it opened with before", back);
-        check(noIcon, L"assoc: no icon is registered (the program has none to point at)");
+        check(iconRegistered, L"assoc: projects are given the project icon", iconValue);
+
+        // The icon string reads back, the way the shell reads DefaultIcon, as this exe and
+        // the project icon's resource id -- and this exe has both icons, the program's
+        // first (what Explorer shows for the exe), so the one named can be loaded.
+        const std::wstring self = exePath();
+        std::wstring parsed = assoc::projectIcon(self);
+        parsed.push_back(L'\0');
+        const int index = PathParseIconLocationW(&parsed[0]);
+        PathUnquoteSpacesW(&parsed[0]);
+        const bool readsBack = index == -IDI_PROJECT && _wcsicmp(parsed.c_str(), self.c_str()) == 0;
+        const UINT icons = ExtractIconExW(self.c_str(), -1, nullptr, nullptr, 0);
+        HICON bigIcon = nullptr, smallIcon = nullptr;
+        const UINT got = ExtractIconExW(self.c_str(), -IDI_PROJECT, &bigIcon, &smallIcon, 1);
+        const bool loads = got > 0 && bigIcon && smallIcon;
+        if (bigIcon) DestroyIcon(bigIcon);
+        if (smallIcon) DestroyIcon(smallIcon);
+        HRSRC first = FindResourceW(nullptr, MAKEINTRESOURCEW(IDI_APP), RT_GROUP_ICON);
+        check(readsBack && icons == 2 && loads && first,
+              L"assoc: the project icon's location reads back as this exe and its id, and loads from it",
+              assoc::projectIcon(self) + L" (" + std::to_wstring(icons) + L" icons)");
         RegDeleteTreeW(HKEY_CURRENT_USER, top.c_str());
     }
 

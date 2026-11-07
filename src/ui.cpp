@@ -13,6 +13,7 @@
 #include "layout.h"
 #include "match.h"
 #include "placement.h"
+#include "resource.h"
 #include "transport.h"
 #include "selhistory.h"
 #include "snap.h"
@@ -4407,6 +4408,27 @@ struct App {
 static App* g_app = nullptr;
 static void saveWindowPlacement(HWND hwnd);   // defined below (registry persistence)
 
+// The window's title-bar and taskbar icons, at the sizes the DPI of the monitor it is
+// on calls for -- set again when it moves to one with another (WM_DPICHANGED), since
+// the class icon is one size for the whole session. `release` only takes them back
+// (the window is going), and destroys them: WM_SETICON doesn't copy an icon, so the
+// window's icons must outlive their use and are the caller's to free.
+static void setWindowIcons(HWND hwnd, bool release = false) {
+    HICON smallIcon = nullptr, bigIcon = nullptr;
+    if (!release) {
+        const UINT dpi = GetDpiForWindow(hwnd);
+        const HINSTANCE inst = GetModuleHandleW(nullptr);
+        LoadIconWithScaleDown(inst, MAKEINTRESOURCEW(IDI_APP), GetSystemMetricsForDpi(SM_CXSMICON, dpi),
+                              GetSystemMetricsForDpi(SM_CYSMICON, dpi), &smallIcon);
+        LoadIconWithScaleDown(inst, MAKEINTRESOURCEW(IDI_APP), GetSystemMetricsForDpi(SM_CXICON, dpi),
+                              GetSystemMetricsForDpi(SM_CYICON, dpi), &bigIcon);
+    }
+    const HICON oldSmall = (HICON)SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)smallIcon);
+    const HICON oldBig = (HICON)SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)bigIcon);
+    if (oldSmall) DestroyIcon(oldSmall);
+    if (oldBig) DestroyIcon(oldBig);
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     App* a = (App*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     // Counted for App::readyForLaunch, whichever way this call returns.
@@ -4442,6 +4464,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         a->setTitle();
         a->computeLayout();
         a->makeTooltips();
+        setWindowIcons(hwnd);
         SetTimer(hwnd, 1, 33, nullptr);    // idle rate; onTimer speeds it up while playing
         return 0;
     }
@@ -4456,6 +4479,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_DPICHANGED: {
         a->sc = LOWORD(wp) / 96.0f; a->makeFonts();
+        setWindowIcons(hwnd);
         RECT* pr = (RECT*)lp;
         SetWindowPos(hwnd, nullptr, pr->left, pr->top, pr->right - pr->left, pr->bottom - pr->top,
             SWP_NOZORDER | SWP_NOACTIVATE);
@@ -4517,7 +4541,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (a && !a->confirmDiscardChanges()) return 0;  // user cancelled exit
         DestroyWindow(hwnd);
         return 0;
-    case WM_DESTROY: saveWindowPlacement(hwnd); PostQuitMessage(0); return 0;
+    case WM_DESTROY: saveWindowPlacement(hwnd); setWindowIcons(hwnd, true); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -4752,6 +4776,11 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
     wc.style = CS_DBLCLKS;   // deliver WM_LBUTTONDBLCLK (needed for the clip editor)
     wc.lpfnWndProc = WndProc; wc.hInstance = hInst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    // Shared icons (LoadIcon, LoadImage with LR_SHARED), for anything that asks the
+    // class; the window itself carries DPI-sized ones (setWindowIcons).
+    wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP));
+    wc.hIconSm = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+                                   GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED);
     wc.lpszClassName = kMainClass;
     RegisterClassExW(&wc);
 

@@ -1,3 +1,7 @@
 #include <windows.h>
+#include "resource.h"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
+
+IDI_APP     ICON "app.ico"
+IDI_PROJECT ICON "project.ico"

@@ -1,4 +1,5 @@
 #include "dialogs.h"
+#include "resource.h"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellscalingapi.h>
@@ -1226,6 +1227,8 @@ WaitChoice waitForOtherCopy(const std::wstring& message, const std::function<boo
     if (!reg) {
         WNDCLASSW wc{}; wc.lpfnWndProc = WaitProc; wc.hInstance = hInst;
         wc.hCursor = LoadCursor(nullptr, IDC_APPSTARTING);
+        // It has no owner, so it has a taskbar button of its own.
+        wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP));
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         wc.lpszClassName = L"ACE_Wait";
         reg = RegisterClassW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;

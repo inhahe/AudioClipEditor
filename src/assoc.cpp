@@ -1,4 +1,5 @@
 #include "assoc.h"
+#include "resource.h"
 #include <windows.h>
 #include <shlwapi.h>
 
@@ -53,6 +54,10 @@ std::wstring openCommand(const std::wstring& exe) {
     return L"\"" + exe + L"\" \"%1\"";
 }
 
+std::wstring projectIcon(const std::wstring& exe) {
+    return L"\"" + exe + L"\",-" + std::to_wstring(IDI_PROJECT);
+}
+
 bool projectsOpenWith(const std::wstring& root, const std::wstring& exe) {
     return getString(extKey(root), nullptr) == kProgId &&
            _wcsicmp(getString(progKey(root) + L"\\shell\\open\\command", nullptr).c_str(),
@@ -86,6 +91,7 @@ bool registerProjects(const std::wstring& root, const std::wstring& exe) {
     bool ok = setString(progKey(root), nullptr, L"Audio Clip Editor project");
     if (!before.empty() && before != kProgId) ok = setString(progKey(root), kPreviousValue, before) && ok;
     ok = setString(progKey(root) + L"\\shell\\open\\command", nullptr, openCommand(exe)) && ok;
+    ok = setString(progKey(root) + L"\\DefaultIcon", nullptr, projectIcon(exe)) && ok;
     ok = setString(extKey(root), nullptr, kProgId) && ok;
     ok = setValue(extKey(root) + L"\\OpenWithProgids", kProgId, REG_NONE, nullptr, 0) && ok;
     // Half an association is worse than none: the menu could show it working next to

@@ -17,6 +17,10 @@ constexpr const wchar_t* kPreviousValue = L"PreviousDefault";
 // The command Explorer runs to open a project with `exe`: `"exe" "%1"`.
 std::wstring openCommand(const std::wstring& exe);
 
+// Where Explorer finds the icon project files show: the project icon in `exe`, by its
+// resource id (`"exe",-2`, IDI_PROJECT), so the icons' order in the exe doesn't matter.
+std::wstring projectIcon(const std::wstring& exe);
+
 // Whether the registration under `root` points .acep at `exe` (this copy of the app).
 // Not the same as what a double-click does: see projectsOpenHere.
 bool projectsOpenWith(const std::wstring& root, const std::wstring& exe);

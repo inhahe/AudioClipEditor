@@ -30,6 +30,7 @@ sync with behavior changes.
 | `launch.h` | What a command line asks to open — `.acep` files are projects, tried in order, other files are clips to add, `--` switches are skipped — and the helpers around it: whether two paths are the same file (`sameFile`), and a list of files written back out as a command line (`commandLine`) |
 | `placement.h` | Pure: how the main window first appears — the placement saved when it last closed, shown the way the launcher's `nCmdShow` asks (`startupPlacement`) |
 | `handoff.{h,cpp}` | Handing a command line to the copy already running, exactly once: the ticket (files and a claim-or-abandon flag in a named file mapping) and the registered message that names it |
+| `resources.rc`, `resource.h`, `app.ico`, `project.ico` | The manifest and the two icons, the program's first (`IDI_APP`, `IDI_PROJECT`). The `.ico` files are built by `art/make_icon.py` from the Noto Emoji microphone in `art/` (Apache 2.0, `THIRD-PARTY-NOTICES.md`) and committed, so a build needs nothing extra |
 | `assoc.{h,cpp}` | The per-user `.acep` file association under `HKEY_CURRENT_USER\Software\Classes`: register / unregister / "is it this copy?" |
 | `selftest.cpp` | Headless `--selftest`: decode/encode round-trips, DSP checks, writes `bin/selftest.log` |
 
@@ -198,7 +199,9 @@ double-clicked* — because it changes how Windows behaves outside the app.
 `assoc::registerProjects` writes a ProgID (`AudioClipEditor.Project`: a description and
 `shell\open\command` = `"exe" "%1"`), points `.acep` at it, and lists it under
 `.acep\OpenWithProgids`, all under `HKEY_CURRENT_USER`: no administrator rights, no
-other user affected. No `DefaultIcon`: the exe has no icon resource to point at. It
+other user affected. Project files get the project icon, a page with the microphone, so
+they don't look like the program (`DefaultIcon` = `"exe",-2`: by resource id, not by
+position, so the icons' order in the exe can't change which one is shown). It
 remembers what `.acep` opened with before (`PreviousDefault` under the ProgID — not
 overwritten by registering twice), and it is all or nothing: if any write fails, what
 was written is taken out again, so the menu can never show it working next to a
@@ -206,6 +209,17 @@ message saying it didn't. `unregisterProjects` removes the ProgID and hands `.ac
 back to what it opened with before (or clears it), but only if `.acep` still names our
 ProgID — an app that has claimed it since keeps its claim — and removes keys only once
 they are empty. Writes go through `RegSetKeyValueW`, which creates the key as needed.
+
+**The icon** (`resources.rc`): the program's is the first icon resource, which is
+what Explorer shows for the exe. The window carries copies sized for its monitor's DPI
+(`setWindowIcons`: `LoadIconWithScaleDown` at `GetSystemMetricsForDpi`), set on
+creation and again on `WM_DPICHANGED`, since the class icon is one size for the whole
+session; `WM_SETICON` doesn't copy an icon, so the ones replaced, and the last ones on
+`WM_DESTROY`, are destroyed. The waiting window of a copy handing files over has its
+own taskbar button, having no owner, so its class gets the icon too. The `.ico` files
+hold 16–256 px, each rendered from the vector artwork (`art/make_icon.py`): 32-bit
+bitmaps below 256, PNG at 256. The project icon's microphone takes a larger share of
+the page below 32 px, where the page's edges take up more of it.
 
 **Recent projects** (`SHAddToRecentDocs`, from `App::setProjectPath`, so on every
 open and save). That one call feeds Explorer's recent files and the *Recent* category of
@@ -2136,8 +2150,11 @@ registry root: nothing registered to begin with; registering makes `.acep` open 
 this copy and not another; the open command quotes program and file; unregistering
 stops it and leaves no empty keys; and with another app's claim on `.acep` made after
 ours, unregistering removes our ProgID but leaves its claim; with an earlier handler
-in place, unregistering (after registering twice) hands `.acep` back to it; and no
-icon is registered. The main window opened
+in place, unregistering (after registering twice) hands `.acep` back to it; projects
+are given the project icon; and that icon's location reads back, the way the shell
+reads it (`PathParseIconLocation`, `PathUnquoteSpaces`), as this exe and resource id
+−2, and loads from the exe, which holds two icons (built without them, both checks
+fail). The main window opened
 from a command line was checked by rendering it (`PrintWindow`, launched without
 activation): the project's EQ tags, and after an undo the two-line message and the
 History badge. The hand-off was checked live, with no other copy running: a second
