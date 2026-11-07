@@ -3478,15 +3478,19 @@ int runSelfTest() {
     // whichever side wins the ticket. Sender and receiver are this one process here.
     {
         const std::vector<std::wstring> files = { L"C:\\Takes\\show.acep", L"D:\\b 2.wav" };
+        // Stand-ins for the receiving copies' windows: only compared, never used.
+        const HWND first = (HWND)(ULONG_PTR)0x1234, second = (HWND)(ULONG_PTR)0x5678;
         handoff::Ticket t(files);
-        const auto got = handoff::claim(t.wparam(), t.lparam());
-        const auto again = handoff::claim(t.wparam(), t.lparam());
-        check(t.valid() && got && *got == files && !again && t.claimed() && !t.abandon(),
-              L"handoff: the receiver gets the files once; a second message for the ticket gets nothing, "
-              L"and the sender can no longer take them back");
+        const bool before = t.claimant() == nullptr;
+        const auto got = handoff::claim(t.wparam(), t.lparam(), first);
+        const auto again = handoff::claim(t.wparam(), t.lparam(), second);
+        check(t.valid() && before && got && *got == files && !again && t.claimant() == first &&
+                  !t.abandon(),
+              L"handoff: the first copy to claim gets the files and is named as the one that took them; "
+              L"a second message for the ticket gets nothing, and the sender can no longer take them back");
         handoff::Ticket u(files);
         const bool gaveUp = u.abandon();
-        check(u.valid() && !u.claimed() && gaveUp && !handoff::claim(u.wparam(), u.lparam()),
+        check(u.valid() && !u.claimant() && gaveUp && !handoff::claim(u.wparam(), u.lparam(), first),
               L"handoff: once the sender stops waiting, a message arriving late is refused");
         WPARAM gonePid; LPARAM goneSerial;
         {
@@ -3494,9 +3498,12 @@ int runSelfTest() {
             gonePid = v.wparam(); goneSerial = v.lparam();
         }
         handoff::Ticket w(files);
-        check(!handoff::claim(gonePid, goneSerial) && !handoff::claim(w.wparam(), w.lparam() + 1) &&
-                  !handoff::claim(0, w.lparam()) && !w.claimed(),
-              L"handoff: a ticket whose sender has gone, or that never existed, gives nothing");
+        check(!handoff::claim(gonePid, goneSerial, first) &&
+                  !handoff::claim(w.wparam(), w.lparam() + 1, first) &&
+                  !handoff::claim(0, w.lparam(), first) && !handoff::claim(w.wparam(), w.lparam(), nullptr) &&
+                  !w.claimant(),
+              L"handoff: a ticket whose sender has gone, or that never existed, gives nothing; nor does a "
+              L"claim without a window");
         check(handoff::message() != 0, L"handoff: the message is registered");
     }
 

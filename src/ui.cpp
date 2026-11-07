@@ -4416,7 +4416,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // unsaved changes. A request of its own rather than added to one waiting, so it is
     // opened as the double-click it was.
     if (a && msg != 0 && msg == handoff::message()) {
-        std::optional<std::vector<std::wstring>> files = handoff::claim(wp, lp);
+        std::optional<std::vector<std::wstring>> files = handoff::claim(wp, lp, hwnd);
         if (!files || files->empty()) return FALSE;   // not ours: already taken, or given up on
         a->launchQueue.push_back(std::move(*files));
         // Wakes the main loop, which a sent message doesn't (GetMessage handles it
@@ -4642,6 +4642,9 @@ static HandOff handToRunningCopy(const std::vector<std::wstring>& files, Startup
         handoff::Ticket ticket(files);
         if (!msg || !ticket.valid()) return HandOff::OpenHere;
         lock.release();   // not held while waiting for an answer, which can take a while
+        // Every copy is offered them before any is waited for: a busy one in front
+        // mustn't keep a free one behind it from taking them at once.
+        std::vector<HWND> busy;   // timed out, with the ticket posted to them
         for (HWND other : copies) {
             DWORD_PTR answer = 0;
             SetLastError(ERROR_SUCCESS);
@@ -4649,26 +4652,34 @@ static HandOff handToRunningCopy(const std::vector<std::wstring>& files, Startup
                                     kQuietWaitMs, &answer)) {
                 if (answer == TRUE) { bringForward(other); return HandOff::Taken; }
                 refused.push_back(other);   // an older build, which doesn't know the message
-                continue;
-            }
-            if (GetLastError() != ERROR_TIMEOUT) {   // never reached it: elevated, or closed
+            } else if (GetLastError() != ERROR_TIMEOUT) {   // never reached it: elevated, or closed
                 refused.push_back(other);
-                continue;
+            } else if (PostMessageW(other, msg, ticket.wparam(), ticket.lparam())) {
+                // Busy. Windows drops the sent message now that this has stopped
+                // waiting for it, so it is posted too: that one waits in the queue until
+                // the copy is free.
+                busy.push_back(other);
+            } else {
+                refused.push_back(other);   // its queue won't take it: nothing to wait for
             }
-            // Busy. Windows drops the sent message now that this has stopped waiting
-            // for it, so it is posted too: that one waits in the queue until the copy
-            // is free. The ticket says whether it took them.
-            PostMessageW(other, msg, ticket.wparam(), ticket.lparam());
+            // A busy one may have got to it while the next was tried.
+            if (HWND by = ticket.claimant()) { bringForward(by); return HandOff::Taken; }
+        }
+        if (!busy.empty()) {
+            auto allGone = [&] {
+                for (HWND w : busy) if (IsWindow(w)) return false;
+                return true;
+            };
             const dlg::WaitChoice c = dlg::waitForOtherCopy(
                 L"Audio Clip Editor is busy in another window. " + describeFiles(files) +
                     L" will open there as soon as it has finished.\n\nOpening in a new window "
                     L"instead could put a project in two windows, each saving over the other.",
-                [&] { return ticket.claimed() || !IsWindow(other); });
-            // Whatever was chosen, it may have taken them in the meantime.
-            if (!ticket.abandon()) { bringForward(other); return HandOff::Taken; }
+                [&] { return ticket.claimant() != nullptr || allGone(); });
+            // Whatever was chosen, one may have taken them in the meantime.
+            if (!ticket.abandon()) { bringForward(ticket.claimant()); return HandOff::Taken; }
             if (c == dlg::WaitChoice::Cancel) return HandOff::Cancelled;
             if (c == dlg::WaitChoice::OpenHere) { lock.acquire(0); return HandOff::OpenHere; }
-            break;   // it closed without taking them
+            // They all closed without taking them.
         }
         // None of these took them. Look again: another copy may be starting, or running.
         if (auto stop = waitForStartup()) return *stop;

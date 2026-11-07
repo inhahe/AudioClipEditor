@@ -36,8 +36,9 @@ public:
     // What the message carries: this process's id, and a serial no other ticket has had.
     WPARAM wparam() const { return (WPARAM)pid; }
     LPARAM lparam() const { return serial; }
-    // Whether the receiver has taken the request.
-    bool claimed() const;
+    // The window of the copy that has taken the request; null while none has. The
+    // ticket can be posted to several busy copies at once, and this says which won.
+    HWND claimant() const;
     // Stop waiting. True if the request is now the sender's to open (the receiver will
     // refuse it), false if the receiver had already claimed it.
     bool abandon();
@@ -48,9 +49,10 @@ private:
     LPARAM serial = 0;
 };
 
-// The receiver's side, given the message's wParam and lParam. The request's files if
-// it is now this copy's to open; nothing if its sender gave up on it or has gone, it
-// was claimed already (a second message for it), or the message names no ticket.
-std::optional<std::vector<std::wstring>> claim(WPARAM wp, LPARAM lp);
+// The receiver's side, given the message's wParam and lParam, and its own main window
+// (`by`, which must not be null), which the sender brings forward. The request's files
+// if it is now this copy's to open; nothing if its sender gave up on it or has gone,
+// it was claimed already (a second message for it), or the message names no ticket.
+std::optional<std::vector<std::wstring>> claim(WPARAM wp, LPARAM lp, HWND by);
 
 } // namespace handoff

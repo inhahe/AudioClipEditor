@@ -54,9 +54,11 @@ any file that won't decode — several can arrive at once.
   second copy where each would save over the other without a word. Started *without*
   files, a second copy opens normally.
   - **The request is a ticket** (`handoff.h`): a named file mapping holding the files
-    (absolute paths, NUL-separated) and a flag that the receiver claims and the sender
-    may abandon, whichever comes first (`InterlockedCompareExchange`); only the winner
-    opens the files. The message — the registered `AudioClipEditor.HandOff`, whose
+    (absolute paths, NUL-separated) and a 64-bit flag that the receiver claims and the
+    sender may abandon, whichever comes first (`InterlockedCompareExchange64`); only
+    the winner opens the files. A claim writes the claimant's window into the flag
+    (0 is waiting, −1 abandoned), so a sender that posted the ticket to several busy
+    copies knows which one to bring forward. The message — the registered `AudioClipEditor.HandOff`, whose
     `wParam` and `lParam` are the sender's process id and a serial, which together name
     the mapping — carries nothing else. It is *sent* first, so a free copy answers at
     once and one that doesn't know the message (an older build) says no at once, and
@@ -66,12 +68,18 @@ any file that won't decode — several can arrive at once.
     claims the ticket, copies the files out (reading the length once, and believing it
     only as far as the mapping goes), queues them and posts itself `WM_APP_LAUNCH`,
     since a sent message doesn't wake the main loop.
-  - **A busy copy is waited for.** When the send times out (`kQuietWaitMs`, 1.5 s), the
-    message is also *posted*: Windows drops a sent message whose sender has stopped
-    waiting for it, so without that the busy copy would never see the request (seen
-    live: frozen, then thawed, it never opened the project), while a posted one waits
-    in its queue until it is free. If both arrive, the second finds the ticket claimed
-    and is refused. Meanwhile a small window (`dlg::waitForOtherCopy`, centred on the
+  - **A busy copy is waited for — once every copy has been offered the files.** When
+    the send times out (`kQuietWaitMs`, 1.5 s), the message is also *posted*: Windows
+    drops a sent message whose sender has stopped waiting for it, so without that the
+    busy copy would never see the request (seen live: frozen, then thawed, it never
+    opened the project), while a posted one waits in its queue until it is free. If
+    both arrive, the second finds the ticket claimed and is refused. A copy whose
+    queue won't take the post is passed over: nothing would ever arrive. Only after
+    the last copy has been tried does the sender wait, on all the busy ones at once:
+    a busy copy in front used to be waited on before a free one behind it was even
+    offered the files (seen live: with the front copy frozen, the new copy waited
+    while the copy behind sat idle; now that one opens them at once, and the frozen
+    one, thawed, finds the ticket taken). Meanwhile a small window (`dlg::waitForOtherCopy`, centred on the
     monitor under the pointer, since this copy has no window of its own) says what it
     is waiting for and closes by itself once the ticket is claimed, offering *Open in
     a new window* (not on Enter: it is the choice that can put a project in two
@@ -2129,10 +2137,11 @@ the first was thawed it opened the project there and exited — before, it opene
 project itself; with the frozen copy killed instead, the waiting one opened it.
 
 **Handing over** (4 checks, `handoff`, sender and receiver in one process): the
-receiver gets the files once, a second message for the same ticket gets nothing, and
-the sender can then no longer take them back; once the sender stops waiting, a message
+first copy to claim gets the files and is named as the one that took them, a second
+message for the same ticket gets nothing, and the sender can then no longer take them
+back; once the sender stops waiting, a message
 arriving late is refused; a ticket whose sender has gone, or that never existed, gives
-nothing; the message is registered. A claim that ignores the flag fails the first two.
+nothing, nor does a claim without a window; the message is registered. A claim that ignores the flag fails the first two.
 Live, with the running copy frozen: after 1.5 s the new copy shows its waiting window;
 thawed, the running copy opens the project and the waiting copy exits (with the
 earlier sent-only message it never did); *Open in a new window* opens it in the new

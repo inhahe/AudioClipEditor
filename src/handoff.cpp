@@ -6,7 +6,9 @@ namespace handoff {
 
 namespace {
 
-enum : LONG { kWaiting = 0, kClaimed = 1, kAbandoned = 2 };
+// The flag: waiting, abandoned, or else the claimant's window (never 0 or -1).
+constexpr LONG64 kWaiting = 0;
+constexpr LONG64 kAbandoned = -1;
 
 std::wstring ticketName(DWORD pid, LPARAM serial) {
     return L"Local\\AudioClipEditor.HandOff." + std::to_wstring(pid) + L"." +
@@ -15,9 +17,10 @@ std::wstring ticketName(DWORD pid, LPARAM serial) {
 
 } // namespace
 
-// The shared memory: the flag, then the files, each NUL-terminated.
+// The shared memory: the flag (first, so 8-byte aligned for the interlocked
+// operations), then the files, each NUL-terminated.
 struct TicketMemory {
-    volatile LONG state;
+    volatile LONG64 state;
     DWORD chars;        // wchar_t in `text`
     wchar_t text[1];
 };
@@ -52,7 +55,7 @@ Ticket::Ticket(const std::vector<std::wstring>& files) {
     shared->chars = (DWORD)text.size();
     std::memcpy(shared->text, text.data(), text.size() * sizeof(wchar_t));
     shared->text[text.size()] = L'\0';
-    InterlockedExchange(&shared->state, kWaiting);   // a full barrier: the files first
+    InterlockedExchange64(&shared->state, kWaiting);   // a full barrier: the files first
 }
 
 Ticket::~Ticket() {
@@ -60,17 +63,21 @@ Ticket::~Ticket() {
     if (mapping) CloseHandle(mapping);
 }
 
-bool Ticket::claimed() const {
-    return shared && InterlockedCompareExchange(&shared->state, kWaiting, kWaiting) == kClaimed;
+HWND Ticket::claimant() const {
+    if (!shared) return nullptr;
+    const LONG64 s = InterlockedCompareExchange64(&shared->state, kWaiting, kWaiting);
+    return s == kWaiting || s == kAbandoned ? nullptr : (HWND)(ULONG_PTR)s;
 }
 
 bool Ticket::abandon() {
     if (!shared) return true;
-    return InterlockedCompareExchange(&shared->state, kAbandoned, kWaiting) != kClaimed;
+    const LONG64 was = InterlockedCompareExchange64(&shared->state, kAbandoned, kWaiting);
+    return was == kWaiting || was == kAbandoned;
 }
 
-std::optional<std::vector<std::wstring>> claim(WPARAM wp, LPARAM lp) {
-    if (wp == 0 || wp > MAXDWORD) return std::nullopt;
+std::optional<std::vector<std::wstring>> claim(WPARAM wp, LPARAM lp, HWND by) {
+    const LONG64 mine = (LONG64)(ULONG_PTR)by;
+    if (wp == 0 || wp > MAXDWORD || mine == kWaiting || mine == kAbandoned) return std::nullopt;
     HANDLE m = OpenFileMappingW(FILE_MAP_WRITE, FALSE, ticketName((DWORD)wp, lp).c_str());
     if (!m) return std::nullopt;   // its sender has gone, or there is no such ticket
     std::optional<std::vector<std::wstring>> files;
@@ -82,7 +89,7 @@ std::optional<std::vector<std::wstring>> claim(WPARAM wp, LPARAM lp) {
     if (s && VirtualQuery(s, &mbi, sizeof(mbi)) &&
         mbi.RegionSize >= offsetof(TicketMemory, text) &&
         (mbi.RegionSize - offsetof(TicketMemory, text)) / sizeof(wchar_t) >= chars &&
-        InterlockedCompareExchange(&s->state, kClaimed, kWaiting) == kWaiting) {
+        InterlockedCompareExchange64(&s->state, mine, kWaiting) == kWaiting) {
         files.emplace();
         const wchar_t* p = s->text;
         for (size_t i = 0; i < chars; ) {
