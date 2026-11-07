@@ -118,7 +118,9 @@ public:
     // lives on the engine's own audio thread, in COM's multithreaded apartment: the
     // calling (UI) thread is a single-threaded one, and objects created there could
     // not be used from the audio thread without marshalling. Waits until the device
-    // is open; false (with the reason in `err`) if it couldn't be.
+    // is open; false (with the reason in `err`) if it couldn't be. Until it is, and
+    // after a failed init or shutdown, every other call is a quiet no-op (nothing
+    // plays, nothing is playing, position 0): the app goes on without sound.
     bool init(std::wstring* err = nullptr);
     void shutdown();
 

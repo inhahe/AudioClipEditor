@@ -1426,6 +1426,23 @@ int runSelfTest() {
               std::to_wstring(p.sourceAt(720)));
     }
 
+    // ---- an engine with no device: never opened, or init failed (no output device).
+    // The app keeps running with it ("Playback will be silent"), and its timer asks
+    // isPlaying() every 33 ms from the moment the window exists, so every call has to
+    // be a quiet no-op.
+    {
+        PlaybackEngine idle;
+        auto tone = makeSine(48000, 0.1, 440.0);
+        idle.setSourceRate(48000);
+        idle.play(std::make_shared<BufferSource>(tone, 0, tone->frames()), 0);
+        idle.pause(); idle.resume(); idle.seek(100);
+        const bool quiet = !idle.isPlaying() && !idle.isPaused() && !idle.hasSource() &&
+                           idle.position() == 0 && idle.total() == 0 && idle.posDiag().recCount == 0;
+        idle.stop();
+        idle.shutdown();
+        check(quiet, L"playback engine without a device: every call is a quiet no-op");
+    }
+
     // ---- playback position, end to end through a real device
     // RenderTimeline above covers the arithmetic; this covers the wiring that
     // feeds it -- the audio clock's frequency units and the QPC extrapolation,

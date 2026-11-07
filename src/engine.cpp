@@ -399,6 +399,7 @@ void PlaybackEngine::renderLoop() {
 }
 
 void PlaybackEngine::play(std::shared_ptr<IPlaybackSource> src, int64_t startFrame) {
+    if (!d_) return;
     std::lock_guard<std::mutex> lk(d_->mtx);
     d_->source = std::move(src);
     if (d_->source) d_->source->seek(startFrame);
@@ -408,14 +409,17 @@ void PlaybackEngine::play(std::shared_ptr<IPlaybackSource> src, int64_t startFra
     d_->heard.reset(d_->source ? d_->source->position() : 0);
 }
 void PlaybackEngine::pause() {
+    if (!d_) return;
     std::lock_guard<std::mutex> lk(d_->mtx);
     d_->paused = true;
 }
 void PlaybackEngine::resume() {
+    if (!d_) return;
     std::lock_guard<std::mutex> lk(d_->mtx);
     if (d_->source && !d_->drained) d_->paused = false;
 }
 void PlaybackEngine::stop() {
+    if (!d_) return;
     std::lock_guard<std::mutex> lk(d_->mtx);
     d_->source.reset();
     d_->paused = true;
@@ -424,6 +428,7 @@ void PlaybackEngine::stop() {
     d_->heard.reset(0);
 }
 void PlaybackEngine::seek(int64_t frame) {
+    if (!d_) return;
     std::lock_guard<std::mutex> lk(d_->mtx);
     if (d_->source) {
         d_->source->seek(frame);
@@ -433,18 +438,22 @@ void PlaybackEngine::seek(int64_t frame) {
     }
 }
 bool PlaybackEngine::isPlaying() const {
+    if (!d_) return false;
     std::lock_guard<std::mutex> lk(d_->mtx);
     return d_->source && !d_->paused && !d_->drained;
 }
 bool PlaybackEngine::isPaused() const {
+    if (!d_) return false;
     std::lock_guard<std::mutex> lk(d_->mtx);
     return d_->source && d_->paused;
 }
 bool PlaybackEngine::hasSource() const {
+    if (!d_) return false;
     std::lock_guard<std::mutex> lk(d_->mtx);
     return (bool)d_->source;
 }
 int64_t PlaybackEngine::position() const {
+    if (!d_) return 0;
     std::lock_guard<std::mutex> lk(d_->mtx);
     if (!d_->source) return 0;
     const int64_t rendered = d_->source->position();
@@ -465,10 +474,12 @@ int64_t PlaybackEngine::position() const {
     return std::max<int64_t>(0, std::min(heard, rendered));
 }
 PlaybackEngine::PosDiag PlaybackEngine::posDiag() const {
+    if (!d_) return PosDiag{};
     std::lock_guard<std::mutex> lk(d_->mtx);
     return d_->diag;
 }
 int64_t PlaybackEngine::total() const {
+    if (!d_) return 0;
     std::lock_guard<std::mutex> lk(d_->mtx);
     return d_->source ? d_->source->total() : 0;
 }
