@@ -38,25 +38,88 @@ static void fft(std::vector<cf>& a, bool inverse) {
         for (auto& x : a) x /= (float)n;
 }
 
+// ---------------- K-weighting (ITU-R BS.1770) ----------------
+// The two-stage pre-filter every loudness standard uses: a high shelf of about
+// +4 dB above ~1.5 kHz (the acoustic effect of the head) and the "RLB" high-pass
+// at ~38 Hz. The coefficients are derived for the actual rate from the analogue
+// prototype the standard's 48 kHz table comes from (the same derivation
+// libebur128 uses), so 44.1 kHz and 96 kHz projects weigh frequencies alike.
+void kWeighting(int sampleRate, double shelf[5], double highPass[5]) {
+    const double fs = sampleRate > 0 ? sampleRate : 48000;
+    {
+        const double f0 = 1681.974450955533, G = 3.999843853973347, Q = 0.7071752369554196;
+        const double K = std::tan(PI * f0 / fs);
+        const double Vh = std::pow(10.0, G / 20.0);
+        const double Vb = std::pow(Vh, 0.4996667741545416);
+        const double a0 = 1.0 + K / Q + K * K;
+        shelf[0] = (Vh + Vb * K / Q + K * K) / a0;
+        shelf[1] = 2.0 * (K * K - Vh) / a0;
+        shelf[2] = (Vh - Vb * K / Q + K * K) / a0;
+        shelf[3] = 2.0 * (K * K - 1.0) / a0;
+        shelf[4] = (1.0 - K / Q + K * K) / a0;
+    }
+    {
+        const double f0 = 38.13547087602444, Q = 0.5003270373238773;
+        const double K = std::tan(PI * f0 / fs);
+        const double a0 = 1.0 + K / Q + K * K;
+        highPass[0] = 1.0; highPass[1] = -2.0; highPass[2] = 1.0;
+        highPass[3] = 2.0 * (K * K - 1.0) / a0;
+        highPass[4] = (1.0 - K / Q + K * K) / a0;
+    }
+}
+
+double kWeightingGainDb(int sampleRate, double hz) {
+    double s[5], h[5];
+    kWeighting(sampleRate, s, h);
+    const double w = 2.0 * PI * hz / (sampleRate > 0 ? sampleRate : 48000);
+    const std::complex<double> z1 = std::polar(1.0, -w), z2 = z1 * z1;
+    auto mag = [&](const double* c) {
+        return std::abs((c[0] + c[1] * z1 + c[2] * z2) / (1.0 + c[3] * z1 + c[4] * z2));
+    };
+    return 20.0 * std::log10(mag(s) * mag(h));
+}
+
 // ---------------- speech loudness ----------------
+// K-weighted, so it measures what the ear hears as loud rather than raw energy: a
+// take recorded close to the mic carries extra low end (proximity effect) that
+// plain RMS counts in full, so it read as louder than it sounds and a volume match
+// turned it down too far. K-weighting also makes rumble and DC offset -- which no
+// one hears as loudness -- count for almost nothing.
+//
+// The gate is the speech-aware one: 20 ms windows, keeping those within ~20 dB of
+// the loudest, so pauses don't drag the level down. Channel powers are averaged
+// (not the channels summed first), so out-of-phase content can't cancel itself out
+// of the measurement.
 double speechLoudness(const AudioBuffer& buf) {
-    int ch = buf.channels;
-    int64_t nf = buf.frames();
-    if (nf <= 0) return 0.0;
-    int rate = buf.sampleRate > 0 ? buf.sampleRate : 48000;
-    int win = std::max(1, rate / 50);   // ~20 ms windows
+    const int ch = buf.channels;
+    const int64_t nf = buf.frames();
+    if (nf <= 0 || ch <= 0) return 0.0;
+    const int rate = buf.sampleRate > 0 ? buf.sampleRate : 48000;
+    const int win = std::max(1, rate / 50);   // ~20 ms windows
     const float* s = buf.samples.data();
+
+    double sh[5], hp[5];
+    kWeighting(rate, sh, hp);
+    // Direct form I, one state per stage per channel.
+    struct State { double x1 = 0, x2 = 0, y1 = 0, y2 = 0; };
+    std::vector<State> st1((size_t)ch), st2((size_t)ch);
+    auto step = [](const double* c, State& z, double x) {
+        const double y = c[0] * x + c[1] * z.x1 + c[2] * z.x2 - c[3] * z.y1 - c[4] * z.y2;
+        z.x2 = z.x1; z.x1 = x; z.y2 = z.y1; z.y1 = y;
+        return y;
+    };
 
     std::vector<double> rms;
     rms.reserve((size_t)(nf / win + 1));
     for (int64_t f = 0; f < nf; f += win) {
-        int64_t e = std::min<int64_t>(f + win, nf);
-        double acc = 0; int64_t cnt = 0;
-        for (int64_t i = f; i < e; ++i) {
-            double m = 0; for (int c = 0; c < ch; ++c) m += s[i * ch + c];
-            m /= ch; acc += m * m; ++cnt;
-        }
-        rms.push_back(cnt ? std::sqrt(acc / cnt) : 0.0);
+        const int64_t e = std::min<int64_t>(f + win, nf);
+        double acc = 0;
+        for (int64_t i = f; i < e; ++i)
+            for (int c = 0; c < ch; ++c) {
+                const double y = step(hp, st2[(size_t)c], step(sh, st1[(size_t)c], s[i * ch + c]));
+                acc += y * y;
+            }
+        rms.push_back(std::sqrt(acc / ((double)(e - f) * ch)));
     }
     if (rms.empty()) return 0.0;
     double peak = 0; for (double r : rms) peak = std::max(peak, r);

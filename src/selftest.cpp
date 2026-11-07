@@ -2969,6 +2969,51 @@ int runSelfTest() {
               L"new clip from a selection: an empty range or a missing clip adds nothing");
     }
 
+    // ---- K-weighted speech loudness (ITU-R BS.1770)
+    // Volume matching measures what the ear hears as loud: a close-miked take's
+    // extra low end, rumble and DC offset must not count as loudness.
+    {
+        double sh[5], hp[5];
+        dsp::kWeighting(48000, sh, hp);
+        // ITU-R BS.1770-4, tables 1 and 2 (48 kHz).
+        const double specSh[5] = { 1.53512485958697, -2.69169618940638, 1.19839281085285,
+                                   -1.69065929318241, 0.73248077421585 };
+        const double specHp[5] = { 1.0, -2.0, 1.0, -1.99004745483398, 0.99007225036621 };
+        double worst = 0.0;
+        for (int i = 0; i < 5; ++i)
+            worst = std::max({ worst, std::fabs(sh[i] - specSh[i]), std::fabs(hp[i] - specHp[i]) });
+        check(worst < 1e-8, L"K-weighting: 48 kHz coefficients are the standard's",
+              L"worst difference " + std::to_wstring(worst));
+        const double g48 = dsp::kWeightingGainDb(48000, 997.0), g44 = dsp::kWeightingGainDb(44100, 997.0);
+        check(std::fabs(g48 - 0.691) < 0.02 && std::fabs(g44 - 0.691) < 0.02,
+              L"K-weighting: +0.691 dB at 997 Hz at 48 and 44.1 kHz alike",
+              std::to_wstring(g48) + L" / " + std::to_wstring(g44) + L" dB");
+
+        auto toneAt = [&](double hz, double amp, double dc) {
+            auto b = std::make_shared<AudioBuffer>();
+            b->sampleRate = rate; b->channels = 2;
+            const int64_t n = rate * 2;
+            b->samples.resize((size_t)n * 2);
+            for (int64_t i = 0; i < n; ++i) {
+                const float v = (float)(dc + amp * std::sin(2.0 * 3.14159265358979 * hz * i / rate));
+                b->samples[(size_t)i * 2] = v; b->samples[(size_t)i * 2 + 1] = v;
+            }
+            return b;
+        };
+        const double hi = dsp::speechLoudness(*toneAt(4000.0, 0.3, 0.0));
+        const double lo = dsp::speechLoudness(*toneAt(300.0, 0.3, 0.0));
+        const double measured = 20.0 * std::log10(hi / lo);
+        const double expected = dsp::kWeightingGainDb(rate, 4000.0) - dsp::kWeightingGainDb(rate, 300.0);
+        check(expected > 3.0 && std::fabs(measured - expected) < 0.1,
+              L"K-weighting: a 4 kHz tone measures louder than an equal 300 Hz one, by the filter's response",
+              std::to_wstring(measured) + L" dB, expected " + std::to_wstring(expected));
+        const double clean = dsp::speechLoudness(*toneAt(500.0, 0.3, 0.0));
+        const double offset = dsp::speechLoudness(*toneAt(500.0, 0.3, 0.3));
+        const double dcDb = 20.0 * std::log10(offset / clean);
+        check(std::fabs(dcDb) < 0.2, L"K-weighting: a DC offset doesn't count as loudness",
+              std::to_wstring(dcDb) + L" dB");
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);

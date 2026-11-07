@@ -239,7 +239,10 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   mic, or on different days, come out at different levels. **Match volume** sets
   each clip's volume so its *speech* is as loud as the target — measured over
   speech only, so pauses don't drag the measurement down, and quiet takes get
-  pulled up without the silence between words counting against them. It works
+  pulled up without the silence between words counting against them. Loudness
+  is weighted the way the ear hears it (the broadcast standard's K-weighting,
+  ITU-R BS.1770), so the extra bass of a take recorded close to the mic, room
+  rumble, or a DC offset doesn't make a clip count as louder than it sounds. It works
   exactly like *Match timbre*: the same ranges (a track, all tracks, the whole
   project, or one clip to the rest — the menus sit side by side), the same choice
   of target (**the average of them all**, or one clip as the standard: *As loud as
@@ -426,7 +429,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `undo.h` | Snapshot-based undo **tree** with branching redo; flattens to the step list the History window shows, and can jump to any step on it |
 | `document.{h,cpp}` | Owns the project + undo tree; every edit commits a snapshot |
 | `waveform.{h,cpp}` | GDI oscilloscope rendering: min/max envelope zoomed out, sample line zoomed in |
-| `dsp.{h,cpp}` | FFT, speech-aware loudness, STFT noise reduction (spectral subtraction / Wiener / Audacity-style profile gate), voice isolation (non-speech removal), LTAS timbre matching, manual silence/delete edits |
+| `dsp.{h,cpp}` | FFT, speech-aware K-weighted loudness, STFT noise reduction (spectral subtraction / Wiener / Audacity-style profile gate), voice isolation (non-speech removal), LTAS timbre matching, manual silence/delete edits |
 | `match.{h,cpp}` | Making clips alike, shared by *Match timbre* and *Match volume*: which clips a command covers, what they're matched to, and the before/after measurements |
 | `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, remove-non-voice options, match-timbre and match-volume options, history list, open/save file & project dialogs |
 | `ui.cpp` | Main window: menu bar, layout, painting, hit-testing, all interaction |

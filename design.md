@@ -17,7 +17,7 @@ sync with behavior changes.
 | `engine.{h,cpp}` | WASAPI shared-mode render thread; `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
 | `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker; `chain()` flattens the walkable line for the History window and `gotoNode()` jumps to any point on it; `allNodes()`/`rebuild()` round-trip the whole tree through the project file, `hasSnapshot` marks steps stored by name only, and `~UndoNode` tears down iteratively so a long history can't overflow the stack |
 | `document.{h,cpp}` | Owns `Project` + undo tree + `ViewState`; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`); `history()`/`gotoHistory()` expose the step list |
-| `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware loudness, three noise-reduction algorithms, voice isolation, LTAS timbre matching, manual region edits (see below) |
+| `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware K-weighted loudness, three noise-reduction algorithms, voice isolation, LTAS timbre matching, manual region edits (see below) |
 | `match.{h,cpp}` | Making clips alike, shared by the volume and timbre matchers: which clips a command involves (`ClipSet` — a track, all tracks, the library, or one clip to the rest), what they are matched to, and each matcher's compute-and-measure pass (`matchVolume`, `matchTimbre`); pure, so the selftest reaches it |
 | `waveform.{h,cpp}` | GDI oscilloscope: per-column min/max envelope (one `PolyPolyline`) zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner, remove-non-voice, match-timbre and match-volume options, history list, file/project pickers |
@@ -476,7 +476,8 @@ only within a project, so New and Open forget it.
 ### Volume matching
 
 `match::matchVolume(project, set, reference)` measures each clip's speech level
-(`dsp::speechLoudness`, which ignores the pauses) **at its current volume**, so a clip
+(`dsp::speechLoudness`, which ignores the pauses and is K-weighted — see below) **at
+its current volume**, so a clip
 already at the target stays put and the standard keeps its own. Each matched clip's
 new volume is `target / level`, held to **−26 … +24 dB** (`kMinMatchGain`,
 `kMaxMatchGain`). The top is `kMaxClipGain`, the same constant `Document` clamps every
@@ -491,6 +492,16 @@ when no volume moved.
 It is non-destructive: it moves the clips' volume sliders and leaves their audio alone.
 The dialog says so outright, because the timbre matcher next to it does rewrite audio,
 and the difference decides whether "I can still adjust it afterwards" is true.
+
+**Loudness is K-weighted** (ITU-R BS.1770's pre-filter: a +4 dB shelf above
+~1.5 kHz and a ~38 Hz high-pass, `dsp::kWeighting`, coefficients derived for the
+actual rate and checked against the standard's 48 kHz table). Plain RMS counted a
+close-miked take's proximity-effect bass, room rumble and DC offset as loudness, so
+such a take read louder than it sounds and was turned down too far. Channel *powers*
+are averaged rather than the channels summed first, so out-of-phase content can't
+cancel out of the measurement. The gate is unchanged — 20 ms windows within ~20 dB of
+the loudest — and so is everything that uses the number as a ratio, including timbre
+matching's *Keep each clip's loudness*, which now keeps the level the ear hears.
 
 Silent clips (below about −100 dB FS, or turned all the way down) are left out and
 counted. When nothing can be matched, `match::Failure` says why, so the box names the

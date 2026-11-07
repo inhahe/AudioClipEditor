@@ -5,10 +5,18 @@
 
 namespace dsp {
 
-// --- Loudness (speech-aware) ---
-// RMS level of the "active" (non-silent) portion of a buffer, so pauses between
-// speech don't drag the measured level down. Returns linear RMS (0..~1).
+// --- Loudness (speech-aware, K-weighted) ---
+// The K-weighted RMS level of the "active" (non-silent) portion of a buffer, so
+// pauses between speech don't drag the measured level down and the level is the
+// one the ear hears (see kWeighting). Linear, 0..~1; matching uses it as a ratio.
 double speechLoudness(const AudioBuffer& buf);
+
+// ITU-R BS.1770 K-weighting at `sampleRate`: the high-shelf and RLB high-pass
+// biquads as {b0, b1, b2, a1, a2} (a0 = 1). Exposed so the selftest can hold them
+// to the standard's published 48 kHz coefficients.
+void kWeighting(int sampleRate, double shelf[5], double highPass[5]);
+// The K-weighting's gain at `hz`, in dB.
+double kWeightingGainDb(int sampleRate, double hz);
 
 // --- Voice cleaner (noise reduction) ---
 enum class NRAlgorithm { SpectralSubtraction, Wiener, Profile };
