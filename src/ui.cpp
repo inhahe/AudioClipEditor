@@ -4658,16 +4658,21 @@ static HandOff handToRunningCopy(const std::vector<std::wstring>& files, Startup
     }
 }
 
-// Start another copy of the app to open `files`.
-static void startCopy(const std::vector<std::wstring>& files) {
+// Start another copy of the app to open `files`, and wait until it is ready for input:
+// by then it holds the startup lock or has its window (or has handed the files on), so
+// copies started one after another take their turns in that order. False if it
+// couldn't be started.
+static bool startCopy(const std::vector<std::wstring>& files) {
     const std::wstring exe = exePath();
     std::wstring cmd = L"\"" + exe + L"\" " + launch::commandLine(files);
     STARTUPINFOW si{}; si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
-    if (CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-    }
+    if (!CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+        return false;
+    WaitForInputIdle(pi.hProcess, 30000);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
 }
 
 int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args) {
@@ -4750,9 +4755,17 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
         app.openLaunchRequests();
     }
     // Requests that came while the window was closing -- its "Save changes?" box is a
-    // modal loop, so they waited -- were never opened. Each goes to a fresh copy rather
-    // than the double-click being lost.
-    for (const std::vector<std::wstring>& files : app.launchQueue) startCopy(files);
+    // modal loop, so they waited -- were never opened. They go to a fresh copy rather
+    // than the double-click being lost: started in order, so the last one asked for is
+    // the one left open, as it would have been here. Their senders have exited, so if
+    // that fails, this is the last chance to say so.
+    std::wstring lost;
+    for (const std::vector<std::wstring>& files : app.launchQueue)
+        if (!startCopy(files))
+            for (const std::wstring& f : files) lost += L"\n" + f;
+    if (!lost.empty())
+        MessageBoxW(nullptr, (L"A new window couldn't be started to open:\n" + lost).c_str(),
+                    L"Audio Clip Editor", MB_ICONWARNING);
     app.engine.shutdown();
     mfio::shutdown();
     return 0;

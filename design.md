@@ -144,7 +144,13 @@ any file that won't decode — several can arrive at once.
   changes?* box on close is a modal loop too, so the request waited and was never
   opened; after the window is gone, a fresh copy is started with it
   (`launch::commandLine` quotes it so `CommandLineToArgvW` splits it back exactly)
-  rather than the double-click being lost.
+  rather than the double-click being lost. With several, each copy is started only
+  once the one before is ready for input (`WaitForInputIdle`) — by then it holds the
+  startup lock or has its window — so the next hands its files to it and they open in
+  the order asked, the last one left open, as they would have here; started back to
+  back, they raced for the lock and could open in either order. Their senders have
+  exited believing the files taken, so a copy that can't be started (the exe moved
+  while the app ran) is reported in a message box naming the files.
 - **Projects are tried in order** until one opens, so a missing first project doesn't
   leave the app empty; any after the opened one are counted in a toast, since only one
   can be open.
@@ -2105,7 +2111,9 @@ dialog). Handed over in the middle of a selection sweep on a clip card, it waits
 the button to come up, and only then asks whether to save the changed selection
 (before, the *Save changes?* box came up mid-drag and took the capture). Handed over
 while the window asks *Save changes?* on close, it opens in a
-fresh copy once the window is gone. With the running copy frozen (its process
+fresh copy once the window is gone; with two handed over that way, the one copy left
+has the second open; with the exe renamed while the app ran, the closing copy says it
+couldn't start a new window for them. With the running copy frozen (its process
 suspended) for 9 s, a copy given another project waited without a window, and once
 the first was thawed it opened the project there and exited — before, it opened the
 project itself; with the frozen copy killed instead, the waiting one opened it.
