@@ -2788,6 +2788,11 @@ struct App {
     void setProjectPath(const std::wstring& path) {
         projectPath = path;
         projectIdentity = path.empty() ? launch::FileIdentity{} : launch::fileIdentity(path);
+        // Windows' recent documents: Explorer's Recent files and, while .acep files are
+        // registered to this app (File menu), the Recent list on its taskbar button --
+        // clicked, it starts a copy that hands the project to the one running. Windows
+        // leaves it out when the user has turned recent items off.
+        if (!path.empty()) SHAddToRecentDocs(SHARD_PATHW, path.c_str());
     }
     // A save that quietly grew the file by a gigabyte, or quietly dropped the steps
     // that answer "did I apply that?", is exactly the kind of thing you only find

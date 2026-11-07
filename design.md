@@ -207,6 +207,18 @@ back to what it opened with before (or clears it), but only if `.acep` still nam
 ProgID — an app that has claimed it since keeps its claim — and removes keys only once
 they are empty. Writes go through `RegSetKeyValueW`, which creates the key as needed.
 
+**Recent projects** (`SHAddToRecentDocs`, from `App::setProjectPath`, so on every
+open and save). That one call feeds Explorer's recent files and the *Recent* category of
+the taskbar button's jump list; the jump list shows only file types the app is a
+registered handler for, which is what the association below makes it (its ProgID in
+`.acep\OpenWithProgids`, its command naming this exe), so with the item unticked the
+projects appear in Explorer only. A jump-list entry is launched through the
+association, so it goes through the hand-off like a double-click. Windows decides what
+to keep: it leaves out files in the Temp folder (seen while testing: nothing at all
+for a project there, `.txt` included), skips a file already at the top of its list,
+and keeps nothing when recent items are turned off. Checked live: opening a project
+outside Temp put its shortcut in the Recent folder within half a second.
+
 **The tick is what a double-click actually does** (`assoc::projectsOpenHere`, via
 `AssocQueryString`), not what the app registered: Windows puts a choice made with
 *Always use this app* (the hash-protected `UserChoice`, which no program can

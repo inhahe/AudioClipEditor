@@ -340,6 +340,12 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   offers to open it in a new window instead, or not at all (closing that window just
   puts it away; the project still opens when the app is free); if the window is
   closing, it opens in a new one.
+- **Recent projects on the taskbar.** Every project you open or save goes on Windows'
+  recent list. While double-clicking `.acep` files opens them here (above),
+  right-clicking the app's taskbar button lists them under *Recent*; clicking one opens
+  it, in the window already open if there is one. They also appear in Explorer's
+  recent files. (Windows leaves out projects kept in the Temp folder, and everything
+  when recent items are turned off in Settings ▸ Personalization ▸ Start.)
 - **Save / load projects.** Projects are saved as a single `.acep` file with the
   whole library and timeline (audio embedded), so a project is fully
   self-contained — and, unless you turn it off, the **edit history** as well.
