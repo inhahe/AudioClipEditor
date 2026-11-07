@@ -11,7 +11,7 @@ sync with behavior changes.
 | File | Role |
 |---|---|
 | `audio_buffer.h` | `AudioBuffer` (interleaved float PCM, `sampleRate`/`channels`/`samples`), `AudioBufferPtr` (`shared_ptr`), `sliceBuffer` (the one range copy that crop, new clip, export and split-out all use), `PeakCache` min/max bucket envelope for waveform drawing |
-| `model.h` | `Clip` (id, name, buffer, peaks, gain, **timestamp**), `Track` (id, name, gain, placed clips, plus the pure lane arithmetic `gapBefore`/`ripple`/`overlaps`), `PlacedClip` (clipId + start frame), `Project` (library order = display order) |
+| `model.h` | `Clip` (id, name, `buffer` = its own audio, `eq` = its timbre EQ curve and `eqBuffer` the audio through it, `heard()`, peaks of what is heard, gain, **timestamp**), `ClipEq`, `Track` (id, name, gain, placed clips, plus the pure lane arithmetic `gapBefore`/`ripple`/`overlaps`), `PlacedClip` (clipId + start frame), `Project` (library order = display order) |
 | `decoder.{h,cpp}` | MF Source Reader → stereo float at the project rate |
 | `encoder.{h,cpp}` | WAV writer (manual RIFF; 16/24-bit PCM, 32-bit float) + MF Sink Writer (MP3/AAC/WMA); output-rate resampling |
 | `engine.{h,cpp}` | WASAPI shared-mode render thread; `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
@@ -544,7 +544,68 @@ of a track can't exclude all the others. A set with fewer than two measurable cl
 refused (`Failure::Alone`) rather than "matching" one clip to its own spectrum, and a
 silent clip has no profile (`computeTimbreProfile` returns invalid below −100 dB FS): its
 flat noise-floor spectrum averaged into a target would flatten the target's shape. The results are
-committed through `Document::replaceClipBuffers` as **one undo step**.
+committed through `Document::applyMatch` as **one undo step**.
+
+### The EQ is a setting on the clip
+
+A match does not rewrite a clip's audio. It gives the clip one EQ curve
+(`Clip::eq`, per-bin dB over the timbre analysis's bins, `dsp::timbreBins()`), and the
+clip is played through it. So:
+
+- **Matching again replaces the EQ** instead of stacking a second one on the first:
+  the curve is designed from the clip's own audio (`Clip::buffer`), not from what it
+  sounds like through its current EQ, so re-running a match lands on the same curve.
+  (Designing from the heard audio would find almost nothing left to correct and add a
+  second, near-flat EQ on top — a selftest tells the two apart.) *Keep each clip's
+  loudness* keeps the level it is **heard** at, passed in as `designTimbreEq`'s
+  `keepLoudness`.
+- **It can come off exactly** — *Remove the EQ* (card: this clip / all clips; track
+  header: this track) — because the audio underneath was never touched.
+- **Whether a clip has one is visible**: an **EQ** tag on its card and on its blocks in
+  the timeline (`paintEqTag`). An EQ changes nothing else on screen, so this is the
+  one place that says whether a match, or the undo of one, is in effect.
+
+**The model.** `Clip::buffer` is the clip's own audio: what edits work on (crop,
+clean, silence, delete, new clip from a range, split-out) and what the project file
+stores. `Clip::eqBuffer` is `buffer` through `eq`, derived; `Clip::heard()` is
+`eqBuffer` when there is an EQ, else `buffer`, and is what everything that plays,
+draws, measures or exports uses — previews, the timeline mix (and its re-arm hash),
+`renderMix`, `exportAudio`, waveforms, and both matchers' measurements. Peaks are of
+`heard()`, so the waveform shows what plays.
+
+**Rendering** (`Document::renderClip`) runs wherever a clip's audio or curve changes:
+`replaceClipBuffer(s)` keep the EQ and re-render it onto the edited audio;
+`addClipFromRange` and `replaceClipWithNew` carry the EQ over, like the volume; and
+`applyMatch` takes a match's pre-rendered result when it fits rather than filtering
+twice. `dsp::designTimbreEq` folds the two broadband scalars a match applies (keep
+loudness, keep peaks under full scale) into the curve as one dB offset, so the stored
+curve applied with `dsp::applyEq` reproduces the match's result exactly (selftest:
+within 6e-8).
+
+**Undo and history.** Snapshots share curves and rendered audio through `shared_ptr`,
+so a step costs a pointer per clip. A state read back from a project file has its
+curves but not their renders — rendering every state of a long history at load would
+cost far more than rendering the few that are visited — so `Document::restore`
+renders any missing ones and writes them back into that history node, making a second
+visit free. Until then `heard()` would fall back to the un-EQ'd audio, which is why
+nothing reads a history snapshot's audio except through `restore`.
+
+**In the project file** the curves are a tagged section (`ACEQ`, version 1) after
+everything else: a deduplicated curve pool, a reference per live clip, and per written
+history node one per snapshot clip. It is placed last because a reader stops at the
+end of what it knows: an older build opens the project and plays it *without* the EQs
+rather than failing — the body holds each clip's own audio, complete on its own. It is
+written only when some clip, now or in the stored history, has an EQ, so other
+projects stay byte-for-byte what earlier versions wrote. It is validated whole before
+use: a damaged one costs the EQs, never the project or the history, and a curve of
+another analysis size is dropped rather than misapplied. The reader finds it from a
+**12-byte footer** — the section's offset and its tag, the file's last bytes — rather
+than by reading on from the history trailer: a history that can't be parsed leaves
+the position unknown, and that must cost only the history's EQs, not the live
+clips'. (Offsets are 64-bit; project files of float audio pass 2 GB.)
+
+Projects matched before this (0.36.x and earlier) have their EQ baked into the
+audio; that audio is simply each clip's own audio now, so it stays as it was.
 
 The summary box reports the largest correction applied — **at what frequency and to
 which clip**, since "8 dB at 250 Hz" is a mic distance and "8 dB at 40 Hz" is a fan,
@@ -1672,6 +1733,16 @@ bump / shuffle / room tone each attenuated ≥ 20 dB (measured −60 dB, i.e. th
 full requested reduction), exactly one detected voice segment, and
 reduce + residue == original. It also logs the throughput (≈37× realtime).
 
+**The timbre EQ as a setting** (13 checks): a match yields a curve and the audio
+through it, and `applyEq` of the stored curve reproduces that audio (to 6e-8); the
+match is one undo step, leaves the clip's own buffer untouched and plays through the
+EQ, and exports with it; **matching again lands on the same curve** (0 dB apart —
+designing from the heard audio would have stacked a second EQ); an edit keeps the EQ
+over the edited audio, and a new clip cut from an EQ'd take keeps it; a saved project
+reopens with the same curve, sounding the same, and undo after reopening takes the EQ
+off while redo renders it back; removing the EQ returns the clip's own buffer exactly,
+and undoing that restores it; and volume matching hears a flat +6 dB EQ as 6 dB.
+
 **Timbre matching** is tested end-to-end on two clips built from the *same*
 deterministic noise source, one passed through a known first-order tilt — noise
 rather than tones so the long-term average is smooth and the test measures the
@@ -1755,9 +1826,10 @@ the fork point reporting `branches == 2`.
 
 ## Undo / scopes
 
-Voice cleaning (any algorithm), voice isolation and timbre matching replace clip
-buffers and commit **one snapshot per operation** — a track-wide or project-wide
-clean / isolation / match is a single undo step. Volume matching changes only clip
+Voice cleaning (any algorithm) and voice isolation replace clip buffers and commit
+**one snapshot per operation** — a track-wide or project-wide clean or isolation is a
+single undo step. Timbre matching sets EQ curves rather than replacing audio, through
+`Document::applyMatch`, also one step for the whole set. Volume matching changes only clip
 volumes, through `Document::setClipGains`, and is likewise one step for the whole set
 (none at all when nothing moved).
 

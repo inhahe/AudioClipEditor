@@ -2797,7 +2797,7 @@ int runSelfTest() {
 
             const match::ClipSet one = match::clipToLibrary(d.project(), br);
             const match::TimbreResult r = match::matchTimbre(d.project(), one, -1, opt);
-            check(r.ok() && r.updates.size() == 1 && r.updates[0].first == br,
+            check(r.ok() && r.updates.size() == 1 && r.updates[0].clipId == br,
                   L"match timbre: one clip to the rest filters only that clip",
                   std::to_wstring(r.updates.size()) + L" filtered");
             check(r.before.valid() && r.before.db > 2.0 && r.after.valid() && r.after.db < 0.5,
@@ -2807,7 +2807,7 @@ int runSelfTest() {
             const match::ClipSet all = match::librarySet(d.project());
             const match::TimbreResult rr = match::matchTimbre(d.project(), all, all.indexOf(a1), opt);
             bool refTouched = false;
-            for (const auto& u : rr.updates) if (u.first == a1) refTouched = true;
+            for (const auto& u : rr.updates) if (u.clipId == a1) refTouched = true;
             check(rr.ok() && rr.updates.size() == 2 && !refTouched,
                   L"match timbre: the standard is not run through the filter at all",
                   std::to_wstring(rr.updates.size()) + L" filtered");
@@ -2828,7 +2828,7 @@ int runSelfTest() {
             const match::ClipSet ts = match::clipToLibrary(d.project(), tt);
             const match::TimbreResult rt = match::matchTimbre(d.project(), ts, ts.indexOf(a1), opt);
             if (rt.ok() && rt.updates.size() == 1) {
-                const AudioBuffer& outB = *rt.updates[0].second;
+                const AudioBuffer& outB = *rt.updates[0].heard;
                 const int64_t h = 2 * RATE, e2 = 4 * RATE;
                 auto halves = [&](const AudioBuffer& b) {
                     return dsp::timbreDistanceDb(dsp::computeTimbreProfile(*slice(b, 0, h)),
@@ -3030,6 +3030,170 @@ int runSelfTest() {
         const match::ClipSet one = match::clipToLibrary(d.project(), b);
         check(one.what == L"'take (library #2)'",
               L"match sets: ...including in what a one-clip match says it changed", one.what);
+    }
+
+    // ---- the timbre EQ is a setting on the clip, not rewritten audio
+    // A match stores one curve per clip and plays the clip through it, so a later
+    // match replaces the curve instead of stacking on it, edits keep it, it can come
+    // off exactly, and undo, redo and the project file all carry it.
+    {
+        auto noise = [](double amp, double tilt, double seconds, uint32_t seed) {
+            auto b = std::make_shared<AudioBuffer>();
+            b->sampleRate = 48000; b->channels = 1;
+            const int64_t n = (int64_t)(48000 * seconds);
+            b->samples.resize((size_t)n);
+            uint32_t s = seed; double y = 0.0, prev = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                s = s * 1664525u + 1013904223u;
+                const double w = (double)(int32_t)(s >> 1) / 1073741824.0 - 1.0;
+                y = 0.7 * y + 0.3 * w;
+                const double v = y - tilt * prev; prev = y;
+                b->samples[(size_t)i] = (float)(amp * v);
+            }
+            return b;
+        };
+        auto maxDiff = [](const AudioBuffer& x, const AudioBuffer& y) {
+            if (x.samples.size() != y.samples.size()) return 1e9;
+            double m = 0.0;
+            for (size_t i = 0; i < x.samples.size(); ++i)
+                m = std::max(m, std::fabs((double)x.samples[i] - y.samples[i]));
+            return m;
+        };
+        auto num = [](double v) { wchar_t b[32]; swprintf(b, 32, L"%.4g", v); return std::wstring(b); };
+
+        Document d; d.init(48000);
+        const int a = d.addClip(L"ref", noise(0.4, 0.0, 3.0, 61), L"", L"add");
+        const int b = d.addClip(L"bright", noise(0.4, 0.6, 3.0, 62), L"", L"add");
+        const AudioBufferPtr bOwn = d.project().findClip(b)->buffer;
+        const match::ClipSet one = match::clipToLibrary(d.project(), b);
+        const match::TimbreResult r = match::matchTimbre(d.project(), one, one.indexOf(a), dsp::TimbreMatchOptions{});
+        const bool got = r.ok() && r.updates.size() == 1 && r.updates[0].eq && r.updates[0].heard;
+        check(got, L"timbre EQ: a match produces a curve and the clip's audio through it");
+        if (got) {
+            const EqCurve curve = r.updates[0].eq;
+            auto again = dsp::applyEq(*bOwn, *curve);
+            check(again && maxDiff(*again, *r.updates[0].heard) < 1e-5,
+                  L"timbre EQ: the stored curve, applied to the clip, gives exactly what the match designed",
+                  again ? num(maxDiff(*again, *r.updates[0].heard)) : L"null");
+
+            check(d.applyMatch(r.updates, {}, L"match") && d.undoDesc() == L"match",
+                  L"timbre EQ: the match is one undo step");
+            const Clip* cb = d.project().findClip(b);
+            check(cb->buffer == bOwn && cb->hasEq() && cb->heard() == r.updates[0].heard,
+                  L"timbre EQ: the clip's own audio is left alone; it plays through the EQ");
+            // (cb is not used past here: the edits below replace the library vector.)
+            check(d.exportAudio(b) == cb->heard(),
+                  L"timbre EQ: exporting the clip carries its EQ");
+
+            // Matching again designs from the clip's own audio, so it lands on the
+            // same curve. Designing from what it sounds like now would find almost
+            // nothing left to correct, and the result would be a second EQ on top.
+            const match::ClipSet one2 = match::clipToLibrary(d.project(), b);
+            const match::TimbreResult r2 = match::matchTimbre(d.project(), one2, one2.indexOf(a), dsp::TimbreMatchOptions{});
+            double drift = 1e9;
+            if (r2.ok() && r2.updates.size() == 1 && r2.updates[0].eq) {
+                drift = 0.0;
+                for (size_t k = 0; k < curve->size(); ++k)
+                    drift = std::max(drift, (double)std::fabs((*r2.updates[0].eq)[k] - (*curve)[k]));
+            }
+            check(drift < 0.05, L"timbre EQ: matching again replaces the EQ -- the same curve, not a second one on top",
+                  num(drift) + L" dB apart");
+
+            // Edits work on the clip's own audio and keep the EQ on top of it.
+            auto edited = dsp::silenceRange(*bOwn, 1000, 9000);
+            d.replaceClipBuffers({ { b, edited } }, L"edit");
+            const Clip* ce = d.project().findClip(b);
+            auto expect = dsp::applyEq(*edited, *curve);
+            check(ce->buffer == edited && ce->eq == curve && expect && maxDiff(*ce->heard(), *expect) < 1e-6,
+                  L"timbre EQ: an edit keeps the EQ, applied to the edited audio");
+            d.undo();   // back to just the match
+
+            const int cut = d.addClipFromRange(b, 2000, 50000, L"cut", L"cut");
+            check(d.project().findClip(cut)->eq == curve,
+                  L"timbre EQ: a new clip cut from an EQ'd take keeps the EQ");
+            d.undo();
+
+            // A project file carries the EQ, now and in the history.
+            std::wstring proj = dir + L"\\_selftest_eq.acep";
+            const bool saved = d.saveProject(proj);
+            Document r3;
+            const bool loaded = saved && r3.loadProject(proj);
+            const Clip* lb = loaded ? r3.project().findClip(b) : nullptr;
+            double curveErr = 1e9;
+            if (lb && lb->eq) {
+                curveErr = 0.0;
+                for (size_t k = 0; k < curve->size(); ++k)
+                    curveErr = std::max(curveErr, (double)std::fabs((*lb->eq)[k] - (*curve)[k]));
+            }
+            check(lb && curveErr == 0.0 && lb->heard() != lb->buffer &&
+                      maxDiff(*lb->heard(), *r.updates[0].heard) < 1e-6,
+                  L"timbre EQ: a saved project reopens with the EQ on, sounding the same",
+                  lb ? num(curveErr) : L"no clip");
+            if (loaded) {
+                r3.undo();   // to before the match: the history's own copy of the clip
+                const Clip* u = r3.project().findClip(b);
+                check(u && !u->hasEq() && u->heard() == u->buffer,
+                      L"timbre EQ: undo after reopening takes the EQ off");
+                r3.redo(r3.defaultRedoBranch());
+                const Clip* rr = r3.project().findClip(b);
+                check(rr && rr->hasEq() && rr->eqBuffer && maxDiff(*rr->heard(), *r.updates[0].heard) < 1e-6,
+                      L"timbre EQ: ...and redo puts it back, rendered");
+            }
+            // A history that can't be read must cost only the history: the EQ section
+            // is found from its footer, not by reading on past a trailer whose length
+            // is then unknown. Saved without history the section starts where the
+            // history trailer would; so that offset, in a file *with* history, is
+            // inside the trailer, and wrecking bytes there wrecks the history only.
+            {
+                std::wstring flatProj = dir + L"\\_selftest_eq_flat.acep";
+                int64_t histStart = -1;
+                if (d.saveProject(flatProj, false)) {
+                    if (FILE* ff = _wfopen(flatProj.c_str(), L"rb")) {
+                        _fseeki64(ff, -12, SEEK_END);
+                        fread(&histStart, 8, 1, ff);
+                        fclose(ff);
+                    }
+                }
+                bool wrecked = false;
+                if (histStart > 0 && d.saveProject(proj, true)) {
+                    if (FILE* fw = _wfopen(proj.c_str(), L"r+b")) {
+                        std::vector<unsigned char> junk(64, 0xEE);
+                        wrecked = _fseeki64(fw, histStart, SEEK_SET) == 0 &&
+                                  fwrite(junk.data(), 1, junk.size(), fw) == junk.size();
+                        fclose(fw);
+                    }
+                }
+                Document w;
+                const bool wl = wrecked && w.loadProject(proj);
+                const Clip* wb = wl ? w.project().findClip(b) : nullptr;
+                check(wb && wb->hasEq() && !w.canUndo(),
+                      L"timbre EQ: a project whose history can't be read keeps its clips' EQs",
+                      !wrecked ? L"couldn't set up" : !wb ? L"didn't load" :
+                      std::wstring(wb->hasEq() ? L"EQ kept" : L"EQ lost") + (w.canUndo() ? L", history read" : L""));
+                DeleteFileW(flatProj.c_str());
+            }
+            DeleteFileW(proj.c_str());
+
+            // Taking it off is exact: the clip is what it was before the match.
+            check(d.applyMatch({ { b, nullptr, nullptr } }, {}, L"off") &&
+                      d.project().findClip(b)->heard() == bOwn && !d.project().findClip(b)->hasEq(),
+                  L"timbre EQ: removing the EQ gives back the clip's own audio, exactly");
+            d.undo();
+            check(d.project().findClip(b)->hasEq(), L"timbre EQ: ...and undoing that puts the EQ back");
+        }
+
+        // Volume matching hears the EQ: a flat +6 dB curve makes a clip 6 dB louder.
+        Document v; v.init(48000);
+        const int x = v.addClip(L"x", noise(0.1, 0.0, 2.0, 71), L"", L"add");
+        const int y = v.addClip(L"y", noise(0.1, 0.0, 2.0, 71), L"", L"add");
+        auto flat = std::make_shared<const std::vector<float>>((size_t)dsp::timbreBins(), 6.0f);
+        v.applyMatch({ { y, flat, nullptr } }, {}, L"eq");
+        const match::ClipSet vs = match::librarySet(v.project());
+        const match::VolumeResult vr = match::matchVolume(v.project(), vs, vs.indexOf(x));
+        const double diff = vr.ok() ? 20.0 * std::log10(vr.newGain[(size_t)vs.indexOf(x)] /
+                                                       vr.newGain[(size_t)vs.indexOf(y)]) : 0.0;
+        check(vr.ok() && std::fabs(diff - 6.0) < 0.1,
+              L"timbre EQ: volume matching measures a clip through its EQ", num(diff) + L" dB");
     }
 
     out(L"");

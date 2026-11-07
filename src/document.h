@@ -88,6 +88,12 @@ public:
     // setClipGain. Records nothing and returns false if no volume actually changed,
     // so matching clips that already match leaves no do-nothing step in the history.
     bool setClipGains(const std::vector<std::pair<int, float>>& gains, const std::wstring& desc);
+    // Set clips' EQs (ClipEq::eq null takes one off) and volumes together as one undo
+    // step: what a match commits, and "match timbre and volume" commits both at once.
+    // A ClipEq's pre-rendered audio is used when it fits, else the EQ is rendered
+    // here. Records nothing and returns false if nothing actually changed.
+    bool applyMatch(const std::vector<ClipEq>& eqs, const std::vector<std::pair<int, float>>& gains,
+                    const std::wstring& desc);
 
     // --- Project I/O and mixdown ---
     // `withHistory` writes the undo tree into the file (format v4) so reopening the
@@ -203,6 +209,9 @@ private:
     // new clip the old one's id, and anything still holding that id (the remembered
     // matching standard, say) would silently come to mean an unrelated clip.
     void restore(const Project& p);
+    // Re-derive a clip's audio-through-its-EQ and its waveform. Called wherever a
+    // clip's audio or EQ changes, so heard() never shows a stale EQ.
+    static void renderClip(Clip& c);
 
     Project project_;
     ViewState view_;

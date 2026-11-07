@@ -1022,15 +1022,35 @@ static std::vector<float> tmFilterChannel(const std::vector<float>& in,
     return out;
 }
 
-AudioBufferPtr matchTimbre(const AudioBuffer& buf, const TimbreProfile& target,
-                           const TimbreMatchOptions& opts,
-                           std::vector<float>* curveDbOut) {
+int timbreBins() { return kTMSpec; }
+
+AudioBufferPtr applyEq(const AudioBuffer& buf, const std::vector<float>& curveDb) {
     const int ch = buf.channels;
     const int64_t nf = buf.frames();
-    if (!target.valid() || target.sampleRate != buf.sampleRate) return nullptr;
-    if (ch <= 0 || (int)target.logPower.size() != kTMSpec) return nullptr;
+    if (ch <= 0 || (int)curveDb.size() != kTMSpec) return nullptr;
+    std::vector<float> gain((size_t)kTMSpec);
+    for (int k = 0; k < kTMSpec; ++k) gain[(size_t)k] = (float)std::pow(10.0, curveDb[(size_t)k] / 20.0);
+    auto out = std::make_shared<AudioBuffer>();
+    out->sampleRate = buf.sampleRate;
+    out->channels = ch;
+    out->samples.resize(buf.samples.size());
+    for (int c = 0; c < ch; ++c) {
+        std::vector<float> chan((size_t)nf);
+        for (int64_t i = 0; i < nf; ++i) chan[(size_t)i] = buf.samples[(size_t)(i * ch + c)];
+        const std::vector<float> filt = tmFilterChannel(chan, gain);
+        for (int64_t i = 0; i < nf; ++i) out->samples[(size_t)(i * ch + c)] = filt[(size_t)i];
+    }
+    return out;
+}
+
+TimbreEq designTimbreEq(const AudioBuffer& buf, const TimbreProfile& target,
+                        const TimbreMatchOptions& opts, double keepLoudness) {
+    TimbreEq eq;
+    const int ch = buf.channels;
+    if (!target.valid() || target.sampleRate != buf.sampleRate) return eq;
+    if (ch <= 0 || (int)target.logPower.size() != kTMSpec) return eq;
     const TimbreProfile mine = computeTimbreProfile(buf);
-    if (!mine.valid()) return nullptr;   // too short to measure
+    if (!mine.valid()) return eq;   // too short or silent to measure
 
     // Power ratio in dB. (10*log10, not 20: these are powers, not amplitudes.)
     const double toDb = 10.0 / std::log(10.0);
@@ -1066,45 +1086,47 @@ AudioBufferPtr matchTimbre(const AudioBuffer& buf, const TimbreProfile& target,
     // used to be a maximum over bins nobody can hear, and would report 23 dB for
     // a match that moved the audible spectrum by 3.
     const float lim = std::max(0.0f, std::min(24.0f, opts.maxCorrectionDb));
-    std::vector<float> gain((size_t)kTMSpec);
     for (int k = 0; k < kTMSpec; ++k) {
         db[k] = (db[k] - mean) * band[k];
         db[k] = std::max(-lim, std::min(lim, db[k]));
-        gain[k] = (float)std::pow(10.0, db[k] / 20.0);   // amplitude gain from power dB
     }
-    if (curveDbOut) *curveDbOut = db;
+    eq.shapeDb = db;
+    eq.result = applyEq(buf, db);
+    if (!eq.result) return TimbreEq{};
 
-    auto out = std::make_shared<AudioBuffer>();
-    out->sampleRate = buf.sampleRate;
-    out->channels = ch;
-    out->samples.resize(buf.samples.size());
-    if (nf <= 0) return out;
-
-    for (int c = 0; c < ch; ++c) {
-        std::vector<float> chan((size_t)nf);
-        for (int64_t i = 0; i < nf; ++i) chan[i] = buf.samples[i * ch + c];
-        const std::vector<float> filt = tmFilterChannel(chan, gain);
-        for (int64_t i = 0; i < nf; ++i) out->samples[i * ch + c] = filt[(size_t)i];
-    }
-
-    // Even a zero-mean curve moves the loudness a little, because the mean is
-    // over the *target's* spectrum and this clip's differs. Restoring the
-    // measured speech level keeps the effect purely about tone; the clamp stops
-    // a pathological ratio (a near-silent clip) from blowing anything up.
+    // Two broadband scalars, folded into the curve as one dB offset so that the
+    // stored EQ, applied to the clip later, gives exactly this result.
+    //
+    // Even a zero-mean curve moves the loudness a little, because the mean is over
+    // the *target's* spectrum and this clip's differs. Restoring the level keeps
+    // the effect purely about tone; the clamp stops a pathological ratio (a
+    // near-silent clip) from blowing anything up.
+    double scale = 1.0;
     if (opts.preserveLoudness) {
-        const double before = speechLoudness(buf), after = speechLoudness(*out);
-        if (before > 1e-9 && after > 1e-9) {
-            const float k = (float)std::max(0.25, std::min(4.0, before / after));
-            if (k != 1.0f) for (float& v : out->samples) v *= k;
-        }
+        const double before = keepLoudness > 0.0 ? keepLoudness : speechLoudness(buf);
+        const double after = speechLoudness(*eq.result);
+        if (before > 1e-9 && after > 1e-9) scale = std::max(0.25, std::min(4.0, before / after));
     }
     // Scale rather than clip if the filter pushed a peak over full scale: a
     // boosted band can add a few percent, and hard-clipping it would trade a
     // subtle tone difference for audible distortion -- a far worse bargain.
     float peak = 0.0f;
-    for (float v : out->samples) peak = std::max(peak, std::fabs(v));
-    if (peak > 1.0f) { const float k = 1.0f / peak; for (float& v : out->samples) v *= k; }
-    return out;
+    for (float v : eq.result->samples) peak = std::max(peak, std::fabs(v));
+    if (peak * scale > 1.0) scale = 1.0 / peak;
+    if (scale != 1.0)
+        for (float& v : eq.result->samples) v = (float)(v * scale);
+    const float offset = (float)(20.0 * std::log10(scale));
+    eq.curveDb = db;
+    for (float& v : eq.curveDb) v += offset;
+    return eq;
+}
+
+AudioBufferPtr matchTimbre(const AudioBuffer& buf, const TimbreProfile& target,
+                           const TimbreMatchOptions& opts,
+                           std::vector<float>* curveDbOut) {
+    TimbreEq eq = designTimbreEq(buf, target, opts);
+    if (curveDbOut) *curveDbOut = eq.shapeDb;
+    return eq.result;
 }
 
 // ---------------- manual region edits ----------------

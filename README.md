@@ -217,6 +217,17 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   the correction curve is, and *Keep each clip's loudness* makes sure this
   changes only tone, never level. One undo step for the whole set.
 
+  **The EQ is a setting on each clip, not a change to its audio.** A clip that has
+  one shows an **EQ** tag on its card and on its blocks in the timeline, so you can
+  always see whether a match (or the undo of one) is in effect. Matching again
+  *replaces* a clip's EQ rather than piling a second one on top, edits like crop or
+  the voice cleaner keep it, and **Remove the EQ** (in the *Match timbre (EQ)*
+  submenu — this clip or all clips — or a track header's menu) takes it off
+  exactly, back to the clip's own audio. Everything you hear, see and export —
+  previews, the timeline, the waveform, *Export clip*, the mixdown — goes through
+  the EQ. Projects save the EQs; an older version of the app opens such a project
+  fine, just without them.
+
   The correction only covers the range speech actually occupies (about
   90 Hz – 11 kHz). Below and above that a recording is mostly its own rumble and
   hiss, and matching one clip's rumble to another's is both pointless and, if a
@@ -387,6 +398,8 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |
 | Remove bumps / shuffling (keep only voice) | right-click a card → *Remove non-voice → This clip / All clips*, or right-click a track header → *Remove non-voice — this track* |
 | Make separately-recorded clips sound alike | right-click a track header → *Match timbre — this track…* / *— all tracks…*; a card → *Match timbre (EQ) ▸* (*This clip, to match the others* / *Clips on the timeline* / *All clips*); or a placed clip → *Match this clip's timbre to the rest of the track…* |
+| Take a timbre EQ off | right-click a card → *Match timbre (EQ) ▸ Remove the EQ — this clip / all clips*, or a track header → *Remove the EQ — this track* |
+| See which clips have an EQ on | the **EQ** tag on the card and on its blocks in the timeline |
 | Match to one particular take | in either *Match* dialog, set **Match to:** to *Sound like / As loud as '<that clip>'* — it's remembered for both |
 | Clean / de-noise only part of a clip | drag a selection, then right-click a card → *Voice cleaner* / *Remove non-voice* → **This clip (selection)…** |
 | Get rid of a noise *Remove non-voice* won't touch | drag a selection over it, then right-click a card (or use the editor toolbar) → *Silence selection (keep timing)* / *Delete selection (close gap)* |

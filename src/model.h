@@ -9,6 +9,11 @@
 // true if it is the same limit Document enforces.
 constexpr float kMaxClipGain = 16.0f;
 
+// A clip's timbre EQ: one fixed gain per frequency bin, in dB, over the bins of
+// the timbre analysis (dsp::timbreBins). Shared and immutable, so the undo history's
+// snapshots of a clip cost a pointer each, not a copy of the curve.
+using EqCurve = std::shared_ptr<const std::vector<float>>;
+
 // A named piece of audio in the clip library. Each clip owns its own AudioBuffer
 // (shared_ptr, immutable once created). Derived clips (from a selection/crop) get
 // their own trimmed copy so they're fully independent.
@@ -16,9 +21,23 @@ struct Clip {
     int id = 0;
     std::wstring name;
     std::wstring sourcePath;        // original file on disk, if any
+    // The clip's audio *before* its EQ: what edits (crop, clean, silence, ...) work
+    // on and what the project file stores. Anything that plays, draws, measures or
+    // exports the clip wants heard() instead.
     AudioBufferPtr buffer;
-    PeakCachePtr peaks;
+    // The EQ timbre matching set (null = none), and `buffer` through it. A setting,
+    // not rewritten samples: a later match replaces the curve rather than stacking
+    // on it, and the EQ can be taken off again. `eqBuffer` is derived -- Document
+    // renders it whenever the curve or the audio changes -- and is null when there
+    // is no EQ, or until a restored history state is rendered.
+    EqCurve eq;
+    AudioBufferPtr eqBuffer;
+    PeakCachePtr peaks;             // of heard(): the waveform shows what plays
     float gain = 1.0f;             // linear volume multiplier
+
+    // What the clip sounds like: its audio through its EQ.
+    const AudioBufferPtr& heard() const { return eq && eqBuffer ? eqBuffer : buffer; }
+    bool hasEq() const { return eq != nullptr; }
     uint64_t timestamp = 0;        // FILETIME ticks: source file's mtime for loaded
                                    // clips, else the wall-clock time it was created.
                                    // Used for "sort by time" in the library.
@@ -26,6 +45,14 @@ struct Clip {
     int64_t frames() const { return buffer ? buffer->frames() : 0; }
     int sampleRate() const { return buffer ? buffer->sampleRate : 48000; }
     double durationSec() const { return buffer ? buffer->durationSec() : 0.0; }
+};
+
+// A change to one clip's EQ, as a match produces it: the new curve (null takes
+// the EQ off) and, when it has already been rendered, the clip's audio through it.
+struct ClipEq {
+    int clipId = -1;
+    EqCurve eq;
+    AudioBufferPtr heard;           // may be null: Document renders it
 };
 
 // A clip instance placed on a track at a timeline position (in project frames).

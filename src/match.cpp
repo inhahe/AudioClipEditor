@@ -196,7 +196,7 @@ VolumeResult matchVolume(const Project& p, const ClipSet& s, int reference) {
         r.oldGain[i] = r.newGain[i] = c->gain;
         // Below -100 dB FS the clip is effectively silent: the measurement is of
         // the noise floor, and matching that is meaningless.
-        const double L = dsp::speechLoudness(*c->buffer);
+        const double L = dsp::speechLoudness(*c->heard());   // as it sounds, EQ and all
         if (L < 1e-5 || c->gain <= 0.0f) {
             // A clip turned all the way down is silent too; there is no level of
             // it to compare with, and dividing by it would be a division by zero.
@@ -305,7 +305,7 @@ VolumeResult matchVolume(const Project& p, const ClipSet& s, int reference) {
     for (int i = 0; i < n; ++i) {
         if (!s.change[i] || !r.measured[i] || !(r.newGain[i] > r.oldGain[i])) continue;
         const Clip* c = p.findClip(s.ids[i]);
-        const double alone = peakOf(*c->buffer) * r.newGain[i];
+        const double alone = peakOf(*c->heard()) * r.newGain[i];
         const double mix = placed[i] ? alone * trackMax[i] : 0.0;
         if (alone > 1.0 || mix > 1.0)
             r.overFullScale.push_back({ i, toDb(std::max(alone, mix)), mix > 1.0 });
@@ -360,13 +360,15 @@ TimbreResult matchTimbre(const Project& p, const ClipSet& s, int reference,
 
     // Measure everything before filtering anything: the target may be the average
     // of these, and a clip that can't be measured must be left alone rather than
-    // filtered by a curve derived from nothing.
+    // filtered by a curve derived from nothing. Each clip is measured as it is
+    // *heard*, its current EQ included -- that is the tone colour the others are
+    // matched to, and the one "before" describes.
     std::vector<dsp::TimbreProfile> profiles((size_t)n);
     for (int i = 0; i < n; ++i) {
         const Clip* c = p.findClip(s.ids[i]);
         if (!c || !c->buffer) continue;
         if (rates[i] != r.rate) { ++r.mismatched; r.otherRate[i] = 1; continue; }
-        profiles[i] = dsp::computeTimbreProfile(*c->buffer);
+        profiles[i] = dsp::computeTimbreProfile(*c->heard());
         if (profiles[i].valid()) r.measured[i] = 1;
         else ++r.unmeasured;
     }
@@ -400,18 +402,24 @@ TimbreResult matchTimbre(const Project& p, const ClipSet& s, int reference,
         if (!s.change[i] || i == reference || !profiles[i].valid()) continue;
         const Clip* c = p.findClip(s.ids[i]);
         if (!c || !c->buffer) continue;
-        std::vector<float> curve;
-        AudioBufferPtr matched = dsp::matchTimbre(*c->buffer, target, opts, &curve);
-        if (!matched) continue;
+        // The new EQ is designed from the clip's own audio, *not* from what it sounds
+        // like through its current EQ: it replaces that EQ rather than stacking on
+        // it, so matching again lands in the same place instead of compounding. It
+        // keeps the loudness the clip is heard at now.
+        const dsp::TimbreEq eq = dsp::designTimbreEq(*c->buffer, target, opts,
+                                                     dsp::speechLoudness(*c->heard()));
+        if (!eq.result) continue;
         // Where the biggest move landed, not just how big it was: 8 dB at 250 Hz is
         // a mic-distance difference, 8 dB at 40 Hz is a fan.
-        for (size_t k = 0; k < curve.size(); ++k)
-            if (std::fabs(curve[k]) > r.worstDb) {
-                r.worstDb = std::fabs(curve[k]);
+        for (size_t k = 0; k < eq.shapeDb.size(); ++k)
+            if (std::fabs(eq.shapeDb[k]) > r.worstDb) {
+                r.worstDb = std::fabs(eq.shapeDb[k]);
                 r.worstHz = (double)k * binHz;
                 r.worstClip = i;
             }
-        r.updates.push_back({ s.ids[i], matched });
+        r.updates.push_back({ s.ids[i], std::make_shared<const std::vector<float>>(eq.curveDb),
+                              eq.result });
+        const AudioBufferPtr& matched = eq.result;
         // Re-measure the result. The size of the correction says how far a clip was
         // moved, which is a different question from how close it ended up: a big
         // correction that landed is a success, and a small one that was clamped is a

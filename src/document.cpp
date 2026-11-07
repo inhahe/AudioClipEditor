@@ -1,5 +1,7 @@
 #include "document.h"
+#include "dsp.h"
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <cstdint>
 #include <unordered_map>
@@ -20,6 +22,18 @@ static uint64_t clipTimestampFor(const std::wstring& sourcePath) {
     FILETIME ft{}; GetSystemTimeAsFileTime(&ft);
     ULARGE_INTEGER u; u.LowPart = ft.dwLowDateTime; u.HighPart = ft.dwHighDateTime;
     return u.QuadPart;
+}
+
+// Bring a clip's derived state up to date with its audio and EQ: the audio through
+// the EQ, and the waveform of what plays. A curve that doesn't fit the analysis (it
+// could only come from a damaged file) is dropped rather than half-applied.
+void Document::renderClip(Clip& c) {
+    c.eqBuffer = nullptr;
+    if (c.eq && c.buffer) {
+        c.eqBuffer = dsp::applyEq(*c.buffer, *c.eq);
+        if (!c.eqBuffer) c.eq = nullptr;
+    }
+    c.peaks = buildPeaks(c.heard());
 }
 
 void Document::init(int sampleRate) {
@@ -68,8 +82,9 @@ int Document::addClipFromRange(int srcClipId, int64_t begin, int64_t end,
     c.id = project_.nextClipId++;
     c.name = name;
     c.buffer = slice;
-    c.peaks = buildPeaks(slice);
     c.gain = src->gain;
+    c.eq = src->eq;   // a cut from an EQ'd take sounds as the take did
+    renderClip(c);
     c.timestamp = clipTimestampFor(L"");   // a derived clip: when it was made
     const int id = c.id;
     project_.library.push_back(std::move(c));   // `src` may dangle from here on
@@ -123,10 +138,12 @@ int Document::replaceClipWithNew(int oldClipId, const std::wstring& name, AudioB
     c.name = name;
     c.sourcePath = sourcePath;
     c.buffer = std::move(buf);
-    c.peaks = buildPeaks(c.buffer);
-    // The replacement stands in for the old clip, so it plays at the level the old
-    // one did; the samples are untouched, and gain is applied at playback.
+    // The replacement stands in for the old clip, so it plays at the level and with
+    // the tone the old one did; the samples are untouched, and gain and EQ are
+    // applied on top of them.
     c.gain = lib[(size_t)pos].gain;
+    c.eq = lib[(size_t)pos].eq;
+    renderClip(c);
     c.timestamp = clipTimestampFor(sourcePath);
     const int id = c.id;
 
@@ -179,7 +196,7 @@ void Document::replaceClipBuffer(int id, AudioBufferPtr newBuf, const std::wstri
     Clip* c = project_.findClip(id);
     if (!c) return;
     c->buffer = newBuf;
-    c->peaks = buildPeaks(newBuf);
+    renderClip(*c);   // the EQ stays, applied to the new audio
     // update placement lengths referencing this clip
     int64_t len = newBuf ? newBuf->frames() : 0;
     for (auto& t : project_.tracks)
@@ -195,7 +212,7 @@ void Document::replaceClipBuffers(const std::vector<std::pair<int, AudioBufferPt
         Clip* c = project_.findClip(u.first);
         if (!c) continue;
         c->buffer = u.second;
-        c->peaks = buildPeaks(u.second);
+        renderClip(*c);   // the EQ stays, applied to the new audio
         int64_t len = u.second ? u.second->frames() : 0;
         for (auto& t : project_.tracks)
             for (auto& p : t.clips)
@@ -288,7 +305,25 @@ void Document::setClipGain(int id, float g, const std::wstring& desc) {
 
 bool Document::setClipGains(const std::vector<std::pair<int, float>>& gains,
                             const std::wstring& desc) {
+    return applyMatch({}, gains, desc);
+}
+
+bool Document::applyMatch(const std::vector<ClipEq>& eqs,
+                          const std::vector<std::pair<int, float>>& gains,
+                          const std::wstring& desc) {
     bool any = false;
+    for (const ClipEq& u : eqs) {
+        Clip* c = project_.findClip(u.clipId);
+        if (!c || c->eq == u.eq) continue;   // the same curve (or none on either side)
+        c->eq = u.eq;
+        if (u.eq && u.heard && c->buffer && u.heard->frames() == c->buffer->frames()) {
+            c->eqBuffer = u.heard;           // rendered already, by the match
+            c->peaks = buildPeaks(u.heard);
+        } else {
+            renderClip(*c);
+        }
+        any = true;
+    }
     for (const auto& u : gains) {
         Clip* c = project_.findClip(u.first);
         if (!c) continue;
@@ -309,10 +344,11 @@ void Document::setTrackGain(int id, float g, const std::wstring& desc) {
 AudioBufferPtr Document::exportAudio(int clipId, int64_t begin, int64_t end) const {
     const Clip* c = project_.findClip(clipId);
     if (!c || !c->buffer) return nullptr;
-    const int64_t nf = c->buffer->frames();
+    const AudioBufferPtr& heard = c->heard();
+    const int64_t nf = heard->frames();
     if (end < 0) end = nf;
-    if (begin <= 0 && end >= nf && c->gain == 1.0f) return c->buffer;
-    AudioBufferPtr out = sliceBuffer(*c->buffer, begin, end);
+    if (begin <= 0 && end >= nf && c->gain == 1.0f) return heard;
+    AudioBufferPtr out = sliceBuffer(*heard, begin, end);
     if (c->gain != 1.0f) for (float& v : out->samples) v *= c->gain;
     return out;
 }
@@ -330,8 +366,9 @@ AudioBufferPtr Document::renderMix() const {
             const Clip* c = project_.findClip(pc.clipId);
             if (!c || !c->buffer) continue;
             float g = c->gain * t.gain;
-            int ch = c->buffer->channels;
-            const float* s = c->buffer->samples.data();
+            const AudioBuffer& heard = *c->heard();
+            int ch = heard.channels;
+            const float* s = heard.samples.data();
             int64_t len = std::min<int64_t>(pc.lengthFrames, c->frames());
             for (int64_t i = 0; i < len; ++i) {
                 int64_t d = pc.startFrame + i;
@@ -385,13 +422,14 @@ namespace {
     // otherwise because each buffer is read once and handed to every snapshot that
     // wants it.
     //
-    // The budget below caps that appended audio. Destructive effects -- timbre
-    // matching, noise reduction, normalise -- rewrite every clip they touch, so a
-    // handful of them genuinely does multiply the project's size, and a save that
-    // silently turned 200 MB into 3 GB would be a worse surprise than a truncated
-    // history. Steps that don't fit are still written, by name, without their
-    // state: the History window can still say the timbre match happened, it just
-    // can't take you back to before it.
+    // The budget below caps that appended audio. Destructive effects -- noise
+    // reduction, remove non-voice -- rewrite every clip they touch, so a handful of
+    // them genuinely does multiply the project's size, and a save that silently
+    // turned 200 MB into 3 GB would be a worse surprise than a truncated history.
+    // (Timbre matching costs nothing here: it stores an EQ curve, not new audio.)
+    // Steps that don't fit are still written, by name, without their state: the
+    // History window can still say the clean-up happened, it just can't take you
+    // back to before it.
     int64_t g_historyAudioBudget = 512ll * 1024 * 1024;
 
     int64_t bufferBytes(const AudioBufferPtr& b) {
@@ -620,6 +658,55 @@ bool Document::saveProject(const std::wstring& path, bool withHistory) {
         }
     }
 
+    // The clips' EQ curves: a tagged section after everything else, because a reader
+    // stops at the end of what it knows. An older build therefore opens the project
+    // and plays it without the EQs, rather than failing to open it -- the body holds
+    // each clip's own audio, which is complete on its own. Written only when some
+    // clip, now or in the stored history, has an EQ, so a project without any stays
+    // byte-for-byte what earlier versions wrote.
+    {
+        std::unordered_map<const std::vector<float>*, int> curveIx;
+        std::vector<EqCurve> curves;
+        auto ref = [&](const EqCurve& e) -> int32_t {
+            if (!e) return -1;
+            auto it = curveIx.find(e.get());
+            if (it != curveIx.end()) return it->second;
+            curveIx.emplace(e.get(), (int)curves.size());
+            curves.push_back(e);
+            return (int32_t)curves.size() - 1;
+        };
+        std::vector<int32_t> live;
+        for (const auto& c : project_.library) live.push_back(ref(c.eq));
+        std::vector<std::vector<int32_t>> perNode(nodes.size());
+        for (size_t i = 0; i < nodes.size(); ++i)
+            if (nodeHasSnapshot[i])
+                for (const auto& c : nodes[i]->snapshot.library) perNode[i].push_back(ref(c.eq));
+        if (!curves.empty()) {
+            const int64_t start = _ftelli64(f);
+            fwrite("ACEQ", 1, 4, f);
+            wU32(f, 1u);
+            wI32(f, (int32_t)curves.size());
+            for (const auto& e : curves) {
+                wI32(f, (int32_t)e->size());
+                if (!e->empty()) fwrite(e->data(), sizeof(float), e->size(), f);
+            }
+            wI32(f, (int32_t)live.size());
+            for (int32_t r : live) wI32(f, r);
+            // One list per history node written above, in the same order; a node
+            // stored by name only has an empty list.
+            wI32(f, (int32_t)nodes.size());
+            for (const auto& refs : perNode) {
+                wI32(f, (int32_t)refs.size());
+                for (int32_t r : refs) wI32(f, r);
+            }
+            // Footer: where the section starts, then its tag again -- the last 12
+            // bytes of the file -- so the reader finds it from the end rather than
+            // by reading on from the history, whose length it may not know.
+            wI64(f, start);
+            fwrite("ACEQ", 1, 4, f);
+        }
+    }
+
     fclose(f);
     markSaved();
     return true;
@@ -716,6 +803,68 @@ bool Document::loadProject(const std::wstring& path) {
         }
         if (!ok) { flat.clear(); histCurrent = -1; }
     }
+
+    // The EQ section (see saveProject). Found from its footer at the end of the file,
+    // not by reading on from here: a history that couldn't be read leaves the
+    // position unknown, and that must not cost the live clips their EQs too.
+    // Validated as a whole before anything in it is used, so a damaged one costs the
+    // EQs -- never the project, nor the history.
+    {
+        char tag[4];
+        int64_t at = -1;
+        if (_fseeki64(f, -12, SEEK_END) == 0) {
+            at = rI64(f);
+            if (fread(tag, 1, 4, f) != 4 || memcmp(tag, "ACEQ", 4) != 0) at = -1;
+        }
+        if (at > 0 && _fseeki64(f, at, SEEK_SET) == 0 &&
+            fread(tag, 1, 4, f) == 4 && memcmp(tag, "ACEQ", 4) == 0 && rU32(f) == 1u) {
+            std::vector<EqCurve> curves;
+            bool ok = true;
+            const int32_t nCurves = rI32(f);
+            ok = nCurves >= 0 && nCurves <= 1 << 20;
+            for (int i = 0; ok && i < nCurves; ++i) {
+                const int32_t n = rI32(f);
+                if (n < 0 || n > 1 << 16) { ok = false; break; }
+                auto e = std::make_shared<std::vector<float>>((size_t)n);
+                if (n > 0 && fread(e->data(), sizeof(float), (size_t)n, f) != (size_t)n) { ok = false; break; }
+                // A curve for another analysis size can't be applied; it is dropped
+                // (the clip plays without EQ) rather than failing the section.
+                curves.push_back(n == dsp::timbreBins() ? EqCurve(e) : EqCurve());
+            }
+            auto readRefs = [&](size_t expected, std::vector<int32_t>& out) {
+                const int32_t n = rI32(f);
+                if (n < 0 || (size_t)n != expected) return false;
+                out.resize((size_t)n);
+                for (auto& r : out) {
+                    r = rI32(f);
+                    if (r < -1 || r >= (int32_t)curves.size()) return false;
+                }
+                return true;
+            };
+            std::vector<int32_t> live;
+            ok = ok && readRefs(p.library.size(), live);
+            std::vector<std::vector<int32_t>> perNode;
+            if (ok) {
+                const int32_t nNodes = rI32(f);
+                // The history may have been dropped as unreadable, in which case its
+                // EQs have nothing to attach to; the live ones still apply.
+                if (nNodes == (int32_t)flat.size()) {
+                    perNode.resize(flat.size());
+                    for (size_t i = 0; ok && i < flat.size(); ++i)
+                        ok = readRefs(flat[i].hasSnapshot ? flat[i].snapshot.library.size() : 0,
+                                      perNode[i]);
+                    if (!ok) { perNode.clear(); ok = true; }
+                }
+            }
+            if (ok) {
+                for (size_t i = 0; i < live.size(); ++i)
+                    if (live[i] >= 0) p.library[i].eq = curves[(size_t)live[i]];
+                for (size_t i = 0; i < perNode.size(); ++i)
+                    for (size_t j = 0; j < perNode[i].size(); ++j)
+                        if (perNode[i][j] >= 0) flat[i].snapshot.library[j].eq = curves[(size_t)perNode[i][j]];
+            }
+        }
+    }
     fclose(f);
     if (p.tracks.empty()) { Track t; t.id = p.nextTrackId++; t.name = L"Track 1"; p.tracks.push_back(t); }
 
@@ -724,6 +873,9 @@ bool Document::loadProject(const std::wstring& path) {
 
     view_ = v;
     project_ = p;
+    // The current state's EQs are rendered now, since it is what plays next; the
+    // history's are rendered when visited (see restore()).
+    for (Clip& c : project_.library) if (c.eq) renderClip(c);
     if (flat.empty() || !undo_.rebuild(flat, histCurrent)) {
         undo_.init(project_);   // no history in the file, or it didn't survive the trip
     } else {
@@ -754,6 +906,20 @@ void Document::restore(const Project& p) {
     project_ = p;
     project_.nextClipId = nextClip;
     project_.nextTrackId = nextTrack;
+    // A state read back from a project file carries its EQ curves but not the audio
+    // through them -- rendering every state of a long history on load would cost
+    // far more than rendering the few that are actually visited. Render them now,
+    // and keep the result in the history so a second visit costs nothing.
+    UndoNode* node = undo_.current();
+    for (size_t i = 0; i < project_.library.size(); ++i) {
+        Clip& c = project_.library[i];
+        if (!c.eq || c.eqBuffer) continue;
+        renderClip(c);
+        if (node && i < node->snapshot.library.size() && node->snapshot.library[i].id == c.id) {
+            node->snapshot.library[i].eqBuffer = c.eqBuffer;
+            node->snapshot.library[i].peaks = c.peaks;
+        }
+    }
 }
 
 void Document::undo() {

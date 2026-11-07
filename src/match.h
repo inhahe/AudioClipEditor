@@ -151,7 +151,10 @@ VolumeResult matchVolume(const Project& p, const ClipSet& s, int reference);
 struct TimbreResult {
     Failure failure = Failure::None;
     bool ok() const { return failure == Failure::None; }
-    std::vector<std::pair<int, AudioBufferPtr>> updates;   // for Document::replaceClipBuffers
+    // Each matched clip's new EQ, with its audio through it, for Document::applyMatch.
+    // A clip's EQ is a setting -- its own audio is left alone -- so a match can be
+    // run again, or taken off, without degrading anything.
+    std::vector<ClipEq> updates;
     // The rate the match works at: the matched clip's in one clip to the rest, else
     // the rate most of the set shares -- one odd clip must not exclude all the others.
     int rate = 0;
@@ -166,12 +169,13 @@ struct TimbreResult {
     Spread before, after;
 };
 
-// Measure every clip in the set, decide the target -- the reference clip's tone
-// colour, or the average of the pool's -- and filter each matched clip onto it with
-// dsp::matchTimbre. Everything is measured before anything is filtered, since the
-// target may be an average of them. The reference clip is not processed at all: it
-// is the standard, so it stays bit-for-bit what it was. Then every result is
-// measured again for the before/after spread. Commits nothing.
+// Measure every clip in the set as it is heard, decide the target -- the reference
+// clip's tone colour, or the average of the pool's -- and design each matched clip's
+// EQ onto it (dsp::designTimbreEq, from the clip's own audio, so it replaces any EQ
+// the clip had). Everything is measured before anything is designed, since the
+// target may be an average of them. The reference clip is not touched at all: it is
+// the standard, EQ included. Then every result is measured again for the
+// before/after spread. Commits nothing.
 TimbreResult matchTimbre(const Project& p, const ClipSet& s, int reference,
                          const dsp::TimbreMatchOptions& opts);
 

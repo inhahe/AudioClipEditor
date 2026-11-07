@@ -180,6 +180,28 @@ AudioBufferPtr matchTimbre(const AudioBuffer& buf, const TimbreProfile& target,
                            const TimbreMatchOptions& opts,
                            std::vector<float>* curveDbOut = nullptr);
 
+// The EQ a match designs, kept apart from the audio so a clip can carry it as a
+// setting (Clip::eq) rather than as rewritten samples.
+struct TimbreEq {
+    // What to apply: the correction plus one broadband offset that restores the
+    // loudness (opts.preserveLoudness) and keeps peaks under full scale. Applied to
+    // the same audio with applyEq it reproduces `result` exactly.
+    std::vector<float> curveDb;
+    std::vector<float> shapeDb;     // the correction alone: what matchTimbre reports
+    AudioBufferPtr result;          // the audio through curveDb; null if no match
+};
+// matchTimbre, returning the EQ as well as the audio. `keepLoudness` is the speech
+// loudness the result should have when opts.preserveLoudness is set; <= 0 means
+// `buf`'s own. (A clip that already has an EQ is matched from its unequalised audio
+// but should keep the level it is *heard* at, which is what this is for.)
+TimbreEq designTimbreEq(const AudioBuffer& buf, const TimbreProfile& target,
+                        const TimbreMatchOptions& opts, double keepLoudness = -1.0);
+// `buf` through an EQ curve of timbreBins() values in dB, zero-phase, the same
+// filter matching uses. nullptr if the curve is the wrong size for this analysis.
+AudioBufferPtr applyEq(const AudioBuffer& buf, const std::vector<float>& curveDb);
+// How many frequency bins an EQ curve has (0..Nyquist of the timbre analysis).
+int timbreBins();
+
 // How far apart two tone colours measure, in dB -- the number that says whether
 // matching actually worked. Reporting the size of the *correction* is not the
 // same thing: a large correction that landed is a success and a small one that

@@ -60,13 +60,14 @@ enum {
     // Matching, each as this clip to the others / the timeline / the library.
     IDM_TIMBRE_ONE, IDM_TIMBRE_TL, IDM_TIMBRE_LIB,
     IDM_VOL_ONE, IDM_VOL_TL, IDM_VOL_LIB,
+    IDM_EQ_OFF_ONE, IDM_EQ_OFF_LIB,
     IDM_EXPORTCLIP, IDM_EXPORTSEL,
     IDM_SILENCESEL, IDM_DELETESEL, IDM_SPLITOUTSEL,
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK, IDM_TL_GAP, IDM_TL_CLOSEGAP, IDM_TL_RIPPLE,
     IDM_TL_TIMBRE, IDM_TL_VOLUME,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE, IDM_TRK_VOICEISO,
-    IDM_TRK_TIMBRE, IDM_TRK_VOLUME, IDM_TRK_TIMBRE_ALL, IDM_TRK_VOLUME_ALL,
+    IDM_TRK_TIMBRE, IDM_TRK_VOLUME, IDM_TRK_TIMBRE_ALL, IDM_TRK_VOLUME_ALL, IDM_TRK_EQ_OFF,
     IDM_SORT_NAME = 340, IDM_SORT_TIME,
     IDM_REDO_BASE = 400,
     IDM_APPLYCAP_BASE = 500   // + recent-capture index (apply to the clicked clip)
@@ -820,13 +821,13 @@ struct App {
 
         // main waveform
         fill(h, edMain, col::waveBg);
-        if (c->buffer && c->peaks) wf::draw(h, edMain, *c->buffer, *c->peaks, 0, cf, col::wave);
+        if (c->buffer && c->peaks) wf::draw(h, edMain, *c->heard(), *c->peaks, 0, cf, col::wave);
         if (sel) {
             int sx0 = edMainX(selStart), sx1 = edMainX(selEnd);
             RECT sr = { sx0, edMain.top, sx1, edMain.bottom };
             fill(h, sr, col::selRect);
             SaveDC(h); IntersectClipRect(h, sr.left, sr.top, sr.right, sr.bottom);
-            if (c->buffer && c->peaks) wf::draw(h, edMain, *c->buffer, *c->peaks, 0, cf, col::waveSel);
+            if (c->buffer && c->peaks) wf::draw(h, edMain, *c->heard(), *c->peaks, 0, cf, col::waveSel);
             RestoreDC(h, -1);
             drawVLine(h, sx0, edMain.top, edMain.bottom, col::waveSel);
             drawVLine(h, sx1, edMain.top, edMain.bottom, col::waveSel);
@@ -875,7 +876,7 @@ struct App {
         fill(h, wv, col::waveBg);
         int w = std::max(1, (int)(wv.right - wv.left));
         auto fx = [&](int64_t f) { return wv.left + (int)((double)(f - ws) / span * w); };
-        if (c->buffer && c->peaks) wf::draw(h, wv, *c->buffer, *c->peaks, ws, we, col::wave);
+        if (c->buffer && c->peaks) wf::draw(h, wv, *c->heard(), *c->peaks, ws, we, col::wave);
         // shade the selected side (left strip: right of edge is inside selection;
         // right strip: left of edge is inside selection)
         // The playhead, when it is inside this strip's window. These strips are
@@ -1008,7 +1009,7 @@ struct App {
         RECT sr = { sx0, wv.top, sx1, wv.bottom };
         fill(h, sr, col::selRect);
         SaveDC(h); IntersectClipRect(h, sr.left, sr.top, sr.right, sr.bottom);
-        wf::draw(h, wv, *c.buffer, *c.peaks, 0, c.frames(), col::waveSel);
+        wf::draw(h, wv, *c.heard(), *c.peaks, 0, c.frames(), col::waveSel);
         RestoreDC(h, -1);
         HPEN pen = CreatePen(PS_SOLID, 1, col::waveSel); HGDIOBJ op = SelectObject(h, pen);
         MoveToEx(h, sx0, wv.top, nullptr); LineTo(h, sx0, wv.bottom);
@@ -1137,7 +1138,7 @@ struct App {
             fill(h, cl.wave, col::waveBg);
             if (c->buffer && c->peaks) {
                 int64_t nf = c->frames();
-                wf::draw(h, cl.wave, *c->buffer, *c->peaks, 0, nf, col::wave);
+                wf::draw(h, cl.wave, *c->heard(), *c->peaks, 0, nf, col::wave);
                 // selection overlay
                 if (selectionCovers(cl.clipId)) drawSelOverlay(h, cl.wave, *c);
                 // preview cursor line
@@ -1162,6 +1163,8 @@ struct App {
             // duration inside the wave, bottom-right
             RECT dr = { cl.wave.left, cl.wave.bottom - S(15), cl.wave.right - S(3), cl.wave.bottom - S(2) };
             textOut(h, dr, fmtTime(c->durationSec()), col::dim, fSmall, DT_RIGHT | DT_BOTTOM | DT_SINGLELINE);
+            // ...and bottom-left, whether a timbre EQ is on it right now.
+            if (c->hasEq()) paintEqTag(h, cl.wave.left + S(3), cl.wave.bottom - S(16));
 
             // volume slider row
             RECT spk = { cl.card.left + S(8), cl.vol.top - S(2), cl.vol.left - S(2), cl.vol.bottom + S(2) };
@@ -1206,7 +1209,7 @@ struct App {
         RECT wv = { g.left + S(3), g.top + S(18), g.right - S(3), g.bottom - S(4) };
         if (c && c->buffer && c->peaks && wv.right > wv.left) {
             SaveDC(h); IntersectClipRect(h, wv.left, wv.top, wv.right, wv.bottom);
-            wf::draw(h, wv, *c->buffer, *c->peaks, 0, c->frames(), RGB(180, 210, 245));
+            wf::draw(h, wv, *c->heard(), *c->peaks, 0, c->frames(), RGB(180, 210, 245));
             // Deliberately *no* selection overlay here. It was drawn for a
             // while, on the reasoning that a selection belongs to the clip and
             // so belongs on every surface showing that clip -- but on a track
@@ -1219,7 +1222,23 @@ struct App {
             RestoreDC(h, -1);
         }
         RECT nm = { g.left + S(6), g.top + S(2), g.right - S(4), g.top + S(18) };
+        if (c && c->hasEq() && nm.right - nm.left > S(60)) {
+            // At the end of the name row, where a long name ellipsises before it.
+            const RECT tag = paintEqTag(h, nm.right - eqTagW(), g.top + S(3));
+            nm.right = tag.left - S(3);
+        }
         textOut(h, nm, c ? c->name : L"", col::text, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+
+    // The "EQ" tag on a clip's card and on its blocks on the timeline: this clip has a
+    // timbre EQ on it right now. An EQ changes nothing else that is visible, so this
+    // is the one place that says whether a match -- or the undo of one -- is in effect.
+    int eqTagW() const { return S(22); }
+    RECT paintEqTag(HDC h, int x, int y) {
+        RECT r = { x, y, x + eqTagW(), y + S(13) };
+        roundFill(h, r, col::accentDk, col::accent, S(4));
+        textOut(h, r, L"EQ", col::text, fSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return r;
     }
 
     void paintTimeline(HDC h) {
@@ -1586,7 +1605,7 @@ struct App {
         previewClipId = clipId; previewIsSel = sel;
         previewBegin = begin; previewEnd = end;
         previewCursor = startFrame; previewSeekPending = false;
-        engine.play(std::make_shared<BufferSource>(c->buffer, begin, end, c->gain), startFrame - begin);
+        engine.play(std::make_shared<BufferSource>(c->heard(), begin, end, c->gain), startFrame - begin);
         refresh();
     }
     void playSelection() { if (hasSel()) startPreview(selClipId, selStart, true); }
@@ -2121,7 +2140,7 @@ struct App {
         }
         stopAll();   // buffers are changing under any active playback
         const std::wstring target = matchTargetText(s, ref);
-        doc.replaceClipBuffers(r.updates, L"Match timbre of " + s.what + L" to " + target);
+        doc.applyMatch(r.updates, {}, L"Match timbre of " + s.what + L" to " + target);
         refresh();
 
         wchar_t whereBuf[64];
@@ -2185,6 +2204,24 @@ struct App {
             msg += L".";
         }
         MessageBoxW(hwnd, msg.c_str(), L"Match timbre", MB_ICONINFORMATION);
+    }
+
+    // Take the timbre EQ off clips. Their own audio is untouched underneath, so this
+    // is exact -- the clip sounds as it did before it was ever matched -- and it is
+    // one undo step for all of them.
+    void removeEq(const std::vector<int>& ids, const std::wstring& what) {
+        std::vector<ClipEq> off;
+        for (int id : ids) {
+            const Clip* c = doc.project().findClip(id);
+            bool dup = false;
+            for (const ClipEq& e : off) dup = dup || e.clipId == id;
+            if (c && c->hasEq() && !dup) off.push_back({ id, nullptr, nullptr });
+        }
+        if (off.empty()) { toast(L"No EQ to remove from " + what); return; }
+        stopAll();   // a clip's audio is changing under any active preview
+        doc.applyMatch(off, {}, L"Remove the EQ from " + what);
+        refresh();
+        toast(L"Removed the EQ from " + clipCount((int)off.size()));
     }
 
     // Capture the Audacity-style noise profile from the current selection
@@ -2710,7 +2747,7 @@ struct App {
                 const Clip* c = doc.project().findClip(pc.clipId);
                 // The buffer pointer covers destructive edits: an edit copies before
                 // it writes (undo snapshots share the buffer), so it lands elsewhere.
-                mix(c ? (uint64_t)(uintptr_t)c->buffer.get() : 0);
+                mix(c ? (uint64_t)(uintptr_t)c->heard().get() : 0);   // an EQ change re-arms too
                 mixf(c ? c->gain : 0.0f);
                 mix(c && c->buffer ? (uint64_t)c->buffer->frames() : 0);
             }
@@ -2725,7 +2762,7 @@ struct App {
             for (auto& pc : t.clips) {
                 const Clip* c = doc.project().findClip(pc.clipId);
                 if (!c || !c->buffer) continue;
-                TimelineSegment s; s.buf = c->buffer; s.timelineStart = pc.startFrame; s.length = pc.lengthFrames;
+                TimelineSegment s; s.buf = c->heard(); s.timelineStart = pc.startFrame; s.length = pc.lengthFrames;
                 s.gain = c->gain * t.gain;
                 segs.push_back(s);
             }
@@ -3455,6 +3492,11 @@ struct App {
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING | all, IDM_TRK_TIMBRE_ALL, L"Match timbre \u2014 all tracks\u2026");
         AppendMenuW(m, MF_STRING | all, IDM_TRK_VOLUME_ALL, L"Match volume \u2014 all tracks\u2026");
+        bool trackEq = false;
+        for (const auto& pc : t->clips)
+            if (const Clip* c = doc.project().findClip(pc.clipId)) trackEq = trackEq || c->hasEq();
+        AppendMenuW(m, MF_STRING | (trackEq ? 0 : MF_GRAYED), IDM_TRK_EQ_OFF,
+                    L"Remove the EQ \u2014 this track");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_TRK_RENAME, L"Rename track\u2026");
         AppendMenuW(m, MF_STRING | (doc.project().tracks.size() > 1 ? 0 : MF_GRAYED),
@@ -3468,6 +3510,11 @@ struct App {
         else if (cmd == IDM_TRK_VOLUME) matchVolumeClips(match::trackSet(doc.project(), trackId));
         else if (cmd == IDM_TRK_TIMBRE_ALL) matchTimbreClips(match::timelineSet(doc.project()));
         else if (cmd == IDM_TRK_VOLUME_ALL) matchVolumeClips(match::timelineSet(doc.project()));
+        else if (cmd == IDM_TRK_EQ_OFF) {
+            std::vector<int> ids;
+            for (const auto& pc : t->clips) ids.push_back(pc.clipId);
+            removeEq(ids, L"track '" + t->name + L"'");
+        }
         else if (cmd == IDM_TRK_RENAME) {
             std::wstring nm = t->name;
             if (dlg::promptText(hwnd, L"Rename track", L"Track name:", nm)) { doc.renameTrack(trackId, nm); refresh(); }
@@ -3580,15 +3627,28 @@ struct App {
         const UINT one = match::clipToLibrary(doc.project(), clipId).usable() ? 0 : MF_GRAYED;
         const UINT tl  = match::timelineSet(doc.project()).usable() ? 0 : MF_GRAYED;
         const UINT lib = match::librarySet(doc.project()).usable() ? 0 : MF_GRAYED;
-        auto matchMenu = [&](const wchar_t* title, int idOne, int idTl, int idLib) {
+        auto matchMenu = [&](int idOne, int idTl, int idLib) {
             HMENU sub = CreatePopupMenu();
             AppendMenuW(sub, MF_STRING | one, idOne, L"This clip, to match the others\u2026");
             AppendMenuW(sub, MF_STRING | tl, idTl, L"Clips on the timeline (all tracks)\u2026");
             AppendMenuW(sub, MF_STRING | lib, idLib, L"All clips (whole project)\u2026");
-            AppendMenuW(m, MF_POPUP, (UINT_PTR)sub, title);
+            return sub;
         };
-        matchMenu(L"Match timbre (EQ)", IDM_TIMBRE_ONE, IDM_TIMBRE_TL, IDM_TIMBRE_LIB);
-        matchMenu(L"Match volume", IDM_VOL_ONE, IDM_VOL_TL, IDM_VOL_LIB);
+        HMENU tm = matchMenu(IDM_TIMBRE_ONE, IDM_TIMBRE_TL, IDM_TIMBRE_LIB);
+        // A match's EQ is a setting on the clip, so it can come off again exactly.
+        {
+            const Clip* self = doc.project().findClip(clipId);
+            bool anyEq = false;
+            for (const Clip& c : doc.project().library) anyEq = anyEq || c.hasEq();
+            AppendMenuW(tm, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(tm, MF_STRING | (self && self->hasEq() ? 0 : MF_GRAYED), IDM_EQ_OFF_ONE,
+                        L"Remove the EQ \u2014 this clip");
+            AppendMenuW(tm, MF_STRING | (anyEq ? 0 : MF_GRAYED), IDM_EQ_OFF_LIB,
+                        L"Remove the EQ \u2014 all clips");
+        }
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)tm, L"Match timbre (EQ)");
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)matchMenu(IDM_VOL_ONE, IDM_VOL_TL, IDM_VOL_LIB),
+                    L"Match volume");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_RENAME, L"Rename\u2026");
         AppendMenuW(m, MF_STRING, IDM_DELETE, L"Delete clip");
@@ -3626,6 +3686,14 @@ struct App {
         else if (cmd == IDM_VOL_ONE) matchVolumeClips(match::clipToLibrary(doc.project(), clipId));
         else if (cmd == IDM_VOL_TL)  matchVolumeClips(match::timelineSet(doc.project()));
         else if (cmd == IDM_VOL_LIB) matchVolumeClips(match::librarySet(doc.project()));
+        else if (cmd == IDM_EQ_OFF_ONE) {
+            if (const Clip* c = doc.project().findClip(clipId)) removeEq({ clipId }, L"'" + c->name + L"'");
+        }
+        else if (cmd == IDM_EQ_OFF_LIB) {
+            std::vector<int> ids;
+            for (const Clip& c : doc.project().library) ids.push_back(c.id);
+            removeEq(ids, L"all clips");
+        }
         else if (cmd >= IDM_APPLYCAP_BASE && cmd < IDM_APPLYCAP_BASE + 100)
             applyCaptureToClip(clipId, cmd - IDM_APPLYCAP_BASE);
         else if (cmd == IDM_RENAME) renameClip(clipId);
