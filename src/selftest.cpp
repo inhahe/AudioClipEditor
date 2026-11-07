@@ -2879,6 +2879,42 @@ int runSelfTest() {
               L"clip export: exporting leaves the clip's own audio untouched");
     }
 
+    // ---- ids are never handed out twice in a session
+    // Undo restores a whole Project, counters included; anything still holding an id
+    // (the remembered matching standard) must not come to mean an unrelated clip.
+    {
+        Document d; d.init(rate);
+        const int a = d.addClip(L"a", makeSine(rate, 0.1, 300.0), L"", L"add a");
+        const int b = d.addClip(L"b", makeSine(rate, 0.1, 300.0), L"", L"add b");
+        d.undo();   // b is gone again
+        const int c = d.addClip(L"c", makeSine(rate, 0.1, 300.0), L"", L"add c");
+        check(c != a && c != b, L"ids: a clip added after undoing another doesn't take its id",
+              L"a=" + std::to_wstring(a) + L" b=" + std::to_wstring(b) + L" c=" + std::to_wstring(c));
+        d.gotoHistory(0);   // all the way back, past every add
+        const int e = d.addClip(L"e", makeSine(rate, 0.1, 300.0), L"", L"add e");
+        const int t2 = d.addTrack();
+        d.undo();
+        const int t3 = d.addTrack();
+        check(e != a && e != b && e != c && t3 != t2,
+              L"ids: nor after jumping back through History, and tracks the same",
+              L"e=" + std::to_wstring(e) + L" t2=" + std::to_wstring(t2) + L" t3=" + std::to_wstring(t3));
+
+        // A clip added and undone before saving is still in the stored history, so a
+        // project reopened from that file must not hand its id out either.
+        Document s; s.init(rate);
+        std::wstring proj = dir + L"\\_selftest_ids.acep";
+        s.addClip(L"keep", makeSine(rate, 0.1, 300.0), L"", L"add keep");
+        const int gone = s.addClip(L"gone", makeSine(rate, 0.1, 300.0), L"", L"add gone");
+        s.undo();
+        const bool saved = s.saveProject(proj);
+        Document r;
+        const bool loaded = saved && r.loadProject(proj);
+        const int fresh = loaded ? r.addClip(L"new", makeSine(rate, 0.1, 300.0), L"", L"add") : -1;
+        check(loaded && fresh != gone, L"ids: a reopened project doesn't reuse an id its history holds",
+              L"gone=" + std::to_wstring(gone) + L" new=" + std::to_wstring(fresh));
+        DeleteFileW(proj.c_str());
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);

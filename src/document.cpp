@@ -711,13 +711,22 @@ bool Document::loadProject(const std::wstring& path) {
 
     view_ = v;
     project_ = p;
-    if (flat.empty() || !undo_.rebuild(flat, histCurrent))
+    if (flat.empty() || !undo_.rebuild(flat, histCurrent)) {
         undo_.init(project_);   // no history in the file, or it didn't survive the trip
-    else
+    } else {
+        // Every id the stored history uses counts as used (see restore()): a clip
+        // added and then undone before the save is still in the tree, and a new clip
+        // must not take its id.
+        for (const UndoNode* n : undo_.allNodes())
+            if (n->hasSnapshot) {
+                project_.nextClipId = std::max(project_.nextClipId, n->snapshot.nextClipId);
+                project_.nextTrackId = std::max(project_.nextTrackId, n->snapshot.nextTrackId);
+            }
         // The file's own copy of the project is authoritative over the snapshot at
         // the current node: they are written from the same state, but only one of
         // them is what every other reader of this file will see.
         undo_.current()->snapshot = project_;
+    }
     markSaved();
     return true;
 }
@@ -726,15 +735,23 @@ std::wstring Document::undoDesc() const {
     return undo_.current() ? undo_.current()->desc : L"";
 }
 
+void Document::restore(const Project& p) {
+    const int nextClip = std::max(p.nextClipId, project_.nextClipId);
+    const int nextTrack = std::max(p.nextTrackId, project_.nextTrackId);
+    project_ = p;
+    project_.nextClipId = nextClip;
+    project_.nextTrackId = nextTrack;
+}
+
 void Document::undo() {
     if (!undo_.canUndo()) return;
-    project_ = undo_.undo();
+    restore(undo_.undo());
 }
 
 void Document::redo(int branch) {
     if (!undo_.canRedo()) return;
     if (branch < 0 || branch >= undo_.redoBranchCount()) branch = undo_.defaultRedoBranch();
-    project_ = undo_.redo(branch);
+    restore(undo_.redo(branch));
 }
 
 std::vector<Document::HistoryEntry> Document::history() const {
@@ -770,6 +787,6 @@ bool Document::gotoHistory(int index) {
     const std::vector<const UndoNode*> chain = undo_.chain(&cur);
     if (index < 0 || index >= (int)chain.size() || index == cur) return false;
     if (!chain[(size_t)index]->hasSnapshot) return false;   // listed, but no state to go to
-    project_ = undo_.gotoNode(chain[(size_t)index]);
+    restore(undo_.gotoNode(chain[(size_t)index]));
     return true;
 }

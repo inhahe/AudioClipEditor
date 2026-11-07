@@ -39,6 +39,12 @@ sync with behavior changes.
   whole project for undo. Never mutate a buffer that a snapshot might share.
 - **No dangling pointers into containers.** Clips/tracks are found by id at use
   time (`findClip(id)`), never held as pointers across mutations.
+- **An id is never handed out twice in a session.** Undo, redo and History jumps
+  restore a whole `Project`, but `Document::restore` carries `nextClipId` /
+  `nextTrackId` forward instead of restoring them, and `loadProject` raises them past
+  every id the stored history uses. Otherwise undoing an *add clip* and adding another
+  reuses the id, and anything still holding it — the remembered matching standard
+  (`App::matchRefClipId`) — silently comes to mean an unrelated clip.
 - **UI thread owns everything except the WASAPI render callback**, which only
   reads through the engine's source objects (swapped under a lock).
 

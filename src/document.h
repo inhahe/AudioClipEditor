@@ -191,6 +191,12 @@ public:
 
 private:
     void commit(const std::wstring& desc) { undo_.commit(project_, desc); }
+    // Make `p` -- a state from the history -- the current project, but with the id
+    // counters carried forward rather than restored. Ids are never handed out twice
+    // in a session: undoing an "add clip" and adding another would otherwise give the
+    // new clip the old one's id, and anything still holding that id (the remembered
+    // matching standard, say) would silently come to mean an unrelated clip.
+    void restore(const Project& p);
 
     Project project_;
     ViewState view_;
