@@ -308,36 +308,61 @@ came back normal-sized.) The saved size and position always apply.
   OLE drag and drop or the clipboard would need it. Media Foundation's Source Reader and
   Sink Writer, which decode and encode synchronously on that thread, work in either.
   `PlaybackEngine::init` therefore creates nothing: it starts the audio thread, which
-  joins the MTA, opens the device (`openDevice`: enumerator, `IAudioClient`, render
-  client, clock), reports how that went through a promise that `init` waits on (which
-  also publishes the sample rate and format it found), renders until `shutdown`, then
-  stops the stream and releases every object itself (`closeDevice`) before leaving the
+  joins the MTA, creates the device enumerator (`openEnumerator`) and opens a stream on
+  the default device (`openStream`: device, `IAudioClient`, render client, clock),
+  reports how that went through a promise that `init` waits on (which also publishes
+  the sample rate and format it found), renders until `shutdown`, then stops the stream
+  and releases every object itself (`closeStream`, `closeEnumerator`) before leaving the
   apartment. Objects created on the STA and used from the audio thread would have
   crossed apartments unmarshalled. The UI thread used to be in the MTA too, which is how
   that worked before. The selftest checks the UI thread's apartment, and that the
   engine's output reaches Windows' mixer: it plays a 440 Hz tone at −80 dBFS, far below
   hearing, and reads this process's audio-session peak meter.
-- **Playback follows the default output device** (`reopenDevice`, `reopenStream`). The
-  audio thread keeps the device enumerator for its whole life, with an
-  `IMMNotificationClient` registered on it (`DeviceNotifier`), and opens the *stream*
-  (`openStream`: device, client, format, clock) per device. When the default output
-  changes (headphones plugged in, a choice in Settings) the notifier — called on a
-  thread of Windows', which must not block — only raises `reopen` and wakes the loop;
-  when the device in use goes away (`AUDCLNT_E_DEVICE_INVALIDATED`,
-  `AUDCLNT_E_SERVICE_NOT_RUNNING`, from `GetCurrentPadding` or `GetBuffer`), the loop
-  finds out itself. Either way it closes the stream and opens one on the default
-  device; with none (the last one just went away) it tries again on each wake-up, at
-  most 200 ms apart. The loop no longer skips a wait that timed out, since a device
-  that has gone stops signalling and asking the client is how that shows. What was
-  playing carries on from where the source is: the new device's clock starts from 0
-  (`RenderTimeline::restartDevice`), and the rate, resampler ratio and clock frequency
-  — which the UI thread reads — are published under the lock, as the new device may
-  run at another rate (`sampleRate_` is atomic for that reason). The playhead holds
-  still meanwhile (`closeStream` drops the clock, so `position()` falls back to the
-  render position). Checked in the selftest on the real device: after `reopenDevice`
-  mid-tone, the device frames are counted afresh, playback carries on forward at
-  about real time, and the tone still reaches the mixer; without the reopen the first
-  fails. An unplugged device can't be simulated here.
+- **Playback follows the default output device** (`reopenStream`). The audio thread
+  keeps the device enumerator for its whole life, with an `IMMNotificationClient`
+  registered on it (`DeviceNotifier`), and opens the *stream* (`openStream`: device,
+  client, format, clock) per device.
+  - **What moves it.** When the device in use goes away (`AUDCLNT_E_DEVICE_INVALIDATED`,
+    `AUDCLNT_E_SERVICE_NOT_RUNNING`, from `GetCurrentPadding` or `GetBuffer`) the loop
+    finds out itself; it no longer skips a wait that timed out, since a device that has
+    gone stops signalling. When the default output changes (headphones plugged in, a
+    choice in Settings) the notifier — called on a thread of Windows', which must not
+    block — raises `defaultChanged` and wakes the loop, which moves only if the default
+    is another device than the one in use (`onDefaultDevice`, comparing `GetId`s):
+    unplugging the device in use raises it too, by when the loop may already have moved,
+    and moving again would cut a second gap into the sound. `reopenDevice()` (the
+    selftest's) sets `reopenAsked`, which always reopens.
+  - **Where it carries on from.** Before the old stream goes, the source is put back to
+    what had been heard (`keepHeardPosition`: the heard timeline at the device's played
+    position), so the audio still queued for the old device — up to a buffer, 30 ms — is
+    played on the new one instead of skipped, and the playhead doesn't jump ahead by it;
+    it holds still while the new one opens (`closeStream` drops the clock, and
+    `position()` falls back to the render position, which is now the heard one). The new
+    device's clock starts from 0 (`RenderTimeline::restartDevice`), and until its first
+    reading there is no clock answer at all (extrapolating from a timestamp of 0 would
+    run 100 ms ahead). The rate, resampler ratio and clock frequency — which the UI
+    thread reads — are published under the lock, as the new device may run at another
+    rate (`sampleRate_` is atomic for that reason).
+  - **No device.** With none to open (the last one just went away, or there was none
+    when the app started) the stream stays closed and the loop tries again on each
+    wake-up, at most 200 ms apart, so a device connected later is used. `init` succeeds
+    without one; it fails only when the engine can't run at all (COM, the enumerator).
+    Playback goes on, unheard, meanwhile.
+  - **Telling the user.** `hasDevice()` and `deviceName()` (the endpoint's friendly name)
+    say where the sound goes, and the device callback is called on a move, a loss and a
+    return — not on each retry while there is nothing. The window turns it into a toast
+    (`WM_APP_DEVICE`, `onDeviceChanged`): "Audio output: Speakers (…)", or "Audio output
+    lost — playback carries on once a device is connected"; with no device at startup, a
+    toast says so instead of the error box.
+  - **Checked** in the selftest on the real device, mid-tone, with `reopenDevice`: a new
+    stream (its device frames counted from 0); the playhead just after the move no
+    further on than the time since allows (measured: 29 ms behind it, with 49 ms queued
+    for the old device — without `keepHeardPosition` it stood 20 ms ahead, and the check
+    fails); real time once it moves again (measured from that moment, so a device slow
+    to open doesn't fail it), the tone at the mixer, and the callback called once. The
+    engine names the device it plays to. An unplugged device, a change of default and a
+    device appearing after startup can't be produced here without changing the user's
+    settings or hardware.
 - **No device is not a crash**: after a failed `init` (or before one, or after
   `shutdown`) every engine call is a quiet no-op, since the app goes on, silently, and
   its timer asks `isPlaying()` from the start.

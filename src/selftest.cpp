@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <vector>
 #include <algorithm>
+#include <atomic>
 
 // This process's audio session on the default output device -- the default session,
 // which the engine's stream joins: its peak meter, which shows what the process
@@ -1452,7 +1453,8 @@ int runSelfTest() {
         idle.play(std::make_shared<BufferSource>(tone, 0, tone->frames()), 0);
         idle.pause(); idle.resume(); idle.seek(100);
         const bool quiet = !idle.isPlaying() && !idle.isPaused() && !idle.hasSource() &&
-                           idle.position() == 0 && idle.total() == 0 && idle.posDiag().recCount == 0;
+                           idle.position() == 0 && idle.total() == 0 && idle.posDiag().recCount == 0 &&
+                           !idle.hasDevice() && idle.deviceName().empty();
         idle.stop();
         idle.shutdown();
         check(quiet, L"playback engine without a device: every call is a quiet no-op");
@@ -1473,19 +1475,15 @@ int runSelfTest() {
             LARGE_INTEGER q; QueryPerformanceCounter(&q);
             return (double)q.QuadPart / (double)qf.QuadPart;
         };
-        // Skipped only when there is no output device at all; any other failure to open
-        // one is the engine's, and fails.
-        auto noOutputDevice = [] {
-            Microsoft::WRL::ComPtr<IMMDeviceEnumerator> devices;
-            Microsoft::WRL::ComPtr<IMMDevice> device;
-            return SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                                              IID_PPV_ARGS(devices.GetAddressOf()))) &&
-                   devices->GetDefaultAudioEndpoint(eRender, eConsole, device.GetAddressOf()) == E_NOTFOUND;
-        };
+        // init fails only when the engine can't run at all; without an output device it
+        // runs and waits for one, and only then are these skipped.
         if (!eng.init(&engErr)) {
-            if (noOutputDevice()) out(L"[SKIP] playback engine: no audio output device");
-            else check(false, L"playback engine opens the default output device", engErr);
+            check(false, L"playback engine starts", engErr);
+        } else if (!eng.hasDevice()) {
+            out(L"[SKIP] playback engine: no audio output device");
+            eng.shutdown();
         } else {
+            check(!eng.deviceName().empty(), L"playback engine names the device it plays to", eng.deviceName());
             // init() is what calls IAudioClient::Start(), so this is the moment
             // the device clock starts running -- the anchor the startup settling
             // window below is measured from.
@@ -1591,10 +1589,17 @@ int runSelfTest() {
             }
 
             // Moving to the default device mid-playback -- what the engine does when the
-            // device goes away or the default output changes -- carries on playing from
-            // where it was. The device frames written start again from 0 (it is a new
-            // stream, with a new clock), the playhead goes on forward at about real time,
-            // and the tone still reaches the mixer.
+            // device goes away or the default output changes -- carries on from what had
+            // been heard:
+            //  - a new stream, with a new clock: its device frames are counted from 0;
+            //  - the playhead doesn't jump ahead by the audio still queued for the old
+            //    device (that is played on the new one): just after the move it stands no
+            //    further on than the time since the move allows;
+            //  - once it moves again it keeps real time, however long the device took to
+            //    open (Bluetooth can take a second);
+            //  - the tone still reaches the mixer, and the device callback hears of it once.
+            std::atomic<int> moves{ 0 };
+            eng.setDeviceCallback([&moves] { ++moves; });
             eng.play(faint(), 0);
             Sleep(300);
             int64_t last = eng.position();   // which also refreshes posDiag
@@ -1603,33 +1608,54 @@ int runSelfTest() {
             const double tReopen = nowSec();
             eng.reopenDevice();
             bool forward = true;
+            int64_t held = -1, resumedPos = 0;
+            double heldAt = 0.0, resumedAt = 0.0, tLast = tReopen;
+            int ticksSince = -1;
             float peakAfter = 0.0f;
             OwnSession after;
-            for (int i = 0; i < 40; ++i) {
+            for (int i = 0; i < 150 && ticksSince < 30; ++i) {   // up to 3 s for the device to open
                 Sleep(20);
                 const int64_t p = eng.position();
+                const double tNow = nowSec();
                 if (p < last) forward = false;
-                last = p;
-                if (i == 20) after = ownSession();   // the new stream's
-                float pk = 0.0f;
-                if (i > 20 && after.meter && SUCCEEDED(after.meter->GetPeakValue(&pk))) peakAfter = std::max(peakAfter, pk);
+                if (held < 0) { held = p; heldAt = tNow; }
+                else if (ticksSince < 0) { if (p > held) { resumedPos = p; resumedAt = tNow; ticksSince = 0; } }
+                else {
+                    ++ticksSince;
+                    if (ticksSince == 10) after = ownSession();   // the new stream's
+                    float pk = 0.0f;
+                    if (ticksSince > 10 && after.meter && SUCCEEDED(after.meter->GetPeakValue(&pk)))
+                        peakAfter = std::max(peakAfter, pk);
+                }
+                last = p; tLast = tNow;
             }
             const PlaybackEngine::PosDiag afterReopen = eng.posDiag();
             const bool stillPlaying = eng.isPlaying();
+            const double rate = eng.sampleRate();
             const double sinceReopen = nowSec() - tReopen;
-            const double advanced = (double)(last - atReopen) / eng.sampleRate() / sinceReopen;
             // A new stream has been written no more than the time since the reopen (and
             // a buffer); the old one would count everything since init on top.
-            const bool counted = afterReopen.devEnd <= (int64_t)((sinceReopen + 0.1) * eng.sampleRate()) &&
-                                 beforeReopen.devEnd > (int64_t)(0.1 * eng.sampleRate());
+            const bool counted = afterReopen.devEnd <= (int64_t)((sinceReopen + 0.1) * rate) &&
+                                 beforeReopen.devEnd > (int64_t)(0.1 * rate);
+            // How far past what real time allows the playhead stood just after the move.
+            const double aheadMs = ((double)(held - atReopen) / rate - (heldAt - tReopen)) * 1000.0;
+            const double queuedMs = (double)(beforeReopen.rendered - beforeReopen.heard) / rate * 1000.0;
+            const double rateAfter = ticksSince > 0 ? (double)(last - resumedPos) / rate / (tLast - resumedAt) : 0.0;
             eng.stop();
+            eng.setDeviceCallback(nullptr);
             check(counted,
                   L"playback moves to the default device: a new stream, its device frames counted from 0",
                   std::to_wstring(beforeReopen.devEnd) + L" -> " + std::to_wstring(afterReopen.devEnd) +
                       L" at " + std::to_wstring(eng.sampleRate()) + L" Hz");
-            check(stillPlaying && forward && advanced > 0.6 && advanced < 1.2,
-                  L"playback moves to the default device: it carries on forward, at about real time",
-                  std::to_wstring(advanced) + L"x");
+            check(aheadMs < 3.0,
+                  L"playback moves to the default device: the audio queued for the old one is played, not skipped",
+                  L"ahead " + std::to_wstring(aheadMs) + L" ms; " + std::to_wstring(queuedMs) + L" ms were queued");
+            check(stillPlaying && forward && ticksSince >= 30 && rateAfter > 0.8 && rateAfter < 1.2,
+                  L"playback moves to the default device: it carries on forward, at real time once it moves again",
+                  std::to_wstring(rateAfter) + L"x, moving again " +
+                      std::to_wstring((int)((resumedAt - tReopen) * 1000.0)) + L" ms after");
+            check(moves == 1, L"playback moves to the default device: the device callback hears of it once",
+                  std::to_wstring(moves.load()));
             if (after.meter && !after.atFullVolume)
                 out(L"[SKIP] playback moves to the default device: the mixer check needs this program "
                     L"at full volume");

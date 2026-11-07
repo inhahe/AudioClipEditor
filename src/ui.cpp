@@ -30,6 +30,8 @@
 #include <climits>
 
 #define WM_APP_PLAYEND (WM_APP + 1)
+// Posted by the audio thread: playback moved to another output device, or lost the last.
+#define WM_APP_DEVICE (WM_APP + 3)
 // Wakes the main loop to open what is in App::launchQueue: posted once the window is
 // up, and whenever another copy hands a command line over.
 #define WM_APP_LAUNCH (WM_APP + 2)
@@ -4400,6 +4402,15 @@ struct App {
             refresh();
         }
     }
+    // Where the sound goes now: another device (headphones plugged in or unplugged, a
+    // choice in Settings), or none, in which case playback carries on, unheard, until
+    // one is connected (WM_APP_DEVICE).
+    void onDeviceChanged() {
+        if (engine.hasDevice())
+            toast(L"Audio output: " + engine.deviceName());
+        else
+            toast(L"Audio output lost", L"Playback carries on once a device is connected");
+    }
     void onPlayEnd() {
         // source drained
         if (timelinePlaying) { timelinePlaying = false; }
@@ -4520,6 +4531,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (a && (HMENU)wp == a->fileMenu && !HIWORD(lp)) a->setAssocCheck(assoc::projectsOpenHere(a->exe));
         break;
     case WM_APP_PLAYEND: a->onPlayEnd(); return 0;
+    case WM_APP_DEVICE: if (a) a->onDeviceChanged(); return 0;
     case WM_CLOSE:
         if (a && !a->confirmDiscardChanges()) return 0;  // user cancelled exit
         DestroyWindow(hwnd);
@@ -4788,6 +4800,7 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
 
     // engine end-of-source -> post to UI thread
     app.engine.setEndCallback([hwnd] { PostMessageW(hwnd, WM_APP_PLAYEND, 0, 0); });
+    app.engine.setDeviceCallback([hwnd] { PostMessageW(hwnd, WM_APP_DEVICE, 0, 0); });
 
     // Restore the last window size/position/maximized state if we have one.
     WINDOWPLACEMENT wp{};
@@ -4803,6 +4816,8 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
     if (!engineOk)
         MessageBoxW(hwnd, (L"Audio output unavailable: " + engErr + L"\nPlayback will be silent.").c_str(),
                     L"Audio warning", MB_ICONWARNING);
+    else if (!app.engine.hasDevice())   // not an error: the engine waits for one
+        app.toast(L"No audio output device", L"Playback will be heard once one is connected");
     // After the window is up, so a project that fails to load is reported over it.
     PostMessageW(hwnd, WM_APP_LAUNCH, 0, 0);
 

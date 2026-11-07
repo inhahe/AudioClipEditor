@@ -2,6 +2,7 @@
 #include "audio_buffer.h"
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <functional>
 #include <cstdint>
 #include <vector>
@@ -117,13 +118,15 @@ public:
     ~PlaybackEngine();
     PlaybackEngine(const PlaybackEngine&) = delete;
     PlaybackEngine& operator=(const PlaybackEngine&) = delete;
-    // Open the default output device and start playing silence. Every WASAPI object
-    // lives on the engine's own audio thread, in COM's multithreaded apartment: the
-    // calling (UI) thread is a single-threaded one, and objects created there could
-    // not be used from the audio thread without marshalling. Waits until the device
-    // is open; false (with the reason in `err`) if it couldn't be. Until it is, and
-    // after a failed init or shutdown, every other call is a quiet no-op (nothing
-    // plays, nothing is playing, position 0): the app goes on without sound.
+    // Start the engine's audio thread, which opens the default output device and
+    // plays silence until told otherwise. Every WASAPI object lives on that thread, in
+    // COM's multithreaded apartment: the calling (UI) thread is a single-threaded one,
+    // and objects created there could not be used from the audio thread without
+    // marshalling. Waits until the thread has tried the device. With no output device
+    // it still runs, and starts playing as soon as one appears (hasDevice). False,
+    // with the reason in `err`, only when it can't run at all (COM, device
+    // enumeration); then, and before init or after shutdown, every other call is a
+    // quiet no-op (nothing plays, nothing is playing, position 0).
     bool init(std::wstring* err = nullptr);
     void shutdown();
 
@@ -143,8 +146,16 @@ public:
     // audio thread does the work.
     void reopenDevice();
 
+    // Whether there is an output device to play to now, and its name ("Speakers
+    // (Realtek Audio)"); empty when there is none.
+    bool hasDevice() const;
+    std::wstring deviceName() const;
+
     // Called (from the audio thread) when the active source drains fully.
-    void setEndCallback(std::function<void()> cb) { endCb_ = std::move(cb); }
+    void setEndCallback(std::function<void()> cb);
+    // Called (from the audio thread) when the engine has moved to another output device
+    // or lost the last one: ask hasDevice() and deviceName() which.
+    void setDeviceCallback(std::function<void()> cb);
 
     void play(std::shared_ptr<IPlaybackSource> src, int64_t startFrame = 0);
     void pause();
@@ -187,12 +198,16 @@ private:
     void closeStream();
     void closeEnumerator();
     void reopenStream();
+    void keepHeardPosition();
+    bool onDefaultDevice();
     void renderLoop();
     void writeFrames(void* dst, const float* stereo, int frames);
 
     struct Impl;
     std::unique_ptr<Impl> d_;
-    std::function<void()> endCb_;
+    // The callbacks, set from the UI thread and called from the audio thread.
+    std::mutex cbMtx_;
+    std::function<void()> endCb_, deviceCb_;
     std::atomic<int> sampleRate_{ 48000 };   // device output rate; set under the engine's lock
     int srcRate_ = 0;           // project/source rate (0 = same as device); under the lock once open
 };
