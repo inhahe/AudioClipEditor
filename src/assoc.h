@@ -11,21 +11,32 @@ namespace assoc {
 // root instead, so testing never touches the user's real associations.
 constexpr const wchar_t* kClassesRoot = L"Software\\Classes";
 constexpr const wchar_t* kProgId = L"AudioClipEditor.Project";
+// Under the ProgID: what .acep opened with before we registered, to hand back.
+constexpr const wchar_t* kPreviousValue = L"PreviousDefault";
 
 // The command Explorer runs to open a project with `exe`: `"exe" "%1"`.
 std::wstring openCommand(const std::wstring& exe);
 
-// Whether .acep files open with `exe` -- this copy of the app -- for this user.
+// Whether the registration under `root` points .acep at `exe` (this copy of the app).
+// Not the same as what a double-click does: see projectsOpenHere.
 bool projectsOpenWith(const std::wstring& root, const std::wstring& exe);
 
-// Make .acep files open with `exe` for this user. Returns false if a key couldn't be
-// written.
+// What double-clicking a .acep file actually runs now -- Explorer's own answer, which
+// puts a choice made with "Always use this app" (the hash-protected UserChoice, which
+// no program can legitimately set) ahead of any registration. Empty if nothing is.
+std::wstring effectiveOpenCommand();
+// Whether double-clicking a .acep file opens it with `exe`. What the menu tick shows.
+bool projectsOpenHere(const std::wstring& exe);
+
+// Make .acep files open with `exe` for this user, remembering what they opened with
+// before. All or nothing: if any key can't be written, what was written is taken out
+// again and false is returned.
 bool registerProjects(const std::wstring& root, const std::wstring& exe);
 
-// Undo registerProjects. Removes this app's ProgID, and .acep's default only if it
-// still names that ProgID -- if another app has since claimed .acep, its claim is
-// left alone. Keys left empty by that are removed. Returns false if a key that
-// exists couldn't be removed.
+// Undo registerProjects. Removes this app's ProgID and, if .acep still names it, hands
+// .acep back to what it opened with before (or clears it, if nothing did). If another
+// app has claimed .acep since, its claim is left alone. Keys left empty are removed.
+// Returns false if a key that exists couldn't be changed.
 bool unregisterProjects(const std::wstring& root);
 
 } // namespace assoc

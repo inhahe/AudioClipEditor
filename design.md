@@ -75,17 +75,31 @@ project whose path merely contained that text would have run the test suite inst
 the association and for the selftest's log.
 
 **The association is opt-in** — *File ▸ Open .acep projects with this app when
-double-clicked*, ticked while `.acep` opens with this copy — because it changes how
-Windows behaves outside the app. `assoc::registerProjects` writes a ProgID
-(`AudioClipEditor.Project`: description, icon, `shell\open\command` = `"exe" "%1"`),
-points `.acep` at it, and lists it under `.acep\OpenWithProgids`, all under
-`HKEY_CURRENT_USER`: no administrator rights, no other user affected.
-`unregisterProjects` removes the ProgID, but `.acep`'s default only if it still names
-the ProgID — another app that has claimed `.acep` since keeps its claim — and removes
-keys only once they are empty. The tick compares the registered command with *this*
-exe, so a copy moved elsewhere shows unticked and can re-register. The selftest
-drives the same functions against a scratch root (`assoc::kClassesRoot` is a
-parameter), so it never touches the user's real associations, and deletes it after.
+double-clicked* — because it changes how Windows behaves outside the app.
+`assoc::registerProjects` writes a ProgID (`AudioClipEditor.Project`: a description and
+`shell\open\command` = `"exe" "%1"`), points `.acep` at it, and lists it under
+`.acep\OpenWithProgids`, all under `HKEY_CURRENT_USER`: no administrator rights, no
+other user affected. No `DefaultIcon`: the exe has no icon resource to point at. It
+remembers what `.acep` opened with before (`PreviousDefault` under the ProgID — not
+overwritten by registering twice), and it is all or nothing: if any write fails, what
+was written is taken out again, so the menu can never show it working next to a
+message saying it didn't. `unregisterProjects` removes the ProgID and hands `.acep`
+back to what it opened with before (or clears it), but only if `.acep` still names our
+ProgID — an app that has claimed it since keeps its claim — and removes keys only once
+they are empty. Writes go through `RegSetKeyValueW`, which creates the key as needed.
+
+**The tick is what a double-click actually does** (`assoc::projectsOpenHere`, via
+`AssocQueryString`), not what the app registered: Windows puts a choice made with
+*Always use this app* (the hash-protected `UserChoice`, which no program can
+legitimately set) ahead of any registration. When such a choice stands in the way,
+ticking says so and how to change it (*Open with ▸ Choose another app ▸ Audio Clip
+Editor*, *Always*) instead of claiming success; unticking while that choice points
+here says the same about *Settings ▸ Default apps*. The tick is re-read every time the
+File menu opens (`WM_INITMENUPOPUP`), since another copy of the app or Windows' own
+settings can change it while this window is open. A copy moved elsewhere shows
+unticked and can register itself. The selftest drives the registration against a
+scratch root (`assoc::kClassesRoot` is a parameter) and deletes it after; the
+`UserChoice` path can't be tested without changing the user's own settings.
 
 **Shown the way the launcher asked.** The saved window placement used to override
 `nCmdShow` entirely, so a shortcut set to *Run: Minimized* opened normally; a
@@ -1953,14 +1967,16 @@ correction lands between 60 Hz and 14 kHz. It measured **1.4 dB at 70 Hz**;
 before the weights, over 20 dB at 30 Hz. DC and Nyquist are separately asserted
 to come out at exactly 0 dB.
 
-**Starting with files** (10 checks): `launch::parse` takes `.acep` files (in any case)
+**Starting with files** (12 checks): `launch::parse` takes `.acep` files (in any case)
 as projects in order and other files as clips, and skips switches; a project is told
 by its contents (a `.acep.bak` with the `ACEP` header is one, a `.wav` isn't) or, when
 it can't be read, by its extension; and `parse` uses whatever test it is given. `assoc`, against a scratch
 registry root: nothing registered to begin with; registering makes `.acep` open with
 this copy and not another; the open command quotes program and file; unregistering
 stops it and leaves no empty keys; and with another app's claim on `.acep` made after
-ours, unregistering removes our ProgID but leaves its claim. The main window opened
+ours, unregistering removes our ProgID but leaves its claim; with an earlier handler
+in place, unregistering (after registering twice) hands `.acep` back to it; and no
+icon is registered. The main window opened
 from a command line was checked by rendering it (`PrintWindow`, launched without
 activation): the project's EQ tags, and after an undo the two-line message and the
 History badge. The hand-off was checked live, with no other copy running: a second

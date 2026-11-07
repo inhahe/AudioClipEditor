@@ -2637,21 +2637,44 @@ struct App {
 
     // File menu: make double-clicking a .acep project open it with this copy of the
     // app, or stop doing so. Per user (HKEY_CURRENT_USER), no admin rights, and only
-    // on request -- it changes how Windows behaves outside the app.
+    // on request -- it changes how Windows behaves outside the app. The tick is what a
+    // double-click actually does, which is not always what this app registered:
+    // Windows puts a choice made with "Always use this app" first, and no program can
+    // set that choice for the user, so when it stands in the way the message says how
+    // to change it rather than claiming success.
     void toggleProjectAssociation() {
         const std::wstring exe = exePath();
-        const bool on = assoc::projectsOpenWith(assoc::kClassesRoot, exe);
-        const bool ok = on ? assoc::unregisterProjects(assoc::kClassesRoot)
-                           : assoc::registerProjects(assoc::kClassesRoot, exe);
+        const bool wasHere = assoc::projectsOpenHere(exe);
+        const bool ok = wasHere ? assoc::unregisterProjects(assoc::kClassesRoot)
+                                : assoc::registerProjects(assoc::kClassesRoot, exe);
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
-        const bool now = assoc::projectsOpenWith(assoc::kClassesRoot, exe);
-        CheckMenuItem(GetMenu(hwnd), IDC_ASSOC, MF_BYCOMMAND | (now ? MF_CHECKED : MF_UNCHECKED));
+        const bool here = assoc::projectsOpenHere(exe);
+        refreshAssocCheck();
+        const wchar_t* title = L"Open projects with this app";
         if (!ok)
-            MessageBoxW(hwnd, L"Windows didn't accept the change to how .acep files open.",
-                        L"Open projects with this app", MB_ICONWARNING);
+            MessageBoxW(hwnd, L"Windows didn't accept the change to how .acep files open.", title,
+                        MB_ICONWARNING);
+        else if (!wasHere && !here)
+            MessageBoxW(hwnd,
+                L"This app is set up to open .acep projects, but Windows has been told to open "
+                L"them with something else (\u201CAlways use this app\u201D), and that comes first."
+                L"\n\nTo switch: right-click a .acep file \u25B8 Open with \u25B8 Choose another app "
+                L"\u25B8 Audio Clip Editor, and tick \u201CAlways\u201D.", title, MB_ICONINFORMATION);
+        else if (wasHere && here)
+            MessageBoxW(hwnd,
+                L"Removed this app's registration, but Windows still opens .acep projects here "
+                L"because it was chosen with \u201CAlways use this app\u201D. Change that in "
+                L"Settings \u25B8 Apps \u25B8 Default apps.", title, MB_ICONINFORMATION);
         else
-            toast(now ? L"Double-clicking a .acep project now opens it here"
-                      : L"Double-clicking a .acep project no longer opens it here");
+            toast(here ? L"Double-clicking a .acep project now opens it here"
+                       : L"Double-clicking a .acep project no longer opens it here");
+    }
+    // The tick follows what a double-click does now, which can change outside this
+    // window (another copy of the app, Windows' own settings) -- so it is checked each
+    // time the File menu opens, not just when this window changed it.
+    void refreshAssocCheck() {
+        CheckMenuItem(GetMenu(hwnd), IDC_ASSOC,
+                      MF_BYCOMMAND | (assoc::projectsOpenHere(exePath()) ? MF_CHECKED : MF_UNCHECKED));
     }
     // The waveform selection and playhead ride along in the .acep file; they are
     // UI state, so they live in App and are pushed into Document whenever the
@@ -4090,8 +4113,7 @@ struct App {
         AppendMenuW(file, MF_STRING, IDC_SAVEPROJ, L"Save Project\tCtrl+S");
         AppendMenuW(file, MF_STRING, IDC_SAVEPROJAS, L"Save Project As\u2026");
         // Ticked while double-clicking a .acep file opens it with this copy of the app.
-        AppendMenuW(file, MF_STRING |
-                    (assoc::projectsOpenWith(assoc::kClassesRoot, exePath()) ? MF_CHECKED : 0),
+        AppendMenuW(file, MF_STRING | (assoc::projectsOpenHere(exePath()) ? MF_CHECKED : 0),
                     IDC_ASSOC, L"Open .acep projects with this app when double-clicked");
         AppendMenuW(file, MF_STRING | (saveHistory ? MF_CHECKED : 0), IDC_SAVEHISTORY,
                     L"Store the edit history in project files");
@@ -4383,6 +4405,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND: if (HIWORD(wp) == 0 && lp == 0) { a->onCommand(LOWORD(wp)); return 0; } break;
     case WM_TIMER: a->onTimer(); return 0;
     case WM_APP_LAUNCH: if (a) a->openLaunchRequest(); return 0;
+    case WM_INITMENUPOPUP: if (a) a->refreshAssocCheck(); break;
     case WM_COPYDATA: {
         const auto* cds = (const COPYDATASTRUCT*)lp;
         if (a && cds && cds->dwData == kLaunchCopyData && cds->lpData) {

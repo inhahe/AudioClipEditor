@@ -1,5 +1,6 @@
 #include "assoc.h"
 #include <windows.h>
+#include <shlwapi.h>
 
 namespace assoc {
 
@@ -8,24 +9,12 @@ namespace {
 std::wstring progKey(const std::wstring& root) { return root + L"\\" + kProgId; }
 std::wstring extKey(const std::wstring& root) { return root + L"\\.acep"; }
 
-bool setString(const std::wstring& sub, const wchar_t* name, const std::wstring& value) {
-    HKEY k = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, sub.c_str(), 0, nullptr, 0, KEY_SET_VALUE,
-                        nullptr, &k, nullptr) != ERROR_SUCCESS) return false;
-    const LSTATUS s = RegSetValueExW(k, name, 0, REG_SZ, (const BYTE*)value.c_str(),
-                                     (DWORD)((value.size() + 1) * sizeof(wchar_t)));
-    RegCloseKey(k);
-    return s == ERROR_SUCCESS;
+// One value, creating the key (and any missing parents) as needed.
+bool setValue(const std::wstring& sub, const wchar_t* name, DWORD type, const void* data, DWORD bytes) {
+    return RegSetKeyValueW(HKEY_CURRENT_USER, sub.c_str(), name, type, data, bytes) == ERROR_SUCCESS;
 }
-
-// An empty REG_NONE value: how a ProgID is listed under a type's OpenWithProgids.
-bool setNone(const std::wstring& sub, const wchar_t* name) {
-    HKEY k = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, sub.c_str(), 0, nullptr, 0, KEY_SET_VALUE,
-                        nullptr, &k, nullptr) != ERROR_SUCCESS) return false;
-    const LSTATUS s = RegSetValueExW(k, name, 0, REG_NONE, nullptr, 0);
-    RegCloseKey(k);
-    return s == ERROR_SUCCESS;
+bool setString(const std::wstring& sub, const wchar_t* name, const std::wstring& value) {
+    return setValue(sub, name, REG_SZ, value.c_str(), (DWORD)((value.size() + 1) * sizeof(wchar_t)));
 }
 
 // The string value, or empty if there is none (or it isn't a string).
@@ -70,19 +59,43 @@ bool projectsOpenWith(const std::wstring& root, const std::wstring& exe) {
                     openCommand(exe).c_str()) == 0;
 }
 
+std::wstring effectiveOpenCommand() {
+    DWORD n = 0;
+    if (AssocQueryStringW(ASSOCF_NOTRUNCATE | ASSOCF_INIT_IGNOREUNKNOWN, ASSOCSTR_COMMAND, L".acep",
+                          L"open", nullptr, &n) != S_FALSE || n == 0) return std::wstring();
+    std::wstring s(n, L'\0');
+    if (FAILED(AssocQueryStringW(ASSOCF_NOTRUNCATE | ASSOCF_INIT_IGNOREUNKNOWN, ASSOCSTR_COMMAND,
+                                 L".acep", L"open", &s[0], &n))) return std::wstring();
+    s.resize(wcslen(s.c_str()));
+    return s;
+}
+
+bool projectsOpenHere(const std::wstring& exe) {
+    return _wcsicmp(effectiveOpenCommand().c_str(), openCommand(exe).c_str()) == 0;
+}
+
 bool registerProjects(const std::wstring& root, const std::wstring& exe) {
+    // What .acep opened with before, for unregisterProjects to hand back. Not when
+    // that is already us: registering twice must not forget the original.
+    const std::wstring before = getString(extKey(root), nullptr);
     bool ok = setString(progKey(root), nullptr, L"Audio Clip Editor project");
-    ok = setString(progKey(root) + L"\\DefaultIcon", nullptr, L"\"" + exe + L"\",0") && ok;
+    if (!before.empty() && before != kProgId) ok = setString(progKey(root), kPreviousValue, before) && ok;
     ok = setString(progKey(root) + L"\\shell\\open\\command", nullptr, openCommand(exe)) && ok;
     ok = setString(extKey(root), nullptr, kProgId) && ok;
-    ok = setNone(extKey(root) + L"\\OpenWithProgids", kProgId) && ok;
+    ok = setValue(extKey(root) + L"\\OpenWithProgids", kProgId, REG_NONE, nullptr, 0) && ok;
+    // Half an association is worse than none: the menu could show it working next to
+    // a message saying it didn't.
+    if (!ok) unregisterProjects(root);
     return ok;
 }
 
 bool unregisterProjects(const std::wstring& root) {
+    const std::wstring previous = getString(progKey(root), kPreviousValue);
     bool ok = gone(RegDeleteTreeW(HKEY_CURRENT_USER, progKey(root).c_str()));
     if (getString(extKey(root), nullptr) == kProgId)
-        ok = gone(RegDeleteKeyValueW(HKEY_CURRENT_USER, extKey(root).c_str(), nullptr)) && ok;
+        ok = (previous.empty()
+                  ? gone(RegDeleteKeyValueW(HKEY_CURRENT_USER, extKey(root).c_str(), nullptr))
+                  : setString(extKey(root), nullptr, previous)) && ok;
     ok = gone(RegDeleteKeyValueW(HKEY_CURRENT_USER, (extKey(root) + L"\\OpenWithProgids").c_str(),
                                  kProgId)) && ok;
     ok = removeIfEmpty(extKey(root) + L"\\OpenWithProgids") && ok;

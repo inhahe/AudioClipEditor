@@ -3458,6 +3458,28 @@ int runSelfTest() {
         if (pk) RegCloseKey(pk);
         check(kept && progGone,
               L"assoc: unregistering leaves another app's claim on .acep alone, and removes ours");
+
+        // .acep already opened with something before we registered: unregistering
+        // hands it back rather than leaving .acep with no handler. Registering twice
+        // must not forget the original.
+        RegDeleteTreeW(HKEY_CURRENT_USER, top.c_str());
+        const std::wstring before = L"EarlierApp.Document";
+        RegSetKeyValueW(HKEY_CURRENT_USER, (root + L"\\.acep").c_str(), nullptr, REG_SZ,
+                        before.c_str(), (DWORD)((before.size() + 1) * sizeof(wchar_t)));
+        const bool reg2 = assoc::registerProjects(root, exe) && assoc::registerProjects(root, exe);
+        HKEY icon = nullptr;
+        const bool noIcon = RegOpenKeyExW(HKEY_CURRENT_USER,
+                                          (root + L"\\" + assoc::kProgId + L"\\DefaultIcon").c_str(),
+                                          0, KEY_READ, &icon) == ERROR_FILE_NOT_FOUND;
+        if (icon) RegCloseKey(icon);
+        const bool unreg2 = assoc::unregisterProjects(root);
+        wchar_t back[256]{}; DWORD bsize = sizeof(back);
+        const bool restored = RegGetValueW(HKEY_CURRENT_USER, (root + L"\\.acep").c_str(), nullptr,
+                                           RRF_RT_REG_SZ, nullptr, back, &bsize) == ERROR_SUCCESS &&
+                              before == back;
+        check(reg2 && unreg2 && restored,
+              L"assoc: unregistering hands .acep back to what it opened with before", back);
+        check(noIcon, L"assoc: no icon is registered (the program has none to point at)");
         RegDeleteTreeW(HKEY_CURRENT_USER, top.c_str());
     }
 
