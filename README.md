@@ -334,7 +334,8 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   go to that window instead of a second copy: double-clicking the project that's
   already open just brings it to the front, and another project opens there (asking
   first if there are unsaved changes). If a dialog is open in that window, the project
-  waits until you've closed it; if the window is closing, it opens in a new one.
+  waits until you've closed it; if the app is busy with a long job, until that's done;
+  if the window is closing, it opens in a new one.
 - **Save / load projects.** Projects are saved as a single `.acep` file with the
   whole library and timeline (audio embedded), so a project is fully
   self-contained — and, unless you turn it off, the **edit history** as well.

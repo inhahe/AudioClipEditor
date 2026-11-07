@@ -52,8 +52,25 @@ any file that won't decode — several can arrive at once.
   forward, not open the same file in a second copy where each would save over the
   other without a word. The receiver copies the paths out and answers at once — the
   sender waits on the message — and posts itself `WM_APP_LAUNCH`. Started *without*
-  files, a second copy opens normally; and if the running copy doesn't answer within
-  5 s, the new one opens normally too.
+  files, a second copy opens normally.
+  - **A copy still starting counts.** Every copy holds a named mutex
+    (`StartupLock`, `Local\AudioClipEditor.Startup`) from the top of `runApp` until
+    its main window exists, and looks for a window only while holding it — so a copy
+    started while the first is still starting up (double-clicking again because it
+    is slow to appear) waits for that window rather than finding none and opening the
+    same project as well. Live, two copies started back to back on one project ended
+    as two windows in 2 of 3 tries before this; after, as one in each of 5. A copy that
+    dies while starting abandons the mutex, which still passes it on.
+  - **A busy copy is waited for, however long** (`SendMessageW`, no timeout): one in
+    the middle of a long job answers once it is done. It used to be given 5 s
+    (`SMTO_ABORTIFHUNG`), after which the new copy opened the project itself — and the
+    message still reached the busy copy afterwards, so the project ended up in both.
+    The mutex is not held while waiting, so a copy started without files is not held
+    up. If the copy closes or dies first, the new one looks again and, finding none,
+    opens normally. If the window is still there but won't take the files — Windows
+    keeps an unelevated copy from sending to an elevated one — it opens normally too:
+    allowing that message into an elevated copy would let any program make it open
+    files.
 - **Requests wait in a queue** (`App::launchQueue`, oldest first: this copy's own
   command line, then each one handed over, kept apart so each opens as the double-click
   it was). Each is taken off as it is opened, so a stray repeat of the message can't
@@ -2010,7 +2027,10 @@ another project exits and the first opens it, leaving one copy. With *Export Mix
 file dialog open, a project handed over waits — the title still names the old one —
 and opens once the dialog closes (before the fix it replaced the project under the
 dialog). Handed over while the window asks *Save changes?* on close, it opens in a
-fresh copy once the window is gone.
+fresh copy once the window is gone. With the running copy frozen (its process
+suspended) for 9 s, a copy given another project waited without a window, and once
+the first was thawed it opened the project there and exited — before, it opened the
+project itself; with the frozen copy killed instead, the waiting one opened it.
 
 **History position** (5 checks): the cheap counts the toolbar repaints with
 (`historyCounts`, pointer hops only) agree with the full position; a new project has no steps; at the latest step undo

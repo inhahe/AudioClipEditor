@@ -4488,25 +4488,63 @@ static void saveWindowPlacement(HWND hwnd) {
     RegCloseKey(k);
 }
 
+static const wchar_t* kMainClass = L"AudioClipEditorMain";
+
+// Held by every copy from the start of runApp until its main window exists, so that
+// whether a copy is running has one answer: a copy started while another is still
+// starting (double-clicking again because the first is slow to appear) waits for
+// that one's window instead of finding none and opening the same project itself. A
+// copy that dies while starting leaves it abandoned, which still passes it on.
+class StartupLock {
+public:
+    StartupLock() : h(CreateMutexW(nullptr, FALSE, L"Local\\AudioClipEditor.Startup")) {}
+    ~StartupLock() { release(); if (h) CloseHandle(h); }
+    StartupLock(const StartupLock&) = delete;
+    StartupLock& operator=(const StartupLock&) = delete;
+    void acquire() {
+        if (!h || held) return;
+        const DWORD w = WaitForSingleObject(h, INFINITE);
+        held = w == WAIT_OBJECT_0 || w == WAIT_ABANDONED;
+    }
+    void release() { if (held) { ReleaseMutex(h); held = false; } }
+private:
+    HANDLE h;
+    bool held = false;
+};
+
 // A copy started with files while another is running hands them over and exits.
 // Double-clicking a project that is already open has to bring that window forward,
 // not open the same file in a second copy -- each would save over the other without
-// a word. Returns false (start normally) when there are no files to hand over, no
-// copy is running, or it doesn't answer.
-static bool handToRunningCopy(const std::vector<std::wstring>& args) {
+// a word. Returns false (start normally, holding `lock`) when there are no files to
+// hand over, no copy is running, or the one running won't take them.
+static bool handToRunningCopy(const std::vector<std::wstring>& args, StartupLock& lock) {
     std::wstring payload;   // absolute paths, each NUL-terminated
     for (const std::wstring& f : launchFiles(args)) { payload += f; payload.push_back(L'\0'); }
+    lock.acquire();
     if (payload.empty()) return false;
-    HWND other = FindWindowW(L"AudioClipEditorMain", nullptr);
-    if (!other) return false;
-    COPYDATASTRUCT cds{ kLaunchCopyData, (DWORD)(payload.size() * sizeof(wchar_t)), (PVOID)payload.data() };
-    DWORD_PTR answer = 0;
-    if (!SendMessageTimeoutW(other, WM_COPYDATA, 0, (LPARAM)&cds, SMTO_ABORTIFHUNG, 5000, &answer) ||
-        answer != TRUE) return false;
-    // This process was just started by the user, so it may hand the foreground on.
-    if (IsIconic(other)) ShowWindow(other, SW_RESTORE);
-    SetForegroundWindow(other);
-    return true;
+    for (;;) {
+        HWND other = FindWindowW(kMainClass, nullptr);
+        if (!other) return false;
+        // Not held while waiting for the answer, which can take a while: a copy
+        // started without files needn't wait for it.
+        lock.release();
+        COPYDATASTRUCT cds{ kLaunchCopyData, (DWORD)(payload.size() * sizeof(wchar_t)), (PVOID)payload.data() };
+        // For as long as it takes. A copy busy with a long job (loading a big project,
+        // a denoise) answers once it is done; giving up and opening here instead would
+        // put the project in two windows, and the message would still reach that copy
+        // later. Returns 0 if it closes or dies first.
+        if (SendMessageW(other, WM_COPYDATA, 0, (LPARAM)&cds) == TRUE) {
+            // This process was started by the user, so it may hand the foreground on.
+            if (IsIconic(other)) ShowWindow(other, SW_RESTORE);
+            SetForegroundWindow(other);
+            return true;
+        }
+        lock.acquire();
+        // Still there but won't take them: Windows keeps an unelevated copy from
+        // sending to an elevated one, say. Nothing to do but open here.
+        if (IsWindow(other)) return false;
+        // It closed before taking them: look again.
+    }
 }
 
 // Start another copy of the app to open `files`.
@@ -4522,7 +4560,8 @@ static void startCopy(const std::vector<std::wstring>& files) {
 }
 
 int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args) {
-    if (handToRunningCopy(args)) return 0;
+    StartupLock startup;
+    if (handToRunningCopy(args, startup)) return 0;
     // Tooltips are a "bar" class; the matching dialogs' track list a list view.
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_LISTVIEW_CLASSES };
     InitCommonControlsEx(&icc);
@@ -4548,7 +4587,7 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
     wc.style = CS_DBLCLKS;   // deliver WM_LBUTTONDBLCLK (needed for the clip editor)
     wc.lpfnWndProc = WndProc; wc.hInstance = hInst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"AudioClipEditorMain";
+    wc.lpszClassName = kMainClass;
     RegisterClassExW(&wc);
 
     // Wide enough for the whole transport toolbar on one row at 150% DPI (the
@@ -4557,7 +4596,16 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"Audio Clip Editor",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1700, 950,
         nullptr, nullptr, hInst, &app);
+    if (!hwnd) {
+        MessageBoxW(nullptr, L"The main window could not be created.", L"Error", MB_ICONERROR);
+        app.engine.shutdown();
+        mfio::shutdown();
+        return 1;
+    }
     g_app = &app;
+    // The window exists, so a copy started from here on finds it and hands over; what
+    // it hands over queues behind this copy's own request, queued above.
+    startup.release();
 
     // engine end-of-source -> post to UI thread
     app.engine.setEndCallback([hwnd] { PostMessageW(hwnd, WM_APP_PLAYEND, 0, 0); });
