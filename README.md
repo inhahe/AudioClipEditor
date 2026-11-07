@@ -204,6 +204,11 @@ of clips, audition them, trim/crop, and arrange them on tracks.
     timbre to the rest of the track…*, or a card → *Match timbre (EQ) → This clip,
     to match the others…*. Only that clip changes; the others are left alone.
 
+  When the clips come from tracks, the dialog lists the tracks with tick boxes, so
+  you can widen or narrow the match before applying it — leave a music or effects
+  track out of *all tracks*, or match a clip to the takes on two tracks instead of
+  one. The *Applies to* line and the *Match to* list follow the ticks.
+
   Then choose what to match to: **the average of them all** (the default — it
   moves each clip as little as possible and favours none) or one clip as the
   standard (*Sound like 'take 2'*), when you know which take sounds right (two

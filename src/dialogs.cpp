@@ -127,14 +127,17 @@ struct ScopeLine {
     void widen(const DlgUI& ui, int& contentW) const {
         contentW = std::max(contentW, std::min(ui.textW(text.c_str()), ui.S(460)));
     }
-    // Height needed at the final content width, capped at two lines.
-    void measure(const DlgUI& ui, int contentW) {
-        height = std::min((int)ui.measure(text.c_str(), contentW).cy, ui.lineH * 2);
+    // Height needed at the final content width, capped at two lines -- or always
+    // two, for a line that will change while the dialog is open.
+    void measure(const DlgUI& ui, int contentW, bool reserveTwoLines = false) {
+        height = reserveTwoLines ? ui.lineH * 2
+                                 : std::min((int)ui.measure(text.c_str(), contentW).cy, ui.lineH * 2);
     }
     int step(const DlgUI& ui) const { return height + ui.S(14); }
-    void build(const DlgUI& ui, int& y, int contentW) const {
-        ui.label(text.c_str(), ui.margin, y, contentW, height, SS_ENDELLIPSIS);
+    HWND build(const DlgUI& ui, int& y, int contentW) const {
+        HWND lbl = ui.label(text.c_str(), ui.margin, y, contentW, height, SS_ENDELLIPSIS);
         y += step(ui);
+        return lbl;
     }
 };
 
@@ -751,67 +754,104 @@ bool voiceIsolate(HWND parent, VoiceIsolateContext& ctx) {
     return st.ok;
 }
 
-// ------------------------------------------------------------------ "Match to:" row
-// Both matchers offer the same choice of reference, laid out the same way; only the
-// wording of a clip item differs ("Sound like 'take 2'" / "As loud as 'take 2'").
-static const wchar_t* kMatchTo = L"Match to:";
+// ------------------------------------------------------------------ matching
+// One dialog for both matchers, because they ask the same questions -- which clips
+// (the "Applies to:" line, and the tracks they come from), and what to match them to
+// -- and differ only in timbre's extra rows. Keeping them one implementation is what
+// keeps the two from coming to look or behave differently.
+enum { IDC_MD_TRACKS = 2101 };
+
+struct MDState {
+    MatchReference* ref = nullptr;
+    MatchTracks* tracks = nullptr;
+    std::wstring* scope = nullptr;
+    const wchar_t* prefix = nullptr;             // "Sound like " / "As loud as "
+    dsp::TimbreMatchOptions* opts = nullptr;     // null: the volume dialog
+    HWND cbRef = 0, list = 0, stScope = 0, btnOk = 0, edDb = 0, edSmooth = 0, ckLoud = 0;
+    bool populating = false;                     // ignore the list's own notifications
+    bool ok = false;
+};
 
 static std::wstring refItem(const wchar_t* prefix, const std::wstring& name) {
     return prefix + (L"'" + name + L"'");
 }
-// Long clip and track names shouldn't stretch the dialog off the screen -- the
-// average's label names a track ("The average of the other 7 clips on '...'") -- so
-// every item is capped; the combo scrolls and ellipsises, and the names are only
-// there to be recognised.
+// Every item is capped: long clip and track names -- the average's label names a
+// track -- shouldn't stretch the dialog off the screen; the combo ellipsises, and
+// the names are only there to be recognised.
 static int refComboW(const DlgUI& ui, const MatchReference& r, const wchar_t* prefix) {
     int w = std::max(ui.S(190), std::min(ui.comboW(r.averageLabel.c_str()), ui.S(320)));
     for (const std::wstring& n : r.clipNames)
         w = std::max(w, std::min(ui.comboW(refItem(prefix, n).c_str()), ui.S(320)));
     return w;
 }
-static HWND refCombo(const DlgUI& ui, int x, int y, int w, const MatchReference& r,
-                     const wchar_t* prefix) {
-    HWND cb = ui.combo(x, y, w, 8);
-    SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)r.averageLabel.c_str());
+// The clip id the combo has selected, or -1 for the average.
+static int mdSelectedId(const MDState* st) {
+    const int ri = (int)SendMessageW(st->cbRef, CB_GETCURSEL, 0, 0) - 1;
+    return ri >= 0 && ri < (int)st->ref->clipIds.size() ? st->ref->clipIds[(size_t)ri] : -1;
+}
+// Fill the combo from *st->ref, selecting `keepId` if it is still offered (so a
+// standard the user picked survives a change of tracks), else ref->choice.
+static void mdFillRef(MDState* st, int keepId) {
+    const MatchReference& r = *st->ref;
+    SendMessageW(st->cbRef, CB_RESETCONTENT, 0, 0);
+    SendMessageW(st->cbRef, CB_ADDSTRING, 0, (LPARAM)r.averageLabel.c_str());
     for (const std::wstring& n : r.clipNames)
-        SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)refItem(prefix, n).c_str());
-    const int ri = (r.choice >= 0 && r.choice < (int)r.clipNames.size()) ? r.choice + 1 : 0;
-    SendMessageW(cb, CB_SETCURSEL, ri, 0);
-    return cb;
+        SendMessageW(st->cbRef, CB_ADDSTRING, 0, (LPARAM)refItem(st->prefix, n).c_str());
+    int sel = (r.choice >= 0 && r.choice < (int)r.clipNames.size()) ? r.choice + 1 : 0;
+    if (keepId >= 0)
+        for (size_t i = 0; i < r.clipIds.size(); ++i) if (r.clipIds[i] == keepId) sel = (int)i + 1;
+    SendMessageW(st->cbRef, CB_SETCURSEL, sel, 0);
 }
-// Item 0 is the average; the rest are the clips in order.
-static int refChoice(HWND cb) {
-    const int ri = (int)SendMessageW(cb, CB_GETCURSEL, 0, 0);
-    return ri > 0 ? ri - 1 : -1;
+// The ticks changed: everything that depends on which clips are involved follows.
+static void mdTracksChanged(MDState* st) {
+    const int n = (int)st->tracks->labels.size();
+    std::vector<uint8_t> ticked((size_t)n);
+    for (int i = 0; i < n; ++i) ticked[(size_t)i] = ListView_GetCheckState(st->list, i) ? 1 : 0;
+    st->tracks->ticked = ticked;
+    const int keep = mdSelectedId(st);
+    MatchReference r;
+    std::wstring scope;
+    const bool usable = st->tracks->rebuild(ticked, r, scope);
+    r.choice = -1;
+    *st->ref = r;
+    *st->scope = scope;
+    mdFillRef(st, keep);
+    SetWindowTextW(st->stScope, (L"Applies to: " + scope).c_str());
+    EnableWindow(st->btnOk, usable);
 }
 
-// ------------------------------------------------------------------ timbre matching
-struct TMState {
-    dsp::TimbreMatchOptions* opts = nullptr;
-    MatchReference* ref = nullptr;
-    HWND cbRef = 0, edDb = 0, edSmooth = 0, ckLoud = 0;
-    bool ok = false;
-};
-
-static LRESULT CALLBACK TMProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    auto* st = (TMState*)GetWindowLongPtrW(h, GWLP_USERDATA);
+static LRESULT CALLBACK MDProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    auto* st = (MDState*)GetWindowLongPtrW(h, GWLP_USERDATA);
     switch (m) {
+    case WM_NOTIFY: {
+        const NMHDR* hdr = (const NMHDR*)l;
+        if (st && hdr->idFrom == IDC_MD_TRACKS && hdr->code == LVN_ITEMCHANGED && !st->populating) {
+            const NMLISTVIEW* nm = (const NMLISTVIEW*)l;
+            if ((nm->uChanged & LVIF_STATE) &&
+                ((nm->uNewState ^ nm->uOldState) & LVIS_STATEIMAGEMASK))
+                mdTracksChanged(st);
+        }
+        break;
+    }
     case WM_COMMAND:
         // Snap an out-of-range entry as soon as the field loses focus, so the
         // limits are discovered by using the dialog rather than by wondering why
         // the result ignored what was typed. Ranges must match the reads below.
-        if (HIWORD(w) == EN_KILLFOCUS && st) {
+        if (HIWORD(w) == EN_KILLFOCUS && st && st->opts) {
             if ((HWND)l == st->edDb)     vcSnapEdit(st->edDb, 0.0, 24.0, 12.0);
             if ((HWND)l == st->edSmooth) vcSnapEdit(st->edSmooth, 0.05, 2.0, 0.5);
             return 0;
         }
         if (LOWORD(w) == IDCANCEL) { st->ok = false; DestroyWindow(h); return 0; }
         if (LOWORD(w) == IDOK) {
-            dsp::TimbreMatchOptions& o = *st->opts;
-            o.maxCorrectionDb  = (float)vcReadDouble(st->edDb, 0.0, 24.0, 12.0);
-            o.smoothingOctaves = (float)vcReadDouble(st->edSmooth, 0.05, 2.0, 0.5);
-            o.preserveLoudness = SendMessageW(st->ckLoud, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            st->ref->choice = refChoice(st->cbRef);
+            if (st->opts) {
+                dsp::TimbreMatchOptions& o = *st->opts;
+                o.maxCorrectionDb  = (float)vcReadDouble(st->edDb, 0.0, 24.0, 12.0);
+                o.smoothingOctaves = (float)vcReadDouble(st->edSmooth, 0.05, 2.0, 0.5);
+                o.preserveLoudness = SendMessageW(st->ckLoud, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            }
+            const int ri = (int)SendMessageW(st->cbRef, CB_GETCURSEL, 0, 0);
+            st->ref->choice = ri > 0 ? ri - 1 : -1;   // item 0 is the average
             st->ok = true; DestroyWindow(h); return 0;
         }
         break;
@@ -820,80 +860,110 @@ static LRESULT CALLBACK TMProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
-bool timbreMatch(HWND parent, TimbreMatchContext& ctx) {
+static bool matchDialog(HWND parent, const wchar_t* title, const wchar_t* info,
+                        const wchar_t* prefix, MatchReference& ref, MatchTracks& tracks,
+                        std::wstring& scopeLabel, dsp::TimbreMatchOptions* opts) {
     static bool reg = false;
     HINSTANCE hInst = GetModuleHandleW(nullptr);
     if (!reg) {
-        WNDCLASSW wc{}; wc.lpfnWndProc = TMProc; wc.hInstance = hInst;
+        WNDCLASSW wc{}; wc.lpfnWndProc = MDProc; wc.hInstance = hInst;
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"ACE_TM"; RegisterClassW(&wc); reg = true;
+        wc.lpszClassName = L"ACE_MD"; RegisterClassW(&wc); reg = true;
+        INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_LISTVIEW_CLASSES };
+        InitCommonControlsEx(&icc);
     }
-    dsp::TimbreMatchOptions& opts = *ctx.opts;
-    TMState st; st.opts = &opts; st.ref = &ctx.ref;
+    MDState st; st.ref = &ref; st.tracks = &tracks; st.scope = &scopeLabel;
+    st.prefix = prefix; st.opts = opts;
     DlgUI ui(parent);
+    const bool picker = !tracks.labels.empty();
 
-    static const wchar_t* kInfo =
-        L"Evens out the tone differences between clips recorded separately \u2014 mic distance "
-        L"and angle, tone controls, a brighter or duller room. Each clip's average tone colour "
-        L"is measured over its speech and gets one fixed EQ curve toward the target, the same "
-        L"from its first word to its last. It cannot fix differences in reverb, background "
-        L"noise or delivery.";
-    static const wchar_t* kSoundLike = L"Sound like ";
     // The ranges are in the labels because these are the two fields people reach
     // for when a match doesn't sound right, and a cap you can't see is a cap you
     // fight. 24 dB is the ceiling on purpose: past that a static EQ is no longer
     // matching a tone colour, it is lifting one clip's noise floor into audibility.
-    static const wchar_t* kLabels[] = { kMatchTo, L"Maximum change (0\u201324 dB):",
+    static const wchar_t* kTracks = L"Tracks:";
+    static const wchar_t* kMatchTo = L"Match to:";
+    static const wchar_t* kTimbre[] = { L"Maximum change (0\u201324 dB):",
                                         L"Smoothing (0.05\u20132 octaves):", L"Level:" };
     static const wchar_t* kCheck = L"Keep each clip's loudness";
 
-    int labelW = 0;
-    for (auto* t : kLabels) labelW = std::max(labelW, ui.textW(t));
-    int ctlW = std::max(refComboW(ui, ctx.ref, kSoundLike), ui.checkW(kCheck));
-    int contentW = labelW + ui.gap + ctlW;
-    ScopeLine scope(ctx.scopeLabel);
+    int labelW = std::max(ui.textW(kMatchTo), picker ? ui.textW(kTracks) : 0);
+    if (opts) for (auto* s : kTimbre) labelW = std::max(labelW, ui.textW(s));
+    int ctlW = refComboW(ui, ref, prefix);
+    if (opts) ctlW = std::max(ctlW, ui.checkW(kCheck));
+    for (const std::wstring& s : tracks.labels) ctlW = std::max(ctlW, std::min(ui.textW(s.c_str()) + ui.S(48), ui.S(320)));
+    int contentW = std::max(labelW + ui.gap + ctlW, ui.S(380));
+    ScopeLine scope(scopeLabel);
     scope.widen(ui, contentW);
     const int ctlX = ui.margin + labelW + ui.gap;
     const int editW = std::max(ui.S(80), ui.textW(L"000000") + ui.S(16));
     const int rowH = ui.rowH(), step = rowH + ui.rowGap;
     const int bw = ui.btnW(L"Cancel"), bh = ui.btnH();
-    const SIZE infoSz = ui.measure(kInfo, contentW);
-    scope.measure(ui, contentW);
+    const SIZE infoSz = ui.measure(info, contentW);
+    // With a picker the line changes as tracks are ticked, so it always has room
+    // for two lines rather than the height of whatever it said first.
+    scope.measure(ui, contentW, picker);
+    const int itemH = std::max(ui.lineH + ui.S(5), ui.S(19));
+    const int listRows = std::min<int>((int)tracks.labels.size(), 5);
+    const int listH = picker ? listRows * itemH + ui.S(6) : 0;
 
-    // Rows: info paragraph, "Applies to", reference, two edits, level, buttons.
     const int clientH = ui.margin + infoSz.cy + ui.S(10) + scope.step(ui)
-                      + 4 * step + ui.S(8) + bh + ui.margin;
-    HWND h = ui.create(L"ACE_TM", L"Match Timbre", parent, ui.margin * 2 + contentW, clientH);
+                      + (picker ? listH + ui.rowGap : 0)
+                      + step + (opts ? 3 * step : 0) + ui.S(8) + bh + ui.margin;
+    HWND h = ui.create(L"ACE_MD", title, parent, ui.margin * 2 + contentW, clientH);
     SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
 
     int y = ui.margin;
-    ui.label(kInfo, ui.margin, y, contentW, infoSz.cy);   y += infoSz.cy + ui.S(10);
-    scope.build(ui, y, contentW);
+    ui.label(info, ui.margin, y, contentW, infoSz.cy);   y += infoSz.cy + ui.S(10);
+    st.stScope = scope.build(ui, y, contentW);
 
-    ui.rowLabel(kLabels[0], ui.margin, y, labelW, rowH);
-    st.cbRef = refCombo(ui, ctlX, y, ctlW, ctx.ref, kSoundLike);
+    if (picker) {
+        ui.rowLabel(kTracks, ui.margin, y, labelW, rowH);
+        st.list = ui.ctl(WC_LISTVIEWW, L"", WS_TABSTOP | WS_BORDER | LVS_REPORT |
+                         LVS_NOCOLUMNHEADER | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                         ctlX, y, ctlW, listH, IDC_MD_TRACKS);
+        ListView_SetExtendedListViewStyle(st.list, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT);
+        LVCOLUMNW col{}; col.mask = LVCF_WIDTH;
+        col.cx = ctlW - GetSystemMetricsForDpi(SM_CXVSCROLL, ui.dpi) - ui.S(6);
+        ListView_InsertColumn(st.list, 0, &col);
+        st.populating = true;
+        for (size_t i = 0; i < tracks.labels.size(); ++i) {
+            LVITEMW it{}; it.mask = LVIF_TEXT; it.iItem = (int)i;
+            it.pszText = (LPWSTR)tracks.labels[i].c_str();
+            ListView_InsertItem(st.list, &it);
+            ListView_SetCheckState(st.list, (int)i, i < tracks.ticked.size() && tracks.ticked[i]);
+        }
+        st.populating = false;
+        y += listH + ui.rowGap;
+    }
+
+    ui.rowLabel(kMatchTo, ui.margin, y, labelW, rowH);
+    st.cbRef = ui.combo(ctlX, y, ctlW, 8);
+    mdFillRef(&st, -1);
     y += step;
 
-    wchar_t num[64];
-    auto editRow = [&](const wchar_t* t, const wchar_t* value) {
-        ui.rowLabel(t, ui.margin, y, labelW, ui.editH());
-        HWND c = ui.edit(value, ctlX, y, editW);
+    if (opts) {
+        wchar_t num[64];
+        auto editRow = [&](const wchar_t* lbl, const wchar_t* value) {
+            ui.rowLabel(lbl, ui.margin, y, labelW, ui.editH());
+            HWND c = ui.edit(value, ctlX, y, editW);
+            y += step;
+            return c;
+        };
+        swprintf(num, 64, L"%g", (double)opts->maxCorrectionDb);
+        st.edDb = editRow(kTimbre[0], num);
+        swprintf(num, 64, L"%g", (double)opts->smoothingOctaves);
+        st.edSmooth = editRow(kTimbre[1], num);
+        ui.rowLabel(kTimbre[2], ui.margin, y, labelW, rowH);
+        st.ckLoud = ui.check(kCheck, ctlX, y, ctlW);
+        SendMessageW(st.ckLoud, BM_SETCHECK, opts->preserveLoudness ? BST_CHECKED : BST_UNCHECKED, 0);
         y += step;
-        return c;
-    };
-    swprintf(num, 64, L"%g", (double)opts.maxCorrectionDb);
-    st.edDb = editRow(kLabels[1], num);
-    swprintf(num, 64, L"%g", (double)opts.smoothingOctaves);
-    st.edSmooth = editRow(kLabels[2], num);
-
-    ui.rowLabel(kLabels[3], ui.margin, y, labelW, rowH);
-    st.ckLoud = ui.check(kCheck, ctlX, y, ctlW);
-    SendMessageW(st.ckLoud, BM_SETCHECK, opts.preserveLoudness ? BST_CHECKED : BST_UNCHECKED, 0);
-    y += step + ui.S(8);
+    }
+    y += ui.S(8);
 
     const int right = ui.margin + contentW;
-    ui.button(L"Apply", right - bw * 2 - ui.S(8), y, bw, bh, IDOK, true);
+    st.btnOk = ui.button(L"Apply", right - bw * 2 - ui.S(8), y, bw, bh, IDOK, true);
     ui.button(L"Cancel", right - bw, y, bw, bh, IDCANCEL);
 
     SetFocus(st.cbRef);
@@ -901,82 +971,28 @@ bool timbreMatch(HWND parent, TimbreMatchContext& ctx) {
     return st.ok;
 }
 
-// ------------------------------------------------------------------ volume matching
-struct VMState {
-    MatchReference* ref = nullptr;
-    HWND cbRef = 0;
-    bool ok = false;
-};
-
-static LRESULT CALLBACK VMProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    auto* st = (VMState*)GetWindowLongPtrW(h, GWLP_USERDATA);
-    switch (m) {
-    case WM_COMMAND:
-        if (LOWORD(w) == IDCANCEL) { st->ok = false; DestroyWindow(h); return 0; }
-        if (LOWORD(w) == IDOK) {
-            st->ref->choice = refChoice(st->cbRef);
-            st->ok = true; DestroyWindow(h); return 0;
-        }
-        break;
-    case WM_CLOSE: st->ok = false; DestroyWindow(h); return 0;
-    }
-    return DefWindowProcW(h, m, w, l);
+bool timbreMatch(HWND parent, TimbreMatchContext& ctx) {
+    static const wchar_t* kInfo =
+        L"Evens out the tone differences between clips recorded separately \u2014 mic distance "
+        L"and angle, tone controls, a brighter or duller room. Each clip's average tone colour "
+        L"is measured over its speech and gets one fixed EQ curve toward the target, the same "
+        L"from its first word to its last. The EQ is a setting on the clip: matching again "
+        L"replaces it, and it can be removed. It cannot fix differences in reverb, background "
+        L"noise or delivery.";
+    return matchDialog(parent, L"Match Timbre", kInfo, L"Sound like ", ctx.ref, ctx.tracks,
+                       ctx.scopeLabel, ctx.opts);
 }
 
 bool volumeMatch(HWND parent, VolumeMatchContext& ctx) {
-    static bool reg = false;
-    HINSTANCE hInst = GetModuleHandleW(nullptr);
-    if (!reg) {
-        WNDCLASSW wc{}; wc.lpfnWndProc = VMProc; wc.hInstance = hInst;
-        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"ACE_VM"; RegisterClassW(&wc); reg = true;
-    }
-    VMState st; st.ref = &ctx.ref;
-    DlgUI ui(parent);
-
-    // Says outright that this sets volumes rather than rewriting audio, because the
-    // timbre matcher next to it in the menu does rewrite audio, and the difference
-    // decides whether "I can still adjust it afterwards" is true.
+    // Says outright that this sets volumes rather than rewriting audio, so "I can
+    // still adjust it afterwards" is plainly true.
     static const wchar_t* kInfo =
         L"Sets each clip's volume so its speech comes out as loud as the target \u2014 one "
-        L"volume per clip, measured over the speech and ignoring the pauses. The audio itself "
-        L"isn't changed: this moves the clips' volume sliders, which you can still adjust "
-        L"afterwards.";
-    static const wchar_t* kAsLoudAs = L"As loud as ";
-
-    const int labelW = ui.textW(kMatchTo);
-    const int ctlW = refComboW(ui, ctx.ref, kAsLoudAs);
-    int contentW = std::max(labelW + ui.gap + ctlW, ui.S(380));
-    ScopeLine scope(ctx.scopeLabel);
-    scope.widen(ui, contentW);
-    const int ctlX = ui.margin + labelW + ui.gap;
-    const int rowH = ui.rowH(), step = rowH + ui.rowGap;
-    const int bw = ui.btnW(L"Cancel"), bh = ui.btnH();
-    const SIZE infoSz = ui.measure(kInfo, contentW);
-    scope.measure(ui, contentW);
-
-    // Rows: info paragraph, "Applies to", reference, buttons.
-    const int clientH = ui.margin + infoSz.cy + ui.S(10) + scope.step(ui)
-                      + step + ui.S(8) + bh + ui.margin;
-    HWND h = ui.create(L"ACE_VM", L"Match Volume", parent, ui.margin * 2 + contentW, clientH);
-    SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
-
-    int y = ui.margin;
-    ui.label(kInfo, ui.margin, y, contentW, infoSz.cy);   y += infoSz.cy + ui.S(10);
-    scope.build(ui, y, contentW);
-
-    ui.rowLabel(kMatchTo, ui.margin, y, labelW, rowH);
-    st.cbRef = refCombo(ui, ctlX, y, ctlW, ctx.ref, kAsLoudAs);
-    y += step + ui.S(8);
-
-    const int right = ui.margin + contentW;
-    ui.button(L"Apply", right - bw * 2 - ui.S(8), y, bw, bh, IDOK, true);
-    ui.button(L"Cancel", right - bw, y, bw, bh, IDCANCEL);
-
-    SetFocus(st.cbRef);
-    runModal(h, parent);
-    return st.ok;
+        L"volume per clip, measured over the speech (ignoring the pauses) the way the ear "
+        L"weighs loudness. The audio itself isn't changed: this moves the clips' volume "
+        L"sliders, which you can still adjust afterwards.";
+    return matchDialog(parent, L"Match Volume", kInfo, L"As loud as ", ctx.ref, ctx.tracks,
+                       ctx.scopeLabel, nullptr);
 }
 
 // ------------------------------------------------------------------ history

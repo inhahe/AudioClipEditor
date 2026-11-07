@@ -447,7 +447,9 @@ Where each shape is offered:
 | Track header | *Match timbre — this track…*, *Match volume — this track…*, and the same two for *all tracks* |
 | Placed clip | *Match this clip's timbre / volume to the rest of the track…* (`clipToTrack`) |
 
-"The rest of its track" is offered only from the timeline, where it has one meaning; a
+Every track-based entry opens its dialog with a **tick-list of the tracks** that have
+clips, the ones the entry names ticked; changing the ticks changes the set (see the
+dialogs section). "The rest of its track" is offered only from the timeline, where it has one meaning; a
 library card can be on several tracks, or on none. Both submenus list the same scopes
 in the same order.
 
@@ -1613,17 +1615,29 @@ radios, with the scope (`'clip name'`, `all clips (N clips)`, `track 'x'`) shown
 in the dialog so a project-wide run can't be triggered by accident.
 
 `dlg::timbreMatch(parent, TimbreMatchContext&)` and
-`dlg::volumeMatch(parent, VolumeMatchContext&)` add one thing the other two don't
-need: a **reference combo** (`refCombo` / `refComboW` / `refChoice`, shared so the two
-can't diverge) listing the average first — "The average of them all", or for one clip
-to the rest "The average of the other 7 clips on 'Voice'" — followed by "Sound like
-'<clip>'" / "As loud as '<clip>'" for each pool clip. `dlg::MatchReference` carries
-the labels in and the chosen index (`-1` = average) back out; the caller maps that to
-a set index. Clip items are clamped to `S(320)` when sizing the combo so a long name
-can't stretch the dialog off the screen. Beyond that, the timbre dialog is the same
-shape as `voiceIsolate` — numeric Maximum-change and Smoothing edits through
-`vcReadDouble`, a Keep-loudness checkbox, and the scope line — and the volume dialog
-is just the info paragraph, the scope line and the combo.
+`dlg::volumeMatch(parent, VolumeMatchContext&)` are **one dialog**, `matchDialog`, with
+timbre's rows (Maximum change, Smoothing, Keep loudness) present only when it is
+given options — they ask the same questions, and one implementation is what keeps
+them from drifting apart. Two things the other effect dialogs don't have:
+
+- **A reference combo** listing the average first — "The average of them all", or for
+  one clip to the rest "The average of the other 7 clips on 'Voice'" — then "Sound
+  like '<clip>'" / "As loud as '<clip>'" for each pool clip. `dlg::MatchReference`
+  carries the labels and the clip ids in and the chosen index (`-1` = average) back
+  out; the caller maps that to a set index. Every item, the average's included (it
+  names a track), is clamped to `S(320)` when sizing the combo so a long name can't
+  stretch the dialog off the screen.
+- **A tick-list of tracks** (`dlg::MatchTracks`, a checkbox ListView) for matches that
+  take their clips from tracks — a track, all tracks, or one clip to the rest of its
+  track — so a music or effects track can be left out of "all tracks", or a clip
+  matched to two tracks' worth of takes. Ticking calls back into the app
+  (`App::trackPicker`'s `rebuild`), which rebuilds the `ClipSet` with
+  `match::tracksSet` / `match::clipToTracks` and returns the new reference list and
+  "Applies to:" text; the combo keeps the user's pick **by clip id** if it is still
+  offered, and Apply is disabled while nothing would be matched. The set the dialog
+  leaves behind is the one matched. The scope line always has room for two lines
+  here, since it changes while the dialog is open. Library-wide matches have no
+  tick-list: they aren't about tracks.
 
 ## Selftest
 
@@ -1766,6 +1780,10 @@ mismatch, and — the one that matters — **immunity to a broadband level chang
 Scaling a clip by 0.25 must leave the distance at 0, or the report would call two
 identically-coloured takes different merely because one is quieter, which is
 exactly the confusion the number exists to remove.
+
+**Matching from chosen tracks** (4 checks): two tracks of three leave the third out and
+say so in the label; every track ticked reads as all tracks, in the project's order;
+one clip to the rest of two ticked tracks pools both; nothing ticked matches nothing.
 
 **Matching clips to each other** (`match.h`, 42 checks) is tested on `Document`s
 built in the test, with deterministic noise whose levels are in known ratios so the

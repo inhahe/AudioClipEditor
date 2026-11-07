@@ -61,22 +61,40 @@ bool voiceIsolate(HWND parent, VoiceIsolateContext& ctx);
 struct MatchReference {
     std::wstring averageLabel;               // the first item: "The average of them all"
     std::vector<std::wstring> clipNames;     // the clips that may be the standard, in order
+    std::vector<int> clipIds;                // parallel to clipNames: keeps the user's pick
+                                             // when the list is rebuilt for other tracks
     int choice = -1;                         // in/out: -1 = the average, else into clipNames
 };
 
-// Timbre matching options modal: the reference, plus how far and how finely the EQ
-// may move. Returns true on Apply.
+// The tracks a match takes its clips from, as ticks the user can change -- so a
+// music or effects track can be left out of "all tracks", or a clip matched to the
+// clips on two tracks rather than one. Empty `labels`: no tick-list (a library-wide
+// match, which isn't about tracks).
+struct MatchTracks {
+    std::vector<std::wstring> labels;        // one per track, e.g. "Narration (8 clips)"
+    std::vector<uint8_t> ticked;             // in/out, parallel to labels
+    // Called whenever the ticks change, so the rest of the dialog follows: fills
+    // `ref` and `scopeLabel` for the newly ticked tracks, and returns whether there
+    // is anything to match (Apply is disabled while there isn't).
+    std::function<bool(const std::vector<uint8_t>& ticked, MatchReference& ref,
+                       std::wstring& scopeLabel)> rebuild;
+};
+
+// Timbre matching options modal: which tracks, the reference, and how far and how
+// finely the EQ may move. Returns true on Apply.
 struct TimbreMatchContext {
     dsp::TimbreMatchOptions* opts = nullptr;   // in/out (session-scoped)
     MatchReference ref;
-    std::wstring scopeLabel;                   // what Apply will act on
+    MatchTracks tracks;
+    std::wstring scopeLabel;                   // in/out: what Apply will act on
 };
 bool timbreMatch(HWND parent, TimbreMatchContext& ctx);
 
-// Volume matching modal: just the reference. Returns true on Apply.
+// Volume matching modal: which tracks, and the reference. Returns true on Apply.
 struct VolumeMatchContext {
     MatchReference ref;
-    std::wstring scopeLabel;                   // what Apply will act on
+    MatchTracks tracks;
+    std::wstring scopeLabel;                   // in/out: what Apply will act on
 };
 bool volumeMatch(HWND parent, VolumeMatchContext& ctx);
 

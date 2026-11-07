@@ -64,6 +64,11 @@ struct ClipSet {
     int referenceFor(int clipId) const;
 };
 
+// Every distinct clip placed on any of these tracks -- the dialogs' tick-list of
+// tracks rebuilds the set through this as the ticks change.
+ClipSet tracksSet(const Project& p, const std::vector<int>& trackIds);
+// `clipId` matched to the other clips on these tracks.
+ClipSet clipToTracks(const Project& p, int clipId, const std::vector<int>& trackIds);
 // Every distinct clip placed on the track.
 ClipSet trackSet(const Project& p, int trackId);
 // Every distinct clip placed on any track: "the track or tracks", without the

@@ -3196,6 +3196,36 @@ int runSelfTest() {
               L"timbre EQ: volume matching measures a clip through its EQ", num(diff) + L" dB");
     }
 
+    // ---- matching from a chosen set of tracks (the dialogs' tick-list)
+    {
+        Document d; d.init(rate);
+        const int a = d.addClip(L"a", makeSine(rate, 1.0, 300.0), L"", L"add");
+        const int b = d.addClip(L"b", makeSine(rate, 1.0, 300.0), L"", L"add");
+        const int c = d.addClip(L"c", makeSine(rate, 1.0, 300.0), L"", L"add");
+        const int m = d.addClip(L"music", makeSine(rate, 1.0, 300.0), L"", L"add");
+        const int nar = d.project().tracks[0].id;
+        d.renameTrack(nar, L"Narration");
+        const int pick = d.addTrack(); d.renameTrack(pick, L"Pickups");
+        const int mus = d.addTrack(); d.renameTrack(mus, L"Music");
+        d.placeClip(nar, a, 0, L"p"); d.placeClip(nar, b, rate, L"p");
+        d.placeClip(pick, c, 0, L"p");
+        d.placeClip(mus, m, 0, L"p");
+        const Project& p = d.project();
+        const match::ClipSet two = match::tracksSet(p, { nar, pick });
+        check(two.size() == 3 && two.indexOf(m) < 0 &&
+              two.label == L"the clips on tracks 'Narration' and 'Pickups' (3 clips)",
+              L"match tracks: ticking two tracks of three leaves the third out", two.label);
+        const match::ClipSet all = match::tracksSet(p, { mus, nar, pick });
+        check(all.size() == 4 && all.ids[0] == a && all.label == L"the clips on all tracks (4 clips)",
+              L"match tracks: every track ticked is all tracks, in the project's order", all.label);
+        const match::ClipSet one = match::clipToTracks(p, a, { nar, pick });
+        check(one.single() && one.poolCount() == 2 && one.indexOf(m) < 0 &&
+              one.others == L"the other 2 clips on tracks 'Narration' and 'Pickups'",
+              L"match tracks: one clip to the rest of the ticked tracks", one.others);
+        check(!match::tracksSet(p, {}).usable() && !match::clipToTracks(p, a, {}).usable(),
+              L"match tracks: with nothing ticked there is nothing to match");
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);

@@ -109,21 +109,48 @@ ClipSet oneToRest(const Project& p, int clipId, const std::vector<const Clip*>& 
 
 } // namespace
 
-ClipSet trackSet(const Project& p, int trackId) {
+namespace {
+
+// The tracks of `ids`, in the project's order (not the list's), without repeats.
+std::vector<const Track*> tracksOf(const Project& p, const std::vector<int>& ids) {
+    std::vector<const Track*> out;
+    for (const Track& t : p.tracks)
+        if (std::find(ids.begin(), ids.end(), t.id) != ids.end()) out.push_back(&t);
+    return out;
+}
+
+// "track 'Narration'", "tracks 'Narration' and 'Pickups'", "4 tracks" -- or, when
+// every track that has clips is included, "all tracks".
+std::wstring tracksText(const Project& p, const std::vector<const Track*>& ts) {
+    int withClips = 0, chosenWithClips = 0;
+    for (const Track& t : p.tracks) withClips += t.clips.empty() ? 0 : 1;
+    for (const Track* t : ts) chosenWithClips += t->clips.empty() ? 0 : 1;
+    if (ts.size() == 1) return L"track " + quoted(ts[0]->name);
+    if (withClips > 1 && chosenWithClips == withClips) return L"all tracks";
+    if (ts.size() == 2) return L"tracks " + quoted(ts[0]->name) + L" and " + quoted(ts[1]->name);
+    return std::to_wstring(ts.size()) + L" tracks";
+}
+
+} // namespace
+
+ClipSet tracksSet(const Project& p, const std::vector<int>& trackIds) {
     ClipSet s;
-    const Track* t = p.findTrack(trackId);
-    if (!t) return s;
-    for (const PlacedClip& pc : t->clips) add(s, p.findClip(pc.clipId), true, true);
-    finishSet(p, s, L"track " + quoted(t->name));
+    const std::vector<const Track*> ts = tracksOf(p, trackIds);
+    if (ts.empty()) return s;
+    for (const Track* t : ts)
+        for (const PlacedClip& pc : t->clips) add(s, p.findClip(pc.clipId), true, true);
+    const std::wstring where = tracksText(p, ts);
+    finishSet(p, s, where == L"all tracks" ? std::wstring(L"the clips on all tracks")
+                  : where.rfind(L"track ", 0) == 0 ? where : L"the clips on " + where);
     return s;
 }
 
+ClipSet trackSet(const Project& p, int trackId) { return tracksSet(p, { trackId }); }
+
 ClipSet timelineSet(const Project& p) {
-    ClipSet s;
-    for (const Track& t : p.tracks)
-        for (const PlacedClip& pc : t.clips) add(s, p.findClip(pc.clipId), true, true);
-    finishSet(p, s, L"the clips on all tracks");
-    return s;
+    std::vector<int> all;
+    for (const Track& t : p.tracks) all.push_back(t.id);
+    return tracksSet(p, all);
 }
 
 ClipSet librarySet(const Project& p) {
@@ -133,12 +160,19 @@ ClipSet librarySet(const Project& p) {
     return s;
 }
 
-ClipSet clipToTrack(const Project& p, int clipId, int trackId) {
-    const Track* t = p.findTrack(trackId);
-    if (!t) return ClipSet{};
+ClipSet clipToTracks(const Project& p, int clipId, const std::vector<int>& trackIds) {
+    const std::vector<const Track*> ts = tracksOf(p, trackIds);
+    if (ts.empty()) return ClipSet{};
     std::vector<const Clip*> others;
-    for (const PlacedClip& pc : t->clips) others.push_back(p.findClip(pc.clipId));
-    return oneToRest(p, clipId, others, L" on " + quoted(t->name));
+    for (const Track* t : ts)
+        for (const PlacedClip& pc : t->clips) others.push_back(p.findClip(pc.clipId));
+    const std::wstring where = tracksText(p, ts);
+    return oneToRest(p, clipId, others,
+                     where.rfind(L"track ", 0) == 0 ? L" on " + quoted(ts[0]->name) : L" on " + where);
+}
+
+ClipSet clipToTrack(const Project& p, int clipId, int trackId) {
+    return clipToTracks(p, clipId, { trackId });
 }
 
 ClipSet clipToLibrary(const Project& p, int clipId) {
