@@ -258,13 +258,17 @@ int runSelfTest() {
         }
     }
 
-    // Slicing (crop) sanity
-    auto slice = std::make_shared<AudioBuffer>();
-    slice->sampleRate = rate; slice->channels = 2;
+    // Slicing: the one helper crop, new-clip-from-selection, export and split-out use
     int64_t f0 = rate / 4, f1 = rate / 2;
-    slice->samples.assign(sine->samples.begin() + f0 * 2, sine->samples.begin() + f1 * 2);
-    check(slice->frames() == (f1 - f0), L"Buffer slice length",
+    auto slice = sliceBuffer(*sine, f0, f1);
+    check(slice->frames() == (f1 - f0) && slice->samples[0] == sine->samples[(size_t)(f0 * 2)],
+          L"Buffer slice length",
           L"got=" + std::to_wstring(slice->frames()) + L" want=" + std::to_wstring(f1 - f0));
+    check(sliceBuffer(*sine, -100, 10)->frames() == 10 &&
+          sliceBuffer(*sine, sine->frames() - 5, sine->frames() + 100)->frames() == 5 &&
+          sliceBuffer(*sine, 50, 50)->frames() == 0 &&
+          sliceBuffer(*sine, sine->frames() + 10, sine->frames() + 20)->frames() == 0,
+          L"Buffer slice clamps to the buffer, and an empty or outside range is empty");
 
     // Document project round-trip (.acep v3) + library sort / reorder
     {

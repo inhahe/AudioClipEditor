@@ -1628,16 +1628,6 @@ struct App {
         return L"the selection in '" + name + L"'" + d;
     }
 
-    AudioBufferPtr sliceBuffer(const AudioBuffer& src, int64_t f0, int64_t f1) {
-        auto out = std::make_shared<AudioBuffer>();
-        out->sampleRate = src.sampleRate; out->channels = src.channels;
-        int ch = src.channels;
-        f0 = std::max<int64_t>(0, f0); f1 = std::min<int64_t>(src.frames(), f1);
-        if (f1 > f0)
-            out->samples.assign(src.samples.begin() + f0 * ch, src.samples.begin() + f1 * ch);
-        return out;
-    }
-
     void saveSelectionAsClip() {
         if (!hasSel()) return;
         const Clip* c = doc.project().findClip(selClipId);
@@ -2505,8 +2495,6 @@ struct App {
         }
         const float gain = c->gain;
         const std::wstring clipName = c->name;
-        float peak = 0.0f;
-        for (float v : buf->samples) peak = std::max(peak, std::fabs(v));
         // Default to the clip's own rate and channel count so a plain "export"
         // doesn't quietly resample or upmix a mono take; the dialog can override.
         mfio::ExportOptions o;
@@ -2523,17 +2511,29 @@ struct App {
         std::wstring err; bool ok = mfio::encodeFile(outPath, *buf, o, &err);
         SetCursor(old);
         if (!ok) { MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING); return; }
-        // Every format is written clamped to full scale (32-bit float too), so a
-        // volume that takes the peaks over it clips them in the file -- audibly, and
-        // with nothing else to say so.
+        // Every format is written clamped to full scale (32-bit float too), so a peak
+        // over it is clipped in the file, audibly and with nothing else to say so.
+        // Measured on what the encoder is handed -- a mono export averages the two
+        // channels, which can bring a one-sided peak back under -- and the clip's
+        // volume is only named as the cause when, at 100%, it would have fitted.
+        float peak = 0.0f;
+        const int ch = buf->channels;
+        for (int64_t f = 0; f < buf->frames(); ++f) {
+            const float l = buf->samples[(size_t)(f * ch)];
+            const float r = ch > 1 ? buf->samples[(size_t)(f * ch + 1)] : l;
+            peak = std::max(peak, o.channels == 1 ? std::fabs(0.5f * (l + r))
+                                                  : std::max(std::fabs(l), std::fabs(r)));
+        }
         if (peak > 1.0f) {
-            wchar_t msg[400];
-            swprintf(msg, 400,
-                     L"'%ls' is at %d%% volume, which takes its peaks %.1f dB past full scale, "
-                     L"so they are clipped in the exported file.\n\nTurn the clip's volume down "
-                     L"and export again for a clean copy.",
-                     clipName.c_str(), (int)(gain * 100.0f + 0.5f), 20.0 * std::log10(peak));
-            MessageBoxW(hwnd, msg, L"Export clip", MB_ICONWARNING);
+            const bool volumeDidIt = gain > 1.0f && peak / gain <= 1.0f;
+            std::wstring msg = L"'" + clipName + L"' "
+                + (volumeDidIt ? L"is at " + gainLabel(gain) + L" volume, which takes its peaks "
+                               : std::wstring(L"peaks "))
+                + db1(20.0 * std::log10(peak)) + L" dB past full scale, so they are clipped in "
+                  L"the exported file.";
+            if (volumeDidIt)
+                msg += L"\n\nTurn the clip's volume down and export again for a clean copy.";
+            MessageBoxW(hwnd, msg.c_str(), L"Export clip", MB_ICONWARNING);
         }
     }
 

@@ -10,7 +10,7 @@ sync with behavior changes.
 
 | File | Role |
 |---|---|
-| `audio_buffer.h` | `AudioBuffer` (interleaved float PCM, `sampleRate`/`channels`/`samples`), `AudioBufferPtr` (`shared_ptr`), `PeakCache` min/max bucket envelope for waveform drawing |
+| `audio_buffer.h` | `AudioBuffer` (interleaved float PCM, `sampleRate`/`channels`/`samples`), `AudioBufferPtr` (`shared_ptr`), `sliceBuffer` (the one range copy that crop, new clip, export and split-out all use), `PeakCache` min/max bucket envelope for waveform drawing |
 | `model.h` | `Clip` (id, name, buffer, peaks, gain, **timestamp**), `Track` (id, name, gain, placed clips, plus the pure lane arithmetic `gapBefore`/`ripple`/`overlaps`), `PlacedClip` (clipId + start frame), `Project` (library order = display order) |
 | `decoder.{h,cpp}` | MF Source Reader → stereo float at the project rate |
 | `encoder.{h,cpp}` | WAV writer (manual RIFF; 16/24-bit PCM, 32-bit float) + MF Sink Writer (MP3/AAC/WMA); output-rate resampling |
@@ -1022,8 +1022,12 @@ which embeds raw float samples — so the only ways out are:
   because the volume is part of the edit (it is what the card plays, and what volume
   matching sets) and a file without it would hand back the clip as it was before
   the match. The buffer is shared, not copied, when there is nothing to change.
-  The encoder clamps every format to full scale, 32-bit float included, so when the
-  volume takes the peaks over it the user is told the file is clipped there. Defaults
+  The encoder clamps every format to full scale, 32-bit float included, so a peak
+  over it is clipped in the file, and the user is told. The peak is measured on what
+  the encoder is handed (a mono export averages the channels, which can bring a
+  one-sided peak back under), and the clip's volume is named as the cause only when
+  the clip would have fitted at 100%: audio that is over full scale on its own, such
+  as an MP3 decode's overshoot, isn't blamed on a volume nobody changed. Defaults
   to the **clip's own** rate and channel count, so a plain export neither resamples
   nor upmixes a mono take.
 

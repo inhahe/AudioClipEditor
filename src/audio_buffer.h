@@ -22,6 +22,20 @@ struct AudioBuffer {
 };
 using AudioBufferPtr = std::shared_ptr<AudioBuffer>;
 
+// A copy of frames [f0, f1) of `src`, clamped to the buffer; empty if nothing of the
+// range is left. Always a fresh buffer, since buffers are immutable once shared.
+inline AudioBufferPtr sliceBuffer(const AudioBuffer& src, int64_t f0, int64_t f1) {
+    auto out = std::make_shared<AudioBuffer>();
+    out->sampleRate = src.sampleRate;
+    out->channels = src.channels;
+    const int ch = src.channels;
+    f0 = std::max<int64_t>(0, f0);
+    f1 = std::min<int64_t>(src.frames(), f1);
+    if (f1 > f0)
+        out->samples.assign(src.samples.begin() + f0 * ch, src.samples.begin() + f1 * ch);
+    return out;
+}
+
 // Min/max (oscilloscope) cache: for each bucket, the minimum and maximum of the
 // mono-mixed signal. Filling between lo and hi renders a true waveform envelope
 // when zoomed out; zoomed in it becomes an oscilloscope trace. Used to draw the
