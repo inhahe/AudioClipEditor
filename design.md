@@ -496,9 +496,10 @@ counts as none** — it is rounding — so re-running a match that already holds
 nothing, and `Document::setClipGains` (one undo step for all of them) records nothing
 when no volume moved.
 
-It is non-destructive: it moves the clips' volume sliders and leaves their audio alone.
-The dialog says so outright, because the timbre matcher next to it does rewrite audio,
-and the difference decides whether "I can still adjust it afterwards" is true.
+It is non-destructive: it moves the clips' volume sliders and leaves their audio alone,
+and the dialog says so outright, since that is what makes "I can still adjust it by hand
+afterwards" true. (Timbre matching is non-destructive too, in its own way: its EQ is a
+setting on the clip — see *The EQ is a setting on the clip*.)
 
 **Loudness is K-weighted** (ITU-R BS.1770's pre-filter: a +4 dB shelf above
 ~1.5 kHz and a ~38 Hz high-pass, `dsp::kWeighting`, coefficients derived for the
@@ -1839,7 +1840,9 @@ Scaling a clip by 0.25 must leave the distance at 0, or the report would call tw
 identically-coloured takes different merely because one is quieter, which is
 exactly the confusion the number exists to remove.
 
-**Matching from chosen tracks** (4 checks): two tracks of three leave the third out and
+**Matching from chosen tracks** (6 checks): with one track holding clips and empty
+ones beside it, "all tracks" names that track rather than the empty ones; a place at
+59.97 s is written 1:00.0, not 0:60.0; two tracks of three leave the third out and
 say so in the label; every track ticked reads as all tracks, in the project's order;
 one clip to the rest of two ticked tracks pools both; nothing ticked matches nothing.
 
@@ -1887,7 +1890,8 @@ correction lands between 60 Hz and 14 kHz. It measured **1.4 dB at 70 Hz**;
 before the weights, over 20 dB at 30 Hz. DC and Nyquist are separately asserted
 to come out at exactly 0 dB.
 
-**History position** (4 checks): a new project has no steps; at the latest step undo
+**History position** (5 checks): the cheap counts the toolbar repaints with
+(`historyCounts`, pointer hops only) agree with the full position; a new project has no steps; at the latest step undo
 names the last edit; two undos back it counts 2 of 3 and names the next undo and redo;
 a fork reports that redo will ask which.
 
@@ -2049,7 +2053,12 @@ undo and redo would each do next, and whether redo forks):
   the shortcut (`App::tooltipFor`). One tooltip control, one tool per painted button
   rectangle (`TTF_SUBCLASS`, text via `TTN_GETDISPINFO` so it is current whenever it
   shows); the rectangles follow layout (`updateTooltipRects`, after every
-  `computeLayout`, skipping unchanged ones).
+  `computeLayout`, skipping unchanged ones), and the control is deactivated while the
+  full-window editor covers the toolbar, whose own buttons sit where these were.
+- **The badge is cheap to draw**: `Document::historyCounts` (`UndoTree::chainCounts`)
+  walks pointers only, because the toolbar repaints ~30 times a second during
+  playback and building the whole history list (strings and all) each time would
+  scale with the project's age.
 - **Clips show whether a timbre EQ is on** (the EQ tag, see *The EQ is a setting on
   the clip*) — the per-clip answer to "is that match still applied?".
 

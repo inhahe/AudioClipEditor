@@ -186,6 +186,8 @@ public:
         int redoChoices = 0;        // >1: redo will ask which of several to take
     };
     HistoryPosition historyPosition() const;
+    // Just historyPosition()'s two counts, cheaply enough to ask on every repaint.
+    void historyCounts(int& steps, int& undone) const { undo_.chainCounts(&steps, &undone); }
     // Move to history()[index]; false if the index is out of range or already current.
     bool gotoHistory(int index);
 

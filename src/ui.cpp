@@ -124,6 +124,7 @@ struct App {
     // The toolbar's tooltips (Undo / Redo / History name what they would do), and
     // the text handed to the one being shown.
     HWND tip = nullptr;
+    bool tipsOn = true;
     std::wstring tipText;
     RECT tipRects[TB_COUNT]{};
 
@@ -1125,11 +1126,12 @@ struct App {
         // While the project is behind its latest step, the button carries how far
         // back: the one thing about the history that should stay visible after the
         // undo's toast has gone, since an undone effect changes nothing on screen.
-        const int undone = doc.historyPosition().undone;
+        int steps = 0, undone = 0;
+        doc.historyCounts(steps, undone);   // every repaint: counts only, no strings
         const RECT& hr = tbRects[TB_HISTORY];
         if (undone == 0) {
             button(h, hr, L"\u2261 History", col::btn,
-                   doc.history().empty() ? col::dim : col::text, hotTB == TB_HISTORY, fNorm);
+                   steps == 0 ? col::dim : col::text, hotTB == TB_HISTORY, fNorm);
         } else {
             button(h, hr, L"", col::btn, col::text, hotTB == TB_HISTORY, fNorm);
             const std::wstring badge = L"\u21B6" + std::to_wstring(undone);
@@ -3072,6 +3074,10 @@ struct App {
     }
     void updateTooltipRects() {
         if (!tip) return;
+        // The full-window editor covers the toolbar these buttons are on; their tips
+        // would pop up over the editor's own buttons in the same places.
+        const bool on = !editorActive();
+        if (on != tipsOn) { SendMessageW(tip, TTM_ACTIVATE, on, 0); tipsOn = on; }
         for (int id : { (int)TB_UNDO, (int)TB_REDO, (int)TB_HISTORY }) {
             if (EqualRect(&tipRects[id], &tbRects[id])) continue;
             TOOLINFOW ti{}; ti.cbSize = sizeof(ti);

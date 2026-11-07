@@ -3,7 +3,7 @@
 //
 // The two matchers differ only in what they measure and what they write back --
 // a clip's speech level, written as its volume; a clip's long-term spectrum,
-// written as one EQ curve baked into its audio. Everything else is the same
+// written as one EQ curve the clip is played through (Clip::eq). Everything else is the same
 // question asked twice: which clips are involved, which of them change, what they
 // are matched to, and how close they ended up. That shared part lives here, out of
 // ui.cpp, so the two cannot drift apart ("this track" meaning one thing to one of
@@ -39,7 +39,7 @@ struct ClipSet {
     // is -- "take (Narration, 0:12.3)", "take (library #4)" -- so lists and
     // summaries never offer two indistinguishable entries.
     std::vector<std::wstring> names;
-    std::vector<uint8_t> change;        // 1 = matched: its volume or audio is rewritten
+    std::vector<uint8_t> change;        // 1 = matched: its volume or EQ is set
     std::vector<uint8_t> pool;          // 1 = in the average, and may be the reference
     std::wstring what;                  // the clips that change: "track 'Voice'", "'take 5'"
     std::wstring others;                // single() only, the pool: "the other 7 clips on 'Voice'"

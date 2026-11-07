@@ -54,11 +54,12 @@ void add(ClipSet& s, const Clip* c, bool change, bool pool) {
     s.pool.push_back(pool ? 1 : 0);
 }
 
-// m:ss.s, for saying where on the timeline a clip sits.
+// m:ss.s, for saying where on the timeline a clip sits. Rounded to tenths before
+// splitting into minutes, or 59.97 s would print as 0:60.0.
 std::wstring timeText(int64_t frames, int rate) {
-    const double sec = rate > 0 ? (double)frames / rate : 0.0;
+    const long long tenths = std::llround(rate > 0 ? (double)frames / rate * 10.0 : 0.0);
     wchar_t b[32];
-    swprintf(b, 32, L"%d:%04.1f", (int)(sec / 60.0), sec - 60.0 * (int)(sec / 60.0));
+    swprintf(b, 32, L"%lld:%02lld.%lld", tenths / 600, (tenths / 10) % 60, tenths % 10);
     return b;
 }
 
@@ -120,15 +121,19 @@ std::vector<const Track*> tracksOf(const Project& p, const std::vector<int>& ids
 }
 
 // "track 'Narration'", "tracks 'Narration' and 'Pickups'", "4 tracks" -- or, when
-// every track that has clips is included, "all tracks".
+// every track that has clips is included, "all tracks". Only tracks with clips are
+// named or counted: an empty one contributes nothing, and the dialogs' tick-list
+// doesn't offer it either.
 std::wstring tracksText(const Project& p, const std::vector<const Track*>& ts) {
-    int withClips = 0, chosenWithClips = 0;
+    int withClips = 0;
     for (const Track& t : p.tracks) withClips += t.clips.empty() ? 0 : 1;
-    for (const Track* t : ts) chosenWithClips += t->clips.empty() ? 0 : 1;
-    if (ts.size() == 1) return L"track " + quoted(ts[0]->name);
-    if (withClips > 1 && chosenWithClips == withClips) return L"all tracks";
-    if (ts.size() == 2) return L"tracks " + quoted(ts[0]->name) + L" and " + quoted(ts[1]->name);
-    return std::to_wstring(ts.size()) + L" tracks";
+    std::vector<const Track*> used;
+    for (const Track* t : ts) if (!t->clips.empty()) used.push_back(t);
+    if (used.empty()) return ts.size() == 1 ? L"track " + quoted(ts[0]->name) : std::wstring(L"no tracks");
+    if (used.size() == 1) return L"track " + quoted(used[0]->name);
+    if ((int)used.size() == withClips) return L"all tracks";
+    if (used.size() == 2) return L"tracks " + quoted(used[0]->name) + L" and " + quoted(used[1]->name);
+    return std::to_wstring(used.size()) + L" tracks";
 }
 
 } // namespace
@@ -168,7 +173,7 @@ ClipSet clipToTracks(const Project& p, int clipId, const std::vector<int>& track
         for (const PlacedClip& pc : t->clips) others.push_back(p.findClip(pc.clipId));
     const std::wstring where = tracksText(p, ts);
     return oneToRest(p, clipId, others,
-                     where.rfind(L"track ", 0) == 0 ? L" on " + quoted(ts[0]->name) : L" on " + where);
+                     where.rfind(L"track ", 0) == 0 ? L" on " + where.substr(6) : L" on " + where);
 }
 
 ClipSet clipToTrack(const Project& p, int clipId, int trackId) {
@@ -429,8 +434,8 @@ TimbreResult matchTimbre(const Project& p, const ClipSet& s, int reference,
         target = dsp::averageTimbre(poolProfiles);
         if (!target.valid()) { r.failure = Failure::Pool; return r; }
     }
-    // A set needs two measured clips; with one, the "match" would filter that clip
-    // towards its own spectrum and rewrite its audio for nothing.
+    // A set needs two measured clips; with one, the "match" would only EQ that clip
+    // towards its own spectrum, for nothing.
     if (!s.single() && std::count(r.measured.begin(), r.measured.end(), 1) < 2) {
         r.failure = Failure::Alone; return r;
     }

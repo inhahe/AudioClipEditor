@@ -973,12 +973,7 @@ int Document::historyIndex() const {
 
 Document::HistoryPosition Document::historyPosition() const {
     HistoryPosition p;
-    int cur = 0;
-    const std::vector<const UndoNode*> chain = undo_.chain(&cur);
-    if (!chain.empty()) {
-        p.steps = (int)chain.size() - 1;
-        p.undone = (int)chain.size() - 1 - cur;
-    }
+    undo_.chainCounts(&p.steps, &p.undone);
     if (canUndo()) p.nextUndo = undoDesc();
     if (canRedo()) {
         p.nextRedo = redoChildDesc(defaultRedoBranch());

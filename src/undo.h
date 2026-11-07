@@ -117,6 +117,21 @@ public:
         return out;
     }
 
+    // chain()'s two lengths without building it -- the steps on the walkable line
+    // (the root isn't one) and how many lie past the current node -- for callers that
+    // ask on every repaint. Pointer hops only; no allocation, no strings.
+    void chainCounts(int* steps, int* undone) const {
+        int back = 0, ahead = 0;
+        for (const UndoNode* n = current_; n && n->parent; n = n->parent) ++back;
+        for (const UndoNode* n = current_; n && !n->children.empty(); ) {
+            const int b = n->lastChild >= 0 ? n->lastChild : 0;
+            n = n->children[(size_t)b].get();
+            ++ahead;
+        }
+        if (steps) *steps = back + ahead;
+        if (undone) *undone = ahead;
+    }
+
     // Jump straight to a node (the History window's click-to-go). Equivalent to
     // pressing undo/redo the right number of times, so it also re-points the redo
     // trail at the target: after jumping back, undoing further and then redoing

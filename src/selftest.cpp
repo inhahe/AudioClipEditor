@@ -3363,6 +3363,33 @@ int runSelfTest() {
         }
     }
 
+    // ---- matching's labels: empty tracks aren't named; times round across minutes
+    {
+        Document d; d.init(rate);
+        const int a = d.addClip(L"take", makeSine(rate, 1.0, 300.0), L"", L"add");
+        const int b = d.addClip(L"take", makeSine(rate, 1.0, 300.0), L"", L"add");
+        const int nar = d.project().tracks[0].id;
+        d.renameTrack(nar, L"Narration");
+        d.addTrack(); d.addTrack();   // empty
+        d.placeClip(nar, a, (int64_t)(59.97 * rate), L"p");
+        d.placeClip(nar, b, 0, L"p");
+        const match::ClipSet all = match::timelineSet(d.project());
+        check(all.label == L"track 'Narration' (2 clips)",
+              L"match tracks: 'all tracks' with one track holding clips names that track, not the empty ones",
+              all.label);
+        check(all.names[(size_t)all.indexOf(a)] == L"take (Narration, 1:00.0)" &&
+              all.names[(size_t)all.indexOf(b)] == L"take (Narration, 0:00.0)",
+              L"match sets: a place at 59.97 s reads 1:00.0, not 0:60.0",
+              all.names[(size_t)all.indexOf(a)]);
+        int steps = -1, undone = -1;
+        d.undo();
+        d.historyCounts(steps, undone);
+        const Document::HistoryPosition hp = d.historyPosition();
+        check(steps == hp.steps && undone == hp.undone && undone == 1,
+              L"history position: the cheap counts agree with the full position",
+              std::to_wstring(steps) + L" / " + std::to_wstring(undone));
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);
