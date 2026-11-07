@@ -231,9 +231,9 @@ struct App {
     // (launchFiles): this copy's own, then any that later copies handed over. Opened
     // only from the main message loop -- see openLaunchRequests.
     std::deque<std::vector<std::wstring>> launchQueue;
-    // A launch message reached the window from inside a modal loop, so the main loop
-    // has to post it again once that loop is over.
-    bool launchDeferred = false;
+    // How many calls of the window procedure are on the stack (WndProc). Every dialog,
+    // message box and menu runs its modal loop inside one, so 0 means none is open.
+    int wndProcDepth = 0;
     // Where this copy of the program is (exepath.h), looked up once: the association
     // names it, and is checked against it each time the File menu opens.
     const std::wstring exe = exePath();
@@ -2617,14 +2617,21 @@ struct App {
         return true;
     }
 
-    // Open every request in launchQueue, in the order they came. Called by the main
-    // message loop only (runApp), never from inside a modal loop -- a dialog, a message
-    // box, a menu: whoever opened that holds clip ids and state from the project in
-    // the window, and replacing the project under it would aim its result at another
-    // project's clips (ids start at 1 in every project). Requests that arrive while
-    // these ask something are opened too, after the ones before them.
+    // Whether a launch request can replace the project now. Not while a dialog, a
+    // message box or a menu is open (wndProcDepth): whoever opened it holds clip ids
+    // and state from the project in the window, and replacing the project under it
+    // would aim its result at another project's clips -- ids start at 1 in every
+    // project. Not during a drag either: every drag holds the mouse capture and state
+    // about what is under the pointer, and the "Save changes?" box would take the
+    // capture from it. And not once the window is gone: what is still queued then goes
+    // to a fresh copy (runApp).
+    bool readyForLaunch() const { return IsWindow(hwnd) && wndProcDepth == 0 && GetCapture() != hwnd; }
+    // Open the requests in launchQueue, in the order they came, while readyForLaunch.
+    // The main message loop calls this after every message (runApp), so a request
+    // that has to wait is opened as soon as whatever held it up is over; one that
+    // arrives while these ask something is opened after the ones before it.
     void openLaunchRequests() {
-        while (!launchQueue.empty()) {
+        while (!launchQueue.empty() && readyForLaunch()) {
             // Taken, not read: a request is handled once, so a stray repeat of the
             // message can't reopen anything over later work.
             const std::vector<std::wstring> files = std::move(launchQueue.front());
@@ -4367,6 +4374,12 @@ static void saveWindowPlacement(HWND hwnd);   // defined below (registry persist
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     App* a = (App*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    // Counted for App::readyForLaunch, whichever way this call returns.
+    struct CallDepth {
+        int* depth;
+        explicit CallDepth(App* app) : depth(app ? &app->wndProcDepth : nullptr) { if (depth) ++*depth; }
+        ~CallDepth() { if (depth) --*depth; }
+    } callDepth(a);
     switch (msg) {
     case WM_CREATE: {
         auto* cs = (CREATESTRUCTW*)lp;
@@ -4442,9 +4455,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         a->onKey(wp); return 0;
     case WM_COMMAND: if (HIWORD(wp) == 0 && lp == 0) { a->onCommand(LOWORD(wp)); return 0; } break;
     case WM_TIMER: a->onTimer(); return 0;
-    // The main loop opens launch requests itself (runApp), so one that arrives here was
-    // dispatched by a modal loop, and waits until that is over (openLaunchRequests).
-    case WM_APP_LAUNCH: if (a) a->launchDeferred = true; return 0;
+    // Only wakes the main loop, which opens what is queued itself once it can
+    // (App::openLaunchRequests). Dispatched by a modal loop, it changes nothing.
+    case WM_APP_LAUNCH: return 0;
     // Only for the File menu: every context menu and the system menu come here too,
     // and the shell's association lookup isn't free.
     case WM_INITMENUPOPUP:
@@ -4641,18 +4654,11 @@ int runApp(HINSTANCE hInst, int nCmdShow, const std::vector<std::wstring>& args)
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (msg.message == WM_APP_LAUNCH && msg.hwnd == hwnd) {
-            app.openLaunchRequests();
-        } else {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-        // Whatever this message started has returned, so any modal loop it ran is over
-        // and a request that waited for it can be opened.
-        if (app.launchDeferred) {
-            app.launchDeferred = false;
-            if (!app.launchQueue.empty()) PostMessageW(hwnd, WM_APP_LAUNCH, 0, 0);
-        }
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+        // Whatever this message started has returned. If that was what held a request
+        // up -- a dialog, a drag -- it can be opened now.
+        app.openLaunchRequests();
     }
     // Requests that came while the window was closing -- its "Save changes?" box is a
     // modal loop, so they waited -- were never opened. Each goes to a fresh copy rather

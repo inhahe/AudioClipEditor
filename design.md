@@ -87,17 +87,23 @@ any file that won't decode — several can arrive at once.
   the open project by a different string, and a string comparison treated them as
   another project: a reload that threw away the clip editor, the scroll and the
   selection history, or a *Save changes?* box for the very file asked for.
-- **Only the main message loop opens them** (`openLaunchRequests`, called from
-  `runApp`'s loop, which takes `WM_APP_LAUNCH` before dispatching). A hand-off can
-  arrive while a dialog, a message box or a context menu is open, and the modal loop
-  running it dispatches posted messages too; but whoever opened it holds clip ids and
-  state from the project in the window — the target clips of *Remove non-voice*, the
-  voice cleaner's noise profile, a matcher's reference — and swapping the project under
-  it would aim its result at the new project's clips, whose ids also start at 1. So a
-  `WM_APP_LAUNCH` that reaches the window procedure only sets `launchDeferred`, and the
-  main loop posts it again once the message that started the modal loop has returned.
-  Requests that arrive while one is being opened (its own message boxes) are opened
-  after it.
+- **Only the main message loop opens them, and only when nothing holds them up**
+  (`openLaunchRequests`, called by `runApp`'s loop after every message;
+  `readyForLaunch`). A hand-off can arrive while a dialog, a message box or a context
+  menu is open, and the modal loop running it dispatches posted messages too; but
+  whoever opened it holds clip ids and state from the project in the window — the
+  target clips of *Remove non-voice*, the voice cleaner's noise profile, a matcher's
+  reference — and swapping the project under it would aim its result at the new
+  project's clips, whose ids also start at 1. Every such loop runs inside a call of the
+  window procedure, which counts its own depth (`wndProcDepth`), so "none is open" is
+  "the depth is 0". A drag holds the mouse capture and state about what is under the
+  pointer, and the *Save changes?* box would take the capture from it, leaving the drag
+  stuck when the user cancels; so not while the window holds the capture either. Nor
+  once the window is gone. `WM_APP_LAUNCH` only wakes the loop; since the loop checks
+  after every message, a request that had to wait opens as soon as the dialog closes
+  or the button comes up, and `openLaunchRequests` keeps the rule itself rather than
+  trusting its callers. Requests that arrive while one is being opened (its own
+  message boxes) are opened after it.
 - **One that arrives as the window closes is handed on** (`startCopy`): the *Save
   changes?* box on close is a modal loop too, so the request waited and was never
   opened; after the window is gone, a fresh copy is started with it
@@ -2056,7 +2062,10 @@ copy given the open project exits and the first says it is already open; a third
 another project exits and the first opens it, leaving one copy. With *Export Mixdown*'s
 file dialog open, a project handed over waits — the title still names the old one —
 and opens once the dialog closes (before the fix it replaced the project under the
-dialog). Handed over while the window asks *Save changes?* on close, it opens in a
+dialog). Handed over in the middle of a selection sweep on a clip card, it waits for
+the button to come up, and only then asks whether to save the changed selection
+(before, the *Save changes?* box came up mid-drag and took the capture). Handed over
+while the window asks *Save changes?* on close, it opens in a
 fresh copy once the window is gone. With the running copy frozen (its process
 suspended) for 9 s, a copy given another project waited without a window, and once
 the first was thawed it opened the project there and exited — before, it opened the
