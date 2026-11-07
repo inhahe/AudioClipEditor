@@ -2915,6 +2915,34 @@ int runSelfTest() {
         DeleteFileW(proj.c_str());
     }
 
+    // ---- the volume slider's scale (layout::volumeToFrac / fracToVolume)
+    // Every volume a clip or track can have must have a position: volume matching sets
+    // up to +24 dB, and a scale that stopped short would pin the knob at its end and
+    // turn a click on it into a drop of everything above.
+    {
+        const float top = kMaxClipGain;
+        bool round = true; std::wstring bad;
+        for (float g : { 0.0f, 0.25f, 0.5f, 1.0f, 1.5f, 2.0f, 4.0f, 6.0f, 10.0f, 16.0f }) {
+            const float back = layout::fracToVolume(layout::volumeToFrac(g, top), top);
+            if (std::fabs(back - g) > 1e-3f * std::max(1.0f, g)) {
+                round = false; bad += std::to_wstring(g) + L"->" + std::to_wstring(back) + L" ";
+            }
+        }
+        check(round, L"volume slider: every volume up to +24 dB has a position and reads back", bad);
+        check(std::fabs(layout::volumeToFrac(0.5f, top) - 0.25f) < 1e-6f &&
+              std::fabs(layout::volumeToFrac(1.0f, top) - 0.5f) < 1e-6f &&
+              std::fabs(layout::volumeToFrac(2.0f, top) - 0.75f) < 1e-4f &&
+              std::fabs(layout::volumeToFrac(top, top) - 1.0f) < 1e-6f,
+              L"volume slider: 0-100% is the left half as before, 200% halfway along the right, "
+              L"+24 dB at the end");
+        bool mono = true;
+        for (int i = 1; i <= 100; ++i)
+            if (layout::fracToVolume(i / 100.0f, top) < layout::fracToVolume((i - 1) / 100.0f, top))
+                mono = false;
+        check(mono && layout::fracToVolume(2.0f, top) == top && layout::fracToVolume(-1.0f, top) == 0.0f,
+              L"volume slider: louder all the way along, and clamped at both ends");
+    }
+
     out(L"");
     out(L"==== " + std::to_wstring(pass) + L" passed, " + std::to_wstring(fail) + L" failed ====");
     if (log) fclose(log);

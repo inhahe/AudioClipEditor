@@ -1,5 +1,7 @@
 #pragma once
 #include <windows.h>
+#include <algorithm>
+#include <cmath>
 #include <vector>
 
 // Geometry for dropping something into a reflowing, reading-order grid of cards
@@ -218,6 +220,26 @@ inline int scrollToReveal(int scrollPos, int visLen, int x0, int x1,
     if (want < 0) want = 0;
     if (want > maxScroll) want = maxScroll;
     return want;
+}
+
+// The volume slider's scale, on cards and track headers alike: slider position
+// 0..1 <-> linear gain. The left half is 0..100%, linear. The right half runs from
+// 100% up to `maxGain` (the most a volume can be, +24 dB), with dB rising as the
+// square of the distance along it, so 100..200% -- where hand adjustment happens --
+// still has half of that side to itself. The point is that every volume a clip or
+// track can have has a position: volume matching sets up to +24 dB, and a scale
+// that stopped short would pin the knob at its end and turn a click on it into a
+// drop of everything above.
+inline float volumeToFrac(float gain, float maxGain) {
+    if (!(gain > 1.0f)) return std::max(0.0f, gain) * 0.5f;
+    const float u = std::sqrt(std::min(1.0f, std::log(gain) / std::log(maxGain)));
+    return 0.5f + 0.5f * u;
+}
+inline float fracToVolume(float frac, float maxGain) {
+    frac = std::max(0.0f, std::min(1.0f, frac));
+    if (frac <= 0.5f) return frac * 2.0f;
+    const float u = (frac - 0.5f) * 2.0f;
+    return std::min(maxGain, std::pow(maxGain, u * u));
 }
 
 }  // namespace layout

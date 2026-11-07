@@ -147,8 +147,12 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   pausing, rearranging and then playing again picks up the new arrangement rather
   than the one you paused.
 - **Per-clip and per-track volume.** Every card and every track header has a
-  volume slider (0–200%). Gain is applied live to preview, timeline mixing, and
-  export, and each change is a single undo step.
+  volume slider: silence at the left end, 100% in the middle (it snaps there),
+  and up to +24 dB (1600%) at the right end, with 100–200% taking the first half of
+  the right side so fine adjustments stay fine. Every volume a clip can have —
+  including what *Match volume* sets — shows on the slider, so you can always
+  adjust it by hand. Gain is applied live to preview, timeline mixing, and export,
+  and each change is a single undo step.
 - **Voice cleaner (noise reduction).** Right-click → *Voice cleaner* runs an STFT
   denoiser to strip steady background noise. Three **algorithms**: automatic
   **spectral subtraction** or **Wiener filter** (noise floor estimated from the

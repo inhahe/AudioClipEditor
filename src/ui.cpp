@@ -1031,13 +1031,14 @@ struct App {
         textOut(h, r, label, fg, f, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
-    // Volume slider: track range is linear gain 0..2 (1.0 at the midpoint).
-    static float gainToFrac(float g) { float f = g * 0.5f; return f < 0 ? 0 : (f > 1 ? 1 : f); }
+    // Volume slider: 100% at the midpoint, up to +24 dB at the right end (see
+    // layout::volumeToFrac for the scale).
+    static float gainToFrac(float g) { return layout::volumeToFrac(g, kMaxClipGain); }
     float sliderGainAt(const RECT& r, int x) const {
         float f = (float)(x - r.left) / std::max(1, (int)(r.right - r.left));
         f = std::max(0.0f, std::min(1.0f, f));
         if (std::fabs(f - 0.5f) < 0.04f) f = 0.5f;   // snap to 100% (gain 1.0)
-        return f * 2.0f;
+        return layout::fracToVolume(f, kMaxClipGain);
     }
     // Slightly expanded hit rect so the thin slider is easy to grab.
     RECT sliderHit(const RECT& r) const { return { r.left - S(6), r.top - S(6), r.right + S(6), r.bottom + S(6) }; }
