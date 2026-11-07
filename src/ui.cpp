@@ -4626,7 +4626,7 @@ static HandOff handToRunningCopy(const std::vector<std::wstring>& files, Startup
                     [&] { return lock.acquire(0); })) {
         case dlg::WaitChoice::Done: return std::nullopt;
         case dlg::WaitChoice::OpenHere: return HandOff::OpenHere;
-        case dlg::WaitChoice::Cancel: break;
+        case dlg::WaitChoice::DontOpen: break;
         }
         return HandOff::Cancelled;
     };
@@ -4677,7 +4677,7 @@ static HandOff handToRunningCopy(const std::vector<std::wstring>& files, Startup
                 [&] { return ticket.claimant() != nullptr || allGone(); });
             // Whatever was chosen, one may have taken them in the meantime.
             if (!ticket.abandon()) { bringForward(ticket.claimant()); return HandOff::Taken; }
-            if (c == dlg::WaitChoice::Cancel) return HandOff::Cancelled;
+            if (c == dlg::WaitChoice::DontOpen) return HandOff::Cancelled;
             if (c == dlg::WaitChoice::OpenHere) { lock.acquire(0); return HandOff::OpenHere; }
             // They all closed without taking them.
         }

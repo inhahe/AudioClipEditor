@@ -34,6 +34,7 @@ target_link_libraries(AudioClipEditor PRIVATE
     shlwapi
     avrt            # MMCSS (audio thread priority)
     propsys
+    shcore          # GetDpiForMonitor (a dialog shown before the app has a window)
 )
 
 if(MSVC)

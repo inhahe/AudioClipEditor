@@ -135,7 +135,10 @@ std::wstring saveProject(HWND parent, const std::wstring& suggested);
 // waiting on another copy: one still starting up, or busy, that is to open the files
 // it was given. `message` says what it is waiting for. `done` is asked a few times a
 // second whether the wait is over, and when it says so the window closes by itself.
-enum class WaitChoice { Done, OpenHere, Cancel };
+// Closing it (or Escape) only puts it away: the wait goes on out of sight. OpenHere is
+// also the answer when the window can't be shown, so the files aren't dropped
+// unasked.
+enum class WaitChoice { Done, OpenHere, DontOpen };
 WaitChoice waitForOtherCopy(const std::wstring& message, const std::function<bool()>& done);
 
 } // namespace dlg

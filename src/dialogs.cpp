@@ -1,6 +1,7 @@
 #include "dialogs.h"
 #include <commctrl.h>
 #include <commdlg.h>
+#include <shellscalingapi.h>
 #include <windowsx.h>
 
 namespace dlg {
@@ -13,6 +14,14 @@ namespace dlg {
 // scaling with one particular font. (Hardcoding both is what made the Remove
 // Non-Voice dialog clip its wrapped intro paragraph and its checkbox label.)
 // DlgUI is that scaffolding; every dialog below lays itself out through it.
+// The monitor the pointer is on: where a dialog with no parent goes, since that is
+// where the user just double-clicked.
+static HMONITOR cursorMonitor() {
+    POINT pt{};
+    GetCursorPos(&pt);
+    return MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+}
+
 struct DlgUI {
     HINSTANCE hInst = GetModuleHandleW(nullptr);
     HWND dlg = nullptr;
@@ -23,7 +32,11 @@ struct DlgUI {
     int margin = 16, gap = 12, rowGap = 10;   // scaled in the constructor
 
     explicit DlgUI(HWND parent) {
-        const UINT d = parent ? GetDpiForWindow(parent) : GetDpiForSystem();
+        UINT d = parent ? GetDpiForWindow(parent) : 0;
+        if (!parent) {   // the monitor create() puts it on; monitors can differ in scale
+            UINT dx = 0, dy = 0;
+            if (SUCCEEDED(GetDpiForMonitor(cursorMonitor(), MDT_EFFECTIVE_DPI, &dx, &dy))) d = dx;
+        }
         dpi = d ? d : 96;
         NONCLIENTMETRICSW ncm{}; ncm.cbSize = sizeof(ncm);
         if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi)) {
@@ -67,10 +80,7 @@ struct DlgUI {
         RECT r{ 0, 0, clientW, clientH };
         AdjustWindowRectExForDpi(&r, style, FALSE, ex, dpi);
         const int W = r.right - r.left, H = r.bottom - r.top;
-        POINT cursor{};
-        GetCursorPos(&cursor);
-        const HMONITOR mon = parent ? MonitorFromWindow(parent, MONITOR_DEFAULTTONEAREST)
-                                    : MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
+        const HMONITOR mon = parent ? MonitorFromWindow(parent, MONITOR_DEFAULTTONEAREST) : cursorMonitor();
         MONITORINFO mi{}; mi.cbSize = sizeof(mi);
         const bool haveMonitor = GetMonitorInfoW(mon, &mi) != FALSE;
         RECT pr{};
@@ -1177,12 +1187,14 @@ void history(HWND parent, HistoryContext& ctx) {
 
 // ------------------------------------------------------------- waiting on a copy
 namespace {
-constexpr int kIdOpenHere = 100;   // not IDOK: Enter must not start a second window
+// Neither is IDOK, so Enter does neither; nor IDCANCEL, which Escape sends.
+constexpr int kIdOpenHere = 100;   // the choice that can put a project in two windows
+constexpr int kIdDontOpen = 101;
 constexpr UINT_PTR kPollTimer = 1;
 
 struct WaitState {
     const std::function<bool()>* done = nullptr;
-    WaitChoice choice = WaitChoice::Cancel;
+    WaitChoice choice = WaitChoice::DontOpen;
 };
 
 LRESULT CALLBACK WaitProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -1193,11 +1205,14 @@ LRESULT CALLBACK WaitProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_COMMAND:
         if (st && LOWORD(w) == kIdOpenHere) { st->choice = WaitChoice::OpenHere; DestroyWindow(h); return 0; }
-        if (st && LOWORD(w) == IDCANCEL) { st->choice = WaitChoice::Cancel; DestroyWindow(h); return 0; }
+        if (st && LOWORD(w) == kIdDontOpen) { st->choice = WaitChoice::DontOpen; DestroyWindow(h); return 0; }
+        // Escape: like the close box.
+        if (LOWORD(w) == IDCANCEL) { ShowWindow(h, SW_HIDE); return 0; }
         break;
     case WM_CLOSE:
-        if (st) st->choice = WaitChoice::Cancel;
-        DestroyWindow(h);
+        // Putting the box away isn't asking for the files not to open: keep waiting,
+        // out of sight. Only "Don't open" drops them.
+        ShowWindow(h, SW_HIDE);
         return 0;
     }
     return DefWindowProcW(h, m, w, l);
@@ -1212,23 +1227,28 @@ WaitChoice waitForOtherCopy(const std::wstring& message, const std::function<boo
         WNDCLASSW wc{}; wc.lpfnWndProc = WaitProc; wc.hInstance = hInst;
         wc.hCursor = LoadCursor(nullptr, IDC_APPSTARTING);
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"ACE_Wait"; RegisterClassW(&wc); reg = true;
+        wc.lpszClassName = L"ACE_Wait";
+        reg = RegisterClassW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
     }
     WaitState st; st.done = &done;
     DlgUI ui(nullptr);
 
     const wchar_t* openHere = L"Open in a new window";
+    const wchar_t* dontOpen = L"Don\u2019t open";
     const int contentW = ui.S(400);
     const int textH = ui.measure(message.c_str(), contentW).cy;
-    const int bw = ui.btnW(openHere), bwc = ui.btnW(L"Cancel"), bh = ui.btnH();
+    const int bw = ui.btnW(openHere), bwd = ui.btnW(dontOpen), bh = ui.btnH();
     const int clientH = ui.margin + textH + ui.S(18) + bh + ui.margin;
-    HWND h = ui.create(L"ACE_Wait", L"Audio Clip Editor", nullptr, ui.margin * 2 + contentW, clientH);
-    if (!h) return WaitChoice::Cancel;
+    HWND h = reg ? ui.create(L"ACE_Wait", L"Audio Clip Editor", nullptr, ui.margin * 2 + contentW, clientH)
+                 : nullptr;
+    // Unable to ask, so not taken as "don't open": the caller opens the files itself.
+    if (!h) return WaitChoice::OpenHere;
     SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
-    ui.label(message.c_str(), ui.margin, ui.margin, contentW, textH);
+    // SS_NOPREFIX: a file name with an & in it is shown as it is, as it was measured.
+    ui.label(message.c_str(), ui.margin, ui.margin, contentW, textH, SS_NOPREFIX);
     const int y = ui.margin + textH + ui.S(18), right = ui.margin + contentW;
-    ui.button(openHere, right - bwc - ui.S(8) - bw, y, bw, bh, kIdOpenHere);
-    ui.button(L"Cancel", right - bwc, y, bwc, bh, IDCANCEL);
+    ui.button(openHere, right - bwd - ui.S(8) - bw, y, bw, bh, kIdOpenHere);
+    ui.button(dontOpen, right - bwd, y, bwd, bh, kIdDontOpen);
     SetTimer(h, kPollTimer, 200, nullptr);
     runModal(h, nullptr);
     return st.choice;

@@ -80,11 +80,17 @@ any file that won't decode — several can arrive at once.
     offered the files (seen live: with the front copy frozen, the new copy waited
     while the copy behind sat idle; now that one opens them at once, and the frozen
     one, thawed, finds the ticket taken). Meanwhile a small window (`dlg::waitForOtherCopy`, centred on the
-    monitor under the pointer, since this copy has no window of its own) says what it
-    is waiting for and closes by itself once the ticket is claimed, offering *Open in
-    a new window* (not on Enter: it is the choice that can put a project in two
-    windows) and *Cancel*. Either abandons the ticket first, and if the busy copy won
-    it in the meantime, the files are its and this copy exits. If the busy copy closes
+    monitor under the pointer and sized for *that* monitor's DPI — `GetDpiForMonitor`,
+    since this copy has no window of its own to take one from, and monitors can differ
+    in scale) says what it is waiting for and closes by itself once the ticket is
+    claimed, offering *Open in a new window* (not on Enter: it is the choice that can
+    put a project in two windows) and *Don't open*. Either abandons the ticket first,
+    and if the busy copy won it in the meantime, the files are its and this copy exits.
+    Closing the window, or Escape, only puts it away: the wait goes on out of sight,
+    since dismissing a box that says "it will open there" isn't asking for it not to.
+    A window that can't be created answers *Open in a new window*, not "don't open",
+    so the files aren't dropped unasked. The message is a `SS_NOPREFIX` label: a file
+    name with an `&` in it is shown as it was measured. If the busy copy closes
     or dies first, the new one looks again and, finding none, opens normally. It used
     to wait with `SendMessageW` and no limit, silently: a hung copy made every later
     double-click a process that waited forever with nothing on screen.
@@ -2145,10 +2151,12 @@ nothing, nor does a claim without a window; the message is registered. A claim t
 Live, with the running copy frozen: after 1.5 s the new copy shows its waiting window;
 thawed, the running copy opens the project and the waiting copy exits (with the
 earlier sent-only message it never did); *Open in a new window* opens it in the new
-copy and the thawed one doesn't; *Cancel* opens it nowhere; killing the frozen copy
+copy and the thawed one doesn't; *Don't open* opens it nowhere; closing the waiting
+window leaves the copy waiting out of sight, and the thawed copy then opens it; killing the frozen copy
 makes the waiting one open it. With the startup mutex held from outside, the waiting
 window says the other copy is still starting, and the copy opens the project once the
-mutex is released, or exits on *Cancel*.
+mutex is released, or exits on *Don't open*; a file named `ace&demo.acep` is named
+with its `&`.
 
 **Window placement** (5 checks, `startupPlacement`): asked for nothing in particular,
 the window opens as saved; closed while minimized, it opens as it would have been
