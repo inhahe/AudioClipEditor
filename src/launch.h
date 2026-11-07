@@ -1,4 +1,5 @@
 #pragma once
+#include <windows.h>
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
@@ -39,6 +40,37 @@ inline bool looksLikeProject(const std::wstring& path) {
     const bool project = fread(magic, 1, 4, f) == 4 && std::memcmp(magic, "ACEP", 4) == 0;
     fclose(f);
     return project;
+}
+
+// Whether `a` and `b` name the same file -- whether a project asked for is the one
+// already open. By the file itself, its volume and its id there, when both can be
+// opened: an 8.3 short name, another case, a mapped drive and its UNC path, a junction
+// or a hard link all reach the same file by a different string. Otherwise (one is
+// missing, say) by the path, ignoring case the way Windows does.
+inline bool sameFile(const std::wstring& a, const std::wstring& b) {
+    auto open = [](const std::wstring& p) {
+        return CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    };
+    const HANDLE ha = open(a), hb = open(b);
+    int same = -1;   // not known from the files
+    if (ha != INVALID_HANDLE_VALUE && hb != INVALID_HANDLE_VALUE) {
+        FILE_ID_INFO ia{}, ib{};
+        BY_HANDLE_FILE_INFORMATION fa{}, fb{};
+        if (GetFileInformationByHandleEx(ha, FileIdInfo, &ia, sizeof(ia)) &&
+            GetFileInformationByHandleEx(hb, FileIdInfo, &ib, sizeof(ib)))
+            same = ia.VolumeSerialNumber == ib.VolumeSerialNumber &&
+                   std::memcmp(&ia.FileId, &ib.FileId, sizeof(ia.FileId)) == 0;
+        else if (GetFileInformationByHandle(ha, &fa) && GetFileInformationByHandle(hb, &fb))
+            // File systems without 128-bit ids (FAT, some network shares).
+            same = fa.dwVolumeSerialNumber == fb.dwVolumeSerialNumber &&
+                   fa.nFileIndexHigh == fb.nFileIndexHigh && fa.nFileIndexLow == fb.nFileIndexLow;
+    }
+    if (ha != INVALID_HANDLE_VALUE) CloseHandle(ha);
+    if (hb != INVALID_HANDLE_VALUE) CloseHandle(hb);
+    if (same >= 0) return same == 1;
+    return CompareStringOrdinal(a.c_str(), (int)a.size(), b.c_str(), (int)b.size(), TRUE) == CSTR_EQUAL;
 }
 
 // Whether a command-line argument names a file. Switches ("--...") are the developer

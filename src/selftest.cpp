@@ -3427,6 +3427,25 @@ int runSelfTest() {
         for (int i = 1; same && i < argc; ++i) same = awkward[(size_t)i - 1] == argv[i];
         if (argv) LocalFree(argv);
         check(same, L"launch: a command line handed on splits back into the same files", line);
+
+        // "Is that the project already open?" is about the file, not how its path is
+        // spelled: another name for it (a hard link here; an 8.3 name, a UNC path or a
+        // junction in use) and another case -- beyond ASCII too -- are the same file.
+        const std::wstring proj = dir + L"\\_selftest_caf\u00E9.acep";
+        const std::wstring upper = dir + L"\\_SELFTEST_CAF\u00C9.ACEP";
+        const std::wstring link = dir + L"\\_selftest_link.acep";
+        const std::wstring other = dir + L"\\_selftest_other.acep";
+        DeleteFileW(link.c_str());
+        if (FILE* f = _wfopen(proj.c_str(), L"wb")) { fwrite("ACEP", 1, 4, f); fclose(f); }
+        if (FILE* f = _wfopen(other.c_str(), L"wb")) { fwrite("ACEP", 1, 4, f); fclose(f); }
+        const bool linked = CreateHardLinkW(link.c_str(), proj.c_str(), nullptr) != FALSE;
+        check(linked && launch::sameFile(proj, link) && launch::sameFile(proj, upper) &&
+                  !launch::sameFile(proj, other),
+              L"launch: the open project reached by another name or case is the same file; another isn't");
+        check(launch::sameFile(dir + L"\\_selftest_gone_\u00E9.acep", dir + L"\\_SELFTEST_GONE_\u00C9.ACEP") &&
+                  !launch::sameFile(dir + L"\\_selftest_gone_1.acep", dir + L"\\_selftest_gone_2.acep"),
+              L"launch: files that can't be opened compare by path, ignoring case as Windows does");
+        DeleteFileW(link.c_str()); DeleteFileW(proj.c_str()); DeleteFileW(other.c_str());
     }
 
     // ---- double-click opens projects here (assoc.h), against a scratch registry

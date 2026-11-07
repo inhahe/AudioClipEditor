@@ -2637,7 +2637,7 @@ struct App {
         const launch::Request req = launch::parse(files, launch::looksLikeProject);
         if (!req.projects.empty()) {
             const std::wstring& first = req.projects[0];
-            if (!projectPath.empty() && _wcsicmp(first.c_str(), projectPath.c_str()) == 0) {
+            if (!projectPath.empty() && launch::sameFile(first, projectPath)) {
                 // Double-clicking the project that is already open: this window coming
                 // forward is the answer, not a reload over the work in it.
                 toast(L"'" + std::wstring(PathFindFileNameW(first.c_str())) + L"' is already open");

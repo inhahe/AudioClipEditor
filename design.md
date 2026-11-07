@@ -77,7 +77,15 @@ any file that won't decode — several can arrive at once.
   reopen anything over later work, and each **asks about unsaved changes** like any
   other open — one can arrive at any time, not only at startup. If its first project is
   the one already open, the answer is the window coming forward and a toast, not a
-  reload.
+  reload. "The one already open" is decided by the file, not by how its path is
+  spelled (`launch::sameFile`: volume serial and file id, from
+  `GetFileInformationByHandleEx(FileIdInfo)`, or the 64-bit index where a file system
+  has no 128-bit ids; the path, compared as Windows does — `CompareStringOrdinal`,
+  ignoring case beyond ASCII — only when a file can't be opened). An 8.3 short name, a
+  mapped drive and its UNC path, a junction, a hard link or another case all reach
+  the open project by a different string, and a string comparison treated them as
+  another project: a reload that threw away the clip editor, the scroll and the
+  selection history, or a *Save changes?* box for the very file asked for.
 - **Only the main message loop opens them** (`openLaunchRequests`, called from
   `runApp`'s loop, which takes `WM_APP_LAUNCH` before dispatching). A hand-off can
   arrive while a dialog, a message box or a context menu is open, and the modal loop
@@ -2006,13 +2014,16 @@ correction lands between 60 Hz and 14 kHz. It measured **1.4 dB at 70 Hz**;
 before the weights, over 20 dB at 30 Hz. DC and Nyquist are separately asserted
 to come out at exactly 0 dB.
 
-**Starting with files** (14 checks): `launch::parse` takes `.acep` files (in any case)
+**Starting with files** (16 checks): `launch::parse` takes `.acep` files (in any case)
 as projects in order and other files as clips, and skips switches; a project is told
 by its contents (a `.acep.bak` with the `ACEP` header is one, a `.wav` isn't) or, when
 it can't be read, by its extension; and `parse` uses whatever test it is given;
 switches and empty arguments are not files; `launch::commandLine` survives a round trip
 through `CommandLineToArgvW` with spaces, a drive's root, quotes and backslashes before
-one (plain quoting fails it on the last three). `assoc`, against a scratch
+one (plain quoting fails it on the last three); `launch::sameFile` finds the open
+project through a hard link and through its name in other case (`café` / `CAFÉ`) and
+tells another file apart, and compares files it can't open by path, ignoring case
+beyond ASCII (the `_wcsicmp` it replaced fails both). `assoc`, against a scratch
 registry root: nothing registered to begin with; registering makes `.acep` open with
 this copy and not another; the open command quotes program and file; unregistering
 stops it and leaves no empty keys; and with another app's claim on `.acep` made after
