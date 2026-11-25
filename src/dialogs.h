@@ -141,9 +141,11 @@ struct HistoryContext {
 };
 void history(HWND parent, HistoryContext& ctx);
 
-// Project open/save file dialogs (.acep). Return empty string on cancel.
-std::wstring openProject(HWND parent);
-std::wstring saveProject(HWND parent, const std::wstring& suggested);
+// Project open/save file dialogs (.acep). Each starts in `startDir` when that is a
+// folder that exists, and otherwise wherever Windows would. `suggestedName` is the
+// file name offered, without its extension. Return the chosen path, or empty on cancel.
+std::wstring openProject(HWND parent, const std::wstring& startDir);
+std::wstring saveProject(HWND parent, const std::wstring& suggestedName, const std::wstring& startDir);
 
 // Shown by a copy of the app that has just started, has no window of its own, and is
 // waiting on another copy: one still starting up, or busy, that is to open the files

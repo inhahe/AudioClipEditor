@@ -5,7 +5,9 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellscalingapi.h>
+#include <shobjidl.h>
 #include <windowsx.h>
+#include <wrl/client.h>
 
 namespace dlg {
 
@@ -1375,27 +1377,54 @@ WaitChoice waitForOtherCopy(const std::wstring& message, const std::function<boo
 }
 
 // ------------------------------------------------------------------ project files
-std::wstring openProject(HWND parent) {
-    wchar_t buf[1024] = { 0 };
-    OPENFILENAMEW ofn{}; ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = parent;
-    ofn.lpstrFilter = L"Audio Clip Editor project (*.acep)\0*.acep\0All files\0*.*\0";
-    ofn.lpstrFile = buf; ofn.nMaxFile = 1024;
-    ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
-    if (GetOpenFileNameW(&ofn)) return buf;
-    return L"";
+// The Vista file dialogs (IFileDialog), not GetOpenFileName: told a folder with
+// SetFolder, they start there. GetOpenFileName can set aside the folder it is given
+// for its own memory of the last one, and given none it starts in the process's
+// current directory -- the exe's, when started from Explorer. These also leave the
+// current directory as it was, where GetOpenFileName moves it to the chosen folder.
+static void startIn(IFileDialog* d, const std::wstring& dir) {
+    if (dir.empty()) return;
+    Microsoft::WRL::ComPtr<IShellItem> folder;
+    if (SUCCEEDED(SHCreateItemFromParsingName(dir.c_str(), nullptr, IID_PPV_ARGS(&folder))))
+        d->SetFolder(folder.Get());
+}
+static std::wstring chosenPath(IFileDialog* d) {
+    Microsoft::WRL::ComPtr<IShellItem> item;
+    std::wstring out;
+    if (SUCCEEDED(d->GetResult(&item))) {
+        PWSTR p = nullptr;
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &p))) { out = p; CoTaskMemFree(p); }
+    }
+    return out;
 }
 
-std::wstring saveProject(HWND parent, const std::wstring& suggested) {
-    wchar_t buf[1024] = { 0 };
-    std::wstring s = suggested + L".acep";
-    wcsncpy(buf, s.c_str(), 1023);
-    OPENFILENAMEW ofn{}; ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = parent;
-    ofn.lpstrFilter = L"Audio Clip Editor project (*.acep)\0*.acep\0";
-    ofn.lpstrFile = buf; ofn.nMaxFile = 1024;
-    ofn.lpstrDefExt = L"acep";
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    if (GetSaveFileNameW(&ofn)) return buf;
-    return L"";
+std::wstring openProject(HWND parent, const std::wstring& startDir) {
+    Microsoft::WRL::ComPtr<IFileOpenDialog> d;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&d))))
+        return L"";
+    const COMDLG_FILTERSPEC types[] = {
+        { L"Audio Clip Editor project (*.acep)", L"*.acep" }, { L"All files", L"*.*" } };
+    d->SetFileTypes(2, types);
+    DWORD o = 0;
+    d->GetOptions(&o);
+    d->SetOptions(o | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+    startIn(d.Get(), startDir);
+    return SUCCEEDED(d->Show(parent)) ? chosenPath(d.Get()) : std::wstring();
+}
+
+std::wstring saveProject(HWND parent, const std::wstring& suggestedName, const std::wstring& startDir) {
+    Microsoft::WRL::ComPtr<IFileSaveDialog> d;
+    if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&d))))
+        return L"";
+    const COMDLG_FILTERSPEC types[] = { { L"Audio Clip Editor project (*.acep)", L"*.acep" } };
+    d->SetFileTypes(1, types);
+    d->SetDefaultExtension(L"acep");
+    d->SetFileName((suggestedName + L".acep").c_str());
+    DWORD o = 0;
+    d->GetOptions(&o);
+    d->SetOptions(o | FOS_OVERWRITEPROMPT | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
+    startIn(d.Get(), startDir);
+    return SUCCEEDED(d->Show(parent)) ? chosenPath(d.Get()) : std::wstring();
 }
 
 } // namespace dlg

@@ -9,6 +9,7 @@
 #include "engine.h"
 #include "assoc.h"
 #include "exepath.h"
+#include "folders.h"
 #include "handoff.h"
 #include "launch.h"
 #include "layout.h"
@@ -4087,6 +4088,50 @@ int runSelfTest() {
               L"handoff: a ticket whose sender has gone, or that never existed, gives nothing; nor does a "
               L"claim without a window");
         check(handoff::message() != 0, L"handoff: the message is registered");
+    }
+
+    // ---- the folder Open Project starts in (folders.h)
+    // The folder the last project was loaded from, remembered between sessions; if it
+    // has gone since, the nearest folder above it that hasn't.
+    {
+        check(folders::parentOf(L"D:\\audio\\show.acep") == L"D:\\audio" &&
+              folders::parentOf(L"D:\\show.acep") == L"D:\\" &&
+              folders::parentOf(L"\\\\server\\share\\show.acep") == L"\\\\server\\share" &&
+              folders::parentOf(L"show.acep").empty(),
+              L"folders: a project's folder; a drive's root keeps its backslash; a bare name has none");
+
+        const std::wstring base = dir + L"\\_selftest_folders";
+        CreateDirectoryW(base.c_str(), nullptr);
+        CreateDirectoryW((base + L"\\a").c_str(), nullptr);
+        CreateDirectoryW((base + L"\\a\\b").c_str(), nullptr);
+        const bool here = folders::nearestExisting(base + L"\\a\\b") == base + L"\\a\\b";
+        RemoveDirectoryW((base + L"\\a\\b").c_str());
+        const bool up = folders::nearestExisting(base + L"\\a\\b") == base + L"\\a";
+        RemoveDirectoryW((base + L"\\a").c_str());
+        RemoveDirectoryW(base.c_str());
+        const bool upTwo = folders::nearestExisting(base + L"\\a\\b") == dir;
+        // A drive that isn't there at all leaves nothing to start in.
+        std::wstring gone;
+        const DWORD drives = GetLogicalDrives();
+        for (wchar_t d = L'Z'; d >= L'D' && gone.empty(); --d)
+            if (!(drives & (1u << (d - L'A')))) gone = std::wstring(1, d) + L":\\projects\\old";
+        const bool none = gone.empty() || folders::nearestExisting(gone).empty();
+        check(here && up && upTwo && none,
+              L"folders: a folder that is there is used; one gone falls back to the nearest above it",
+              std::wstring(here ? L"" : L"existing not used; ") + (up ? L"" : L"no fallback one up; ") +
+              (upTwo ? L"" : L"no fallback two up; ") + (none ? L"" : L"a missing drive gave a folder"));
+
+        const std::wstring key = L"Software\\AudioClipEditorSelftest\\Folders";
+        RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
+        const bool unset = folders::remembered(key, L"Last").empty();
+        const std::wstring stored = L"D:\\visual studio projects\\a show, take 2";
+        folders::remember(key, L"Last", stored);
+        const bool back = folders::remembered(key, L"Last") == stored;
+        folders::remember(key, L"Last", L"E:\\x");
+        const bool replaced = folders::remembered(key, L"Last") == L"E:\\x";
+        RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
+        check(unset && back && replaced,
+              L"folders: the remembered folder reads back as stored, the latest one, and nothing as nothing");
     }
 
     // ---- double-click opens projects here (assoc.h), against a scratch registry

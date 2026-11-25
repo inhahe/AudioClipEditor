@@ -18,6 +18,7 @@
 #include "transport.h"
 #include "selhistory.h"
 #include "snap.h"
+#include "folders.h"
 #include "volume.h"
 #include <commctrl.h>
 #include <shlobj.h>
@@ -66,6 +67,11 @@ static std::vector<std::wstring> launchFiles(const std::vector<std::wstring>& ar
         if (launch::isFileArg(a)) files.push_back(fullPath(a));
     return files;
 }
+
+// Where this app keeps what it remembers between sessions, under HKEY_CURRENT_USER:
+// the window's placement, and the folder the last project was loaded from.
+static const wchar_t* kRegKey = L"Software\\AudioClipEditor";
+static const wchar_t* kLastProjectFolder = L"LastProjectFolder";
 
 // ----------------------------------------------------------------- theme colors
 namespace col {
@@ -2649,13 +2655,24 @@ struct App {
         noiseCaptures.clear();
         resetSelHistory();
     }
+    // The folder the last project was loaded from -- by this copy or another, in this
+    // session or an earlier one -- or, if it has gone, the nearest folder above it
+    // that is still there. Empty if none is known.
+    static std::wstring lastProjectFolder() {
+        return folders::nearestExisting(folders::remembered(kRegKey, kLastProjectFolder));
+    }
     void openProjectFile() {
         if (!confirmDiscardChanges()) return;
-        std::wstring path = dlg::openProject(hwnd);
+        // Where the last project came from: projects are kept together, and the
+        // dialog's own default -- the exe's folder -- is nowhere anyone keeps them.
+        std::wstring path = dlg::openProject(hwnd, lastProjectFolder());
         if (path.empty()) return;
         openProjectPath(path);
     }
     // Load `path` as the project. The caller has already dealt with unsaved changes.
+    // However it came -- Open Project, a double-click in Explorer, the taskbar's
+    // recent list, another copy handing it over -- its folder is where Open Project
+    // starts next time.
     bool openProjectPath(const std::wstring& path) {
         if (!doc.loadProject(path)) {
             const bool exists = GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
@@ -2663,6 +2680,7 @@ struct App {
                                + path).c_str(), L"Open", MB_ICONWARNING);
             return false;
         }
+        folders::remember(kRegKey, kLastProjectFolder, folders::parentOf(path));
         resetForAnotherProject();
         // Follow the loaded project's internal rate so playback resamples correctly.
         rate = doc.project().sampleRate > 0 ? doc.project().sampleRate : rate;
@@ -2807,8 +2825,19 @@ struct App {
         playheadFrame = v.playheadFrame;
     }
     bool saveProjectAs() {
-        std::wstring suggested = projectPath.empty() ? L"Untitled" : PathFindFileNameW(projectPath.c_str());
-        std::wstring path = dlg::saveProject(hwnd, suggested);
+        // Offered under its own name, without the extension the dialog adds back.
+        std::wstring suggested = L"Untitled";
+        if (!projectPath.empty()) {
+            suggested = PathFindFileNameW(projectPath.c_str());
+            const size_t dot = suggested.find_last_of(L'.');
+            if (dot != std::wstring::npos && dot > 0 && _wcsicmp(suggested.c_str() + dot, L".acep") == 0)
+                suggested.resize(dot);
+        }
+        // Beside itself when it has been saved before; else where the last project
+        // was loaded from, since that is where projects are kept.
+        const std::wstring start = projectPath.empty()
+            ? lastProjectFolder() : folders::nearestExisting(folders::parentOf(projectPath));
+        std::wstring path = dlg::saveProject(hwnd, suggested, start);
         if (path.empty()) return false;
         storeViewState();
         if (!saveDocument(path)) { MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING); return false; }
@@ -2982,19 +3011,14 @@ struct App {
         }
     }
 
-    static std::wstring parentDir(const std::wstring& path) {
-        const size_t s = path.find_last_of(L"\\/");
-        return s == std::wstring::npos ? std::wstring() : path.substr(0, s);
-    }
-
     // Where a no-dialog export puts its file: beside the audio the clip came from,
     // else beside the project, else the user's Music folder. Each is somewhere this
     // material already lives, so the file lands where it will be looked for --
     // unlike the process's working directory, which is wherever the .exe was
     // launched from and means nothing to anyone.
     std::wstring defaultExportDir(const Clip& c) const {
-        std::wstring d = parentDir(c.sourcePath);
-        if (d.empty()) d = parentDir(projectPath);
+        std::wstring d = folders::parentOf(c.sourcePath);
+        if (d.empty()) d = folders::parentOf(projectPath);
         if (d.empty()) {
             wchar_t buf[MAX_PATH]{};
             if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_MYMUSIC, nullptr,
@@ -4861,7 +4885,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 // ---- window size/state persistence (HKCU\Software\AudioClipEditor) ----------
-static const wchar_t* kRegKey = L"Software\\AudioClipEditor";
 
 static bool loadWindowPlacement(WINDOWPLACEMENT& wp) {
     HKEY k;

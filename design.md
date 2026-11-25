@@ -33,6 +33,7 @@ sync with behavior changes.
 | `handoff.{h,cpp}` | Handing a command line to the copy already running, exactly once: the ticket (files and a claim-or-abandon flag in a named file mapping) and the registered message that names it |
 | `resources.rc`, `resource.h`, `app.ico`, `project.ico` | The manifest and the two icons, the program's first (`IDI_APP`, `IDI_PROJECT`). The `.ico` files are built by `art/make_icon.py` from the Noto Emoji microphone in `art/` (Apache 2.0, `THIRD-PARTY-NOTICES.md`) and committed, so a build needs nothing extra |
 | `assoc.{h,cpp}` | The per-user `.acep` file association under `HKEY_CURRENT_USER\Software\Classes`: register / unregister / "is it this copy?" |
+| `folders.h` | The folders the project dialogs start in: `parentOf`, `nearestExisting` (a remembered folder since deleted falls back to the nearest one above it), and `remembered` / `remember`, the folder the last project was loaded from, kept in `HKCU\Software\AudioClipEditor\LastProjectFolder` |
 | `selftest.cpp` | Headless `--selftest`: decode/encode round-trips, DSP checks, writes `bin/selftest.log` |
 
 ## Starting with files
@@ -47,6 +48,17 @@ a relative one would change meaning with the working directory, which a file dia
 can move before the request is opened. Opening shares `openProjectPath` with
 *File ▸ Open Project*, and adding shares `addAudioPaths` with *Add Files*, which names
 any file that won't decode — several can arrive at once.
+
+**Where the project dialogs start.** `openProjectPath` remembers the folder of every
+project it loads, however it came (Open Project, a double-click, the taskbar's recent
+list, a hand-off from another copy), in `HKCU\Software\AudioClipEditor\LastProjectFolder`
+(`folders::remember`), so it outlives the session and is shared by every copy. Open
+Project starts there (or, if that folder has gone, in the nearest one above it); Save
+As starts beside the project, or there for one never saved. Both dialogs are the Vista
+`IFileDialog`s, started with `SetFolder`: `GetOpenFileName`, given a folder, can set it
+aside for its own memory of the last one, and given none it starts in the current
+directory — the exe's, from Explorer, which is where Open Project used to open. The
+`IFileDialog`s also leave the current directory alone, where `GetOpenFileName` moved it.
 
 - **One copy per user session, for files.** A copy started *with files* while another
   is running hands them over and exits (`handToRunningCopy`: every main window of the
