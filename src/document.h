@@ -81,8 +81,13 @@ public:
                             const std::wstring& desc);
 
     // --- Volume ---
-    void setClipGain(int id, float g, const std::wstring& desc);
-    void setTrackGain(int id, float g, const std::wstring& desc);
+    // Set a clip's, a track's or the mix's volume (linear; clamped to 0 .. kMaxClipGain)
+    // as one undo step named `desc`. Each records nothing and returns false when the
+    // volume is already that -- a click on a slider that doesn't move it, or OK on a
+    // volume typed in unchanged, is not an edit -- or when there is no such clip or track.
+    bool setClipGain(int id, float g, const std::wstring& desc);
+    bool setTrackGain(int id, float g, const std::wstring& desc);
+    bool setMixGain(float g, const std::wstring& desc);
     // Set several clips' volumes as one undo step -- what volume matching commits
     // (see match::matchVolume). Each pair is (clip id, new linear gain), clamped like
     // setClipGain. Records nothing and returns false if no volume actually changed,
@@ -114,7 +119,11 @@ public:
     // able to test it at a budget of a few hundred bytes is worth the knob.
     static int64_t historyBudgetBytes();
     static void setHistoryBudgetBytes(int64_t bytes);
-    AudioBufferPtr renderMix() const;   // all tracks mixed to one stereo buffer
+    // Every unmuted track mixed to one stereo buffer, each clip at its volume times its
+    // track's, and the whole at the mix volume: what Export Mixdown writes. Not clamped
+    // -- the encoder clamps every format to full scale -- so how far the mix goes past
+    // full scale can still be measured, and said, before it is clipped.
+    AudioBufferPtr renderMix() const;
     // A clip's audio as it should leave the app in a file of its own: frames
     // [begin, end) of it (clamped; end < 0 means to the end) **at the clip's
     // volume**. The volume is part of the edit -- it is what the clip's card plays,
@@ -124,8 +133,6 @@ public:
     // no such clip or it has no audio.
     AudioBufferPtr exportAudio(int clipId, int64_t begin = 0, int64_t end = -1) const;
 
-    // Commit a snapshot after direct live edits (e.g. dragging a volume slider).
-    void commitEdit(const std::wstring& desc) { commit(desc); }
 
     // --- Track operations ---
     int  addTrack();

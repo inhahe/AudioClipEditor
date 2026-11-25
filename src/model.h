@@ -4,9 +4,9 @@
 #include <vector>
 #include <algorithm>
 
-// The most any clip or track volume can be (+24 dB). One constant, because the
-// volume matcher reports when a clip was held at this limit, and that report is only
-// true if it is the same limit Document enforces.
+// The most any volume can be (+24 dB): a clip's, a track's or the mix's. One
+// constant, because the volume matcher reports when a clip was held at this limit,
+// and that report is only true if it is the same limit Document enforces.
 constexpr float kMaxClipGain = 16.0f;
 
 // A clip's timbre EQ: one fixed gain per frequency bin, in dB, over the bins of
@@ -125,6 +125,10 @@ struct Project {
     std::vector<Track> tracks;
     int nextClipId = 1;
     int nextTrackId = 1;
+    // The mix volume (linear): on top of every track's and clip's volume wherever the
+    // tracks are mixed -- Play All and Export Mixdown. A clip heard on its own (its
+    // card, Export clip) plays at its own volume and is not affected.
+    float mixGain = 1.0f;
 
     Clip* findClip(int id) {
         for (auto& c : library) if (c.id == id) return &c;

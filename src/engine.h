@@ -22,6 +22,29 @@ public:
     virtual int64_t total() const = 0;
 };
 
+// A volume that may be changed while it plays: set from the UI thread, read by
+// render() on the audio thread. A change is ramped across the next block rendered
+// rather than applied as a step, which on a slider being dragged would be heard as
+// a run of clicks.
+class LiveGain {
+public:
+    explicit LiveGain(float g = 1.0f) : target_(g), applied_(g) {}
+    void set(float g) { target_.store(g, std::memory_order_relaxed); }
+
+    // The rest is the audio thread's. A block reads target() once, takes frame k
+    // (0-based) of its n frames at at(to, k, n) -- arriving at `to` on the last
+    // frame -- and then calls end(to).
+    float target() const { return target_.load(std::memory_order_relaxed); }
+    bool steady(float to) const { return to == applied_; }
+    float at(float to, int k, int n) const {
+        return n > 0 ? applied_ + (to - applied_) * (float)(k + 1) / (float)n : to;
+    }
+    void end(float to) { applied_ = to; }
+private:
+    std::atomic<float> target_;
+    float applied_;                 // what the last block ended on (audio thread only)
+};
+
 // Plays a sub-range [begin,end) of a stereo AudioBuffer at engine rate.
 class BufferSource : public IPlaybackSource {
 public:
@@ -30,10 +53,12 @@ public:
     void seek(int64_t frame) override;      // frame relative to begin
     int64_t position() const override { return pos_ - begin_; }
     int64_t total() const override { return end_ - begin_; }
+    // Change the volume while it plays (any thread).
+    void setGain(float g) { gain_.set(g); }
 private:
     AudioBufferPtr buf_;
     int64_t begin_, end_, pos_;
-    float gain_;
+    LiveGain gain_;
 };
 
 // One placed clip on the timeline, captured for realtime mixing.
@@ -41,7 +66,7 @@ struct TimelineSegment {
     AudioBufferPtr buf;
     int64_t timelineStart = 0;      // engine frames
     int64_t length = 0;
-    float gain = 1.0f;
+    float gain = 1.0f;              // clip x track x mix volume, as armed
 };
 
 // Mixes all placed clips across all (unmuted) tracks from a global playhead.
@@ -52,8 +77,13 @@ public:
     void seek(int64_t frame) override { pos_ = frame; }
     int64_t position() const override { return pos_; }
     int64_t total() const override { return total_; }
+    // Change segment `i`'s volume while it plays (any thread): the arrangement is
+    // fixed when the source is built, but its volumes are not. Out of range is ignored.
+    size_t segmentCount() const { return segs_.size(); }
+    void setSegmentGain(size_t i, float g) { if (i < segs_.size()) gains_[i].set(g); }
 private:
     std::vector<TimelineSegment> segs_;
+    std::unique_ptr<LiveGain[]> gains_;   // parallel to segs_; atomics, so not a vector
     int64_t pos_ = 0;
     int64_t total_ = 0;
 };

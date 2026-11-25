@@ -310,7 +310,7 @@ VolumeResult matchVolume(const Project& p, const ClipSet& s, int reference) {
     }
 
     // Track volume multiplies clip volume in the mix (Document::renderMix and the
-    // engine's TimelineSource both apply clip gain x track gain, then clamp). So a
+    // engine's TimelineSource both apply clip gain x track gain x mix gain). So a
     // clip's loudest track decides whether it clips, and differing track volumes
     // undo a match in the mix. Muted tracks aren't in the mix, so they don't count.
     std::vector<float> trackMax(n, 0.0f);
@@ -337,15 +337,15 @@ VolumeResult matchVolume(const Project& p, const ClipSet& s, int reference) {
     if (!differ) r.trackGains.clear();
 
     // A clip is heard two ways: on its own (its card, and Export clip) at its own
-    // volume, and in the mix at its volume times its loudest track's. Either one
-    // going over full scale clips. Only clips this match turned up are looked at --
-    // it did not make the others clip -- which also keeps the scan of every sample
-    // to the few clips that need it.
+    // volume, and in the mix at its volume times its loudest track's times the mix
+    // volume. Either one going over full scale clips. Only clips this match turned up
+    // are looked at -- it did not make the others clip -- which also keeps the scan of
+    // every sample to the few clips that need it.
     for (int i = 0; i < n; ++i) {
         if (!s.change[i] || !r.measured[i] || !(r.newGain[i] > r.oldGain[i])) continue;
         const Clip* c = p.findClip(s.ids[i]);
         const double alone = peakOf(*c->heard()) * r.newGain[i];
-        const double mix = placed[i] ? alone * trackMax[i] : 0.0;
+        const double mix = placed[i] ? alone * trackMax[i] * p.mixGain : 0.0;
         if (alone > 1.0 || mix > 1.0)
             r.overFullScale.push_back({ i, toDb(std::max(alone, mix)), mix > 1.0 });
     }

@@ -18,6 +18,7 @@
 #include "transport.h"
 #include "selhistory.h"
 #include "snap.h"
+#include "volume.h"
 #include <commctrl.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -107,11 +108,13 @@ enum {
     IDM_EQ_OFF_ONE, IDM_EQ_OFF_LIB,
     IDM_EXPORTCLIP, IDM_EXPORTSEL,
     IDM_SILENCESEL, IDM_DELETESEL, IDM_SPLITOUTSEL,
+    IDM_SETVOL,             // type the clip's volume in
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK, IDM_TL_GAP, IDM_TL_CLOSEGAP, IDM_TL_RIPPLE,
-    IDM_TL_TIMBRE, IDM_TL_VOLUME,
+    IDM_TL_TIMBRE, IDM_TL_VOLUME, IDM_TL_SETVOL,
     IDM_TRK_DENOISE = 320, IDM_TRK_RENAME, IDM_TRK_REMOVE, IDM_TRK_VOICEISO,
     IDM_TRK_TIMBRE, IDM_TRK_VOLUME, IDM_TRK_TIMBRE_ALL, IDM_TRK_VOLUME_ALL, IDM_TRK_EQ_OFF,
+    IDM_TRK_SETVOL, IDM_TRK_MIXVOL,
     IDM_SORT_NAME = 340, IDM_SORT_TIME,
     IDM_REDO_BASE = 400,
     IDM_APPLYCAP_BASE = 500   // + recent-capture index (apply to the clicked clip)
@@ -122,12 +125,14 @@ enum {
     IDC_ADDFILES = 1000, IDC_NEWPROJ, IDC_OPENPROJ, IDC_SAVEPROJ, IDC_SAVEPROJAS,
     IDC_EXPORTMIX, IDC_EXIT,
     IDC_UNDO, IDC_REDO, IDC_HISTORY, IDC_ADDTRACK, IDC_CONTROLS, IDC_RIPPLEMODE,
-    IDC_SAVEHISTORY, IDC_ASSOC
+    IDC_SAVEHISTORY, IDC_ASSOC, IDC_MIXVOL
 };
 
-struct CardLayout { int clipId; RECT card, top, play, del, wave, vol, crop, savesel; };
+// `volPct` is the readout beside a slider, which a double-click types a volume into.
+struct CardLayout { int clipId; RECT card, top, play, del, wave, vol, volPct, crop, savesel; };
 struct PlacedLayout { int trackId, index, clipId; RECT rc; };
-struct TrackLayout { int trackId; RECT header, lane; RECT nameRc, delRc, volRc; };
+// `volLab` is the "Volume  100%" row above the track's slider.
+struct TrackLayout { int trackId; RECT header, lane; RECT nameRc, delRc, volRc, volLab; };
 
 // A remembered background-noise capture. The computed dsp::NoiseProfile is the
 // per-capture "processing result" (per-bin noise power means) that is reused
@@ -135,7 +140,7 @@ struct TrackLayout { int trackId; RECT header, lane; RECT nameRc, delRc, volRc; 
 // rather than recomputing when the user picks the capture again from recents.
 struct NoiseCapture { dsp::NoiseProfile profile; std::wstring desc; };
 
-enum class Mode { None, WaveSelect, CardDrag, ClipMove, TimelineSeek, ClipVolume, TrackVolume, ZoomDrag, TlVScroll, TlHScroll };
+enum class Mode { None, WaveSelect, CardDrag, ClipMove, TimelineSeek, ClipVolume, TrackVolume, MixVolume, ZoomDrag, TlVScroll, TlHScroll };
 
 struct App {
     HWND hwnd = nullptr;
@@ -153,6 +158,7 @@ struct App {
     RECT tbRects[TB_COUNT]{};
     RECT zoomRc{};                 // global time-scale slider (transport bar)
     RECT timeRc{}, scaleLabRc{};   // position/length readout and the "Scale" caption
+    RECT mixLabRc{}, mixVolRc{}, mixPctRc{};   // the mix volume: caption, slider, readout
     int transportH = 0;            // laid-out toolbar height (grows when it wraps)
 
     std::wstring projectPath;      // current .acep path (empty = unsaved)
@@ -204,6 +210,12 @@ struct App {
     // Which arrangement the engine's timeline snapshot was built from; see
     // timelineFingerprint(). 0 = the engine holds no arrangement of ours.
     uint64_t armedFingerprint = 0;
+    // The sources last handed to the engine, kept so a volume changed while they
+    // play is heard at once (syncPlaybackGains) instead of at the next Play: the
+    // timeline's, and the preview's with the clip it plays.
+    std::shared_ptr<TimelineSource> armedTimeline;
+    std::shared_ptr<BufferSource> armedPreview;
+    int armedPreviewClipId = -1;
 
     // selection (belongs to selClipId)
     int selClipId = -1;
@@ -270,8 +282,9 @@ struct App {
     Mode mode = Mode::None;
     POINT downPt{};
     bool dragged = false;
-    int dragClipId = -1;           // CardDrag / ClipMove source clip
+    int dragClipId = -1;           // CardDrag / ClipMove source clip; ClipVolume's clip
     int volTrackId = -1;           // TrackVolume drag target
+    float volDragFrom = 1.0f;      // the volume a Clip/Track/MixVolume drag started from
     int moveTrackId = -1, moveIndex = -1;
     int64_t moveGrabOffset = 0;    // frames from clip start to grab point
     // Ripple: the grabbed clip carries every clip after it on the lane, so the
@@ -685,54 +698,59 @@ struct App {
         } else { edLeft = edRight = RECT{}; }
     }
 
-    // Three groups: transport actions from the left, the time readout in the
-    // middle, and the history group (Scale slider, Undo, Redo, History) pinned to
-    // the right. They no longer *fit* side by side at every window size -- Play
-    // All and the readout are both wide, and History was the addition that tipped
-    // it over at the default size -- so layout::flowTransport drops whichever
-    // group would collide onto a new row and the toolbar grows to match.
-    // Overlapping, or clipping the readout mid-digit (which is what used to
-    // happen once the window got narrow), hides information; a taller toolbar
-    // merely costs pixels. Row assignment lives in layout.h so it can be checked
-    // headlessly -- the failure it guards against is invisible until someone
-    // happens to drag the window narrow enough.
+    // Four groups: transport actions from the left, then the mix volume and the time
+    // readout, and the history group (Scale slider, Undo, Redo, History) pinned to
+    // the right. They don't *fit* side by side at every window size -- Play All and
+    // the readout are both wide -- so layout::flowTransport drops whichever group
+    // would collide onto a new row and the toolbar grows to match. Overlapping, or
+    // clipping the readout mid-digit (which is what used to happen once the window
+    // got narrow), hides information; a taller toolbar merely costs pixels. Row
+    // assignment and the widths live in layout.h so they can be checked headlessly --
+    // the failure it guards against is invisible until someone happens to drag the
+    // window narrow enough.
+    //
+    // The mix volume sits by Play All and Stop because it is the volume of what they
+    // play (and of Export Mixdown), not of a clip's card.
     //
     // Takes the width rather than reading rcTransport, because rcTransport's height
     // is this function's *output*.
     void layoutTransport(int width) {
-        const int y0 = S(12), h = S(38), gap = S(8), margin = S(12);
-        // Wide enough for "12:34.56  /  12:34.56" at the big font.
-        const int timeW = S(190), timeGap = S(16);
-        const int scaleLabW = S(46), zsW = S(120);
-        const int leftW = S(96) + gap + S(96) + S(16) + S(140) + gap + S(70);
-        const int rightW = scaleLabW + S(4) + zsW + S(12) +
-                           S(70) + gap + S(70) + gap + S(118);
-        const auto f = layout::flowTransport(width, margin, gap,
-                                             leftW, timeGap, timeW, rightW);
-        auto rowY = [&](int row) { return y0 + row * (h + gap); };
+        const layout::TransportMetrics m = layout::transportMetrics(sc);
+        const int h = m.h, gap = m.gap;
+        const auto f = layout::flowTransport(width, m.margin, gap, m.leftW,
+                                             m.mixGap, m.mixW, m.timeGap, m.timeW, m.rightW);
+        auto rowY = [&](int row) { return m.y0 + row * (h + gap); };
+        auto sliderIn = [&](int x0, int w, int y) {
+            return RECT{ x0, y + h / 2 - m.sliderH / 2, x0 + w, y + h / 2 + m.sliderH / 2 };
+        };
 
-        int x = margin;
-        auto put = [&](TB id, int w) { tbRects[id] = { x, y0, x + w, y0 + h }; x += w + gap; };
-        put(TB_ADD, S(96));
-        put(TB_TRACK, S(96));
-        x += S(16);
-        put(TB_PLAYALL, S(140));
-        put(TB_STOP, S(70));
+        int x = m.margin;
+        auto put = [&](TB id, int w) { tbRects[id] = { x, m.y0, x + w, m.y0 + h }; x += w + gap; };
+        put(TB_ADD, m.addW);
+        put(TB_TRACK, m.trackW);
+        x += m.playGap - gap;
+        put(TB_PLAYALL, m.playW);
+        put(TB_STOP, m.stopW);
+
+        const int my = rowY(f.mixRow);
+        mixLabRc = { f.mixX, my, f.mixX + m.mixLabW, my + h };
+        mixVolRc = sliderIn(mixLabRc.right + m.capGap, m.mixSliderW, my);
+        mixPctRc = { mixVolRc.right + m.pctGap, my, mixVolRc.right + m.pctGap + m.mixPctW, my + h };
 
         const int ry = rowY(f.rightRow);
-        int rx = f.rightX + rightW;
-        tbRects[TB_HISTORY] = { rx - S(118), ry, rx, ry + h }; rx -= S(118) + gap;
-        tbRects[TB_REDO] = { rx - S(70), ry, rx, ry + h }; rx -= S(70) + gap;
-        tbRects[TB_UNDO] = { rx - S(70), ry, rx, ry + h }; rx -= S(70) + S(12);
-        zoomRc = { rx - zsW, ry + h / 2 - S(7), rx, ry + h / 2 + S(7) };
-        scaleLabRc = { zoomRc.left - scaleLabW - S(4), ry, zoomRc.left - S(4), ry + h };
+        int rx = f.rightX + m.rightW;
+        tbRects[TB_HISTORY] = { rx - m.historyW, ry, rx, ry + h }; rx -= m.historyW + gap;
+        tbRects[TB_REDO] = { rx - m.redoW, ry, rx, ry + h }; rx -= m.redoW + gap;
+        tbRects[TB_UNDO] = { rx - m.undoW, ry, rx, ry + h }; rx -= m.undoW + m.undoGap;
+        zoomRc = sliderIn(rx - m.zoomW, m.zoomW, ry);
+        scaleLabRc = { zoomRc.left - m.scaleLabW - m.capGap, ry, zoomRc.left - m.capGap, ry + h };
 
         // The readout stretches to fill its row, so a longer arrangement still has
         // somewhere to put its digits -- up to the Scale caption when the history
         // group shares the row, and to the window edge when it doesn't.
         const int ty = rowY(f.midRow);
         const int timeRight = (f.midRow == f.rightRow) ? scaleLabRc.left - S(8)
-                                                       : width - margin;
+                                                       : width - m.margin;
         timeRc = { f.midX, ty, timeRight, ty + h };
 
         transportH = rowY(f.rows - 1) + h + S(12);
@@ -766,6 +784,7 @@ struct App {
             cl.del = { x + cardW - S(20), y + S(4), x + cardW - S(4), y + S(20) };
             cl.wave = { x + S(8), y + S(28), x + cardW - S(8), y + cardH - S(30) };
             cl.vol  = { x + S(40), y + cardH - S(24), x + cardW - S(44), y + cardH - S(8) };
+            cl.volPct = { cl.vol.right + S(4), cl.vol.top - S(2), x + cardW - S(6), cl.vol.bottom + S(2) };
             // Selection-action buttons overlaid at the top-right of the waveform;
             // only drawn / hit-tested while this clip has an active selection.
             { int bh = S(17), by0 = cl.wave.top + S(3);
@@ -794,6 +813,7 @@ struct App {
             tl.lane = { laneLeft, y, rcTimeline.right, y + laneH };
             tl.nameRc = { tl.header.left + S(8), y + S(6), tl.header.right - S(8), y + S(24) };
             tl.volRc = { tl.header.left + S(34), y + laneH - S(24), tl.header.right - S(10), y + laneH - S(8) };
+            tl.volLab = { tl.header.left + S(8), y + S(27), tl.header.right - S(10), y + laneH - S(25) };
             tl.delRc = { tl.header.right - S(28), y + S(6), tl.header.right - S(8), y + S(24) };
             trackLays.push_back(tl);
             for (int ci = 0; ci < (int)t.clips.size(); ++ci) {
@@ -1140,9 +1160,7 @@ struct App {
         roundFill(h, knob, col::text, col::accentDk, S(3));
     }
 
-    static std::wstring gainLabel(float g) {
-        wchar_t b[16]; swprintf(b, 16, L"%d%%", (int)(g * 100.0f + 0.5f)); return b;
-    }
+    static std::wstring gainLabel(float g) { return vol::percent(g); }
 
     void paintTransport(HDC h) {
         fill(h, rcTransport, col::transport);
@@ -1169,6 +1187,12 @@ struct App {
         // global time-scale slider ("Scale" label + slider)
         textOut(h, scaleLabRc, L"Scale", col::dim, fSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         drawSliderFrac(h, zoomRc, zoomToFrac());
+        // the mix volume: caption, slider, and its value
+        textOut(h, mixLabRc, L"Mix volume", col::dim, fSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        drawSlider(h, mixVolRc, doc.project().mixGain);
+        textOut(h, mixPctRc, gainLabel(doc.project().mixGain),
+                doc.project().mixGain == 1.0f ? col::dim : col::text, fSmall,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         textOut(h, timeRc, fmtTime(posSec) + L"  /  " + fmtTime(totSec), col::text, fBig,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -1272,8 +1296,7 @@ struct App {
             RECT spk = { cl.card.left + S(8), cl.vol.top - S(2), cl.vol.left - S(2), cl.vol.bottom + S(2) };
             textOut(h, spk, L"\U0001F509", col::dim, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             drawSlider(h, cl.vol, c->gain);
-            RECT pct = { cl.vol.right + S(4), cl.vol.top - S(2), cl.card.right - S(6), cl.vol.bottom + S(2) };
-            textOut(h, pct, gainLabel(c->gain), col::dim, fSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            textOut(h, cl.volPct, gainLabel(c->gain), col::dim, fSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         }
         // insertion caret while reordering a clip within the library
         if (mode == Mode::CardDrag && dragged && !cards.empty()) {
@@ -1374,10 +1397,15 @@ struct App {
             RECT edge = { tl.header.right - 1, tl.header.top, tl.header.right, tl.header.bottom };
             fill(h, edge, col::cardEdge);
             textOut(h, tl.nameRc, t ? t->name : L"", col::text, fBold, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            // track volume slider
+            // track volume: named, and with its value, over the slider -- the one
+            // place a track's volume can be read. Brighter when not at 100%.
+            const float tg = t ? t->gain : 1.0f;
+            textOut(h, tl.volLab, L"Volume", col::dim, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            textOut(h, tl.volLab, gainLabel(tg), tg == 1.0f ? col::dim : col::text, fSmall,
+                    DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
             RECT tspk = { tl.header.left + S(8), tl.volRc.top - S(3), tl.volRc.left - S(2), tl.volRc.bottom + S(3) };
             textOut(h, tspk, L"\U0001F509", col::dim, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            drawSlider(h, tl.volRc, t ? t->gain : 1.0f);
+            drawSlider(h, tl.volRc, tg);
             if (doc.project().tracks.size() > 1)
                 textOut(h, tl.delRc, L"\u2715", col::dim, fSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             // lane bg
@@ -1689,7 +1717,7 @@ struct App {
         transport::Plan plan = transport::decide(st, pr);
         switch (plan.act) {
         case transport::Act::Pause:  engine.pause();  refresh(); return;
-        case transport::Act::Resume: engine.resume(); refresh(); return;
+        case transport::Act::Resume: syncPlaybackGains(); engine.resume(); refresh(); return;
         case transport::Act::Restart: break;
         }
         const int64_t from = plan.from == transport::From::Cursor   ? previewCursor
@@ -1713,7 +1741,9 @@ struct App {
         previewClipId = clipId; previewIsSel = sel;
         previewBegin = begin; previewEnd = end;
         previewCursor = startFrame; previewSeekPending = false;
-        engine.play(std::make_shared<BufferSource>(c->heard(), begin, end, c->gain), startFrame - begin);
+        armedPreview = std::make_shared<BufferSource>(c->heard(), begin, end, c->gain);
+        armedPreviewClipId = clipId;
+        engine.play(armedPreview, startFrame - begin);
         refresh();
     }
     void playSelection() { if (hasSel()) startPreview(selClipId, selStart, true); }
@@ -2206,7 +2236,7 @@ struct App {
                  + (w.inMix ? L", so it will distort when played and in the exported mix."
                             : L", so it will distort when played on its card or exported on its own.")
                  + L" Match to a quieter clip instead, or turn "
-                 + (w.inMix ? L"the track" : L"the clip") + L" down.";
+                 + (w.inMix ? L"the track or the mix volume" : L"the clip") + L" down.";
         }
         // Track volume applies on top, and this only sets clip volumes.
         if (!r.trackGains.empty()) {
@@ -2592,6 +2622,13 @@ struct App {
     void resetForAnotherProject() {
         stopAll();
         closeClipEditor();
+        // A volume drag still under way was on the old project. Cancelling it would put
+        // its starting volume back -- into the new one, whose clip or track of the same
+        // id is another, and whose mix volume is its own -- so it is just let go.
+        if (isVolumeDrag(mode)) {
+            mode = Mode::None;
+            if (GetCapture() == hwnd) ReleaseCapture();
+        }
         cancelDrag();
         previewClipId = -1; previewIsSel = false; previewSeekPending = false;
         previewCursor = previewBegin = previewEnd = 0;
@@ -2842,6 +2879,22 @@ struct App {
         if (r == IDNO) return true;      // discard
         return saveProjectFile();         // IDYES: proceed only if the save succeeds
     }
+    // The highest sample an export of `b` hands the encoder, which writes every format
+    // clamped to full scale (32-bit float too): over 1, the file is clipped there,
+    // audibly and with nothing else to say so. A mono export averages the two
+    // channels, which can bring a one-sided peak back under.
+    static float encodedPeak(const AudioBuffer& b, int outChannels) {
+        float peak = 0.0f;
+        const int ch = b.channels;
+        for (int64_t f = 0; f < b.frames(); ++f) {
+            const float l = b.samples[(size_t)(f * ch)];
+            const float r = ch > 1 ? b.samples[(size_t)(f * ch + 1)] : l;
+            peak = std::max(peak, outChannels == 1 ? std::fabs(0.5f * (l + r))
+                                                   : std::max(std::fabs(l), std::fabs(r)));
+        }
+        return peak;
+    }
+
     void exportMix() {
         auto mix = doc.renderMix();
         if (!mix || mix->frames() == 0) {
@@ -2854,8 +2907,24 @@ struct App {
         if (!dlg::exportOptions(hwnd, o, outPath, L"Mixdown")) return;
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
         std::wstring err; bool ok = mfio::encodeFile(outPath, *mix, o, &err);
+        const float peak = ok ? encodedPeak(*mix, o.channels) : 0.0f;
         SetCursor(old);
-        if (!ok) MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING);
+        if (!ok) { MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING); return; }
+        // Whatever took it over -- clips set loud, tracks, the mix volume, clips
+        // overlapping -- the mix volume is the one control that brings it all back
+        // under at once, so the warning says how far down it has to go.
+        if (peak > 1.0f) {
+            const float mg = doc.project().mixGain;
+            const float fits = mg / peak;
+            std::wstring msg = L"The mix peaks " + db1(20.0 * std::log10(peak)) +
+                               L" dB past full scale, so those peaks are clipped in the exported file.";
+            // Rounded down, so the volume named does fit.
+            const float shown = std::floor(fits * 100.0f) / 100.0f;
+            if (shown > 0.0f)
+                msg += L"\n\nTurn the mix volume down to " + gainLabel(shown) + L" or less (it is at " +
+                       gainLabel(mg) + L") and export again for a clean copy.";
+            MessageBoxW(hwnd, msg.c_str(), L"Export mixdown", MB_ICONWARNING);
+        }
     }
 
     // Write one library clip -- or just the waveform selection inside it -- out as
@@ -2895,19 +2964,9 @@ struct App {
         std::wstring err; bool ok = mfio::encodeFile(outPath, *buf, o, &err);
         SetCursor(old);
         if (!ok) { MessageBoxW(hwnd, err.c_str(), L"Could not export", MB_ICONWARNING); return; }
-        // Every format is written clamped to full scale (32-bit float too), so a peak
-        // over it is clipped in the file, audibly and with nothing else to say so.
-        // Measured on what the encoder is handed -- a mono export averages the two
-        // channels, which can bring a one-sided peak back under -- and the clip's
-        // volume is only named as the cause when, at 100%, it would have fitted.
-        float peak = 0.0f;
-        const int ch = buf->channels;
-        for (int64_t f = 0; f < buf->frames(); ++f) {
-            const float l = buf->samples[(size_t)(f * ch)];
-            const float r = ch > 1 ? buf->samples[(size_t)(f * ch + 1)] : l;
-            peak = std::max(peak, o.channels == 1 ? std::fabs(0.5f * (l + r))
-                                                  : std::max(std::fabs(l), std::fabs(r)));
-        }
+        // A peak past full scale is clipped in the file (see encodedPeak), and the
+        // clip's volume is only named as the cause when, at 100%, it would have fitted.
+        const float peak = encodedPeak(*buf, o.channels);
         if (peak > 1.0f) {
             const bool volumeDidIt = gain > 1.0f && peak / gain <= 1.0f;
             std::wstring msg = L"'" + clipName + L"' "
@@ -3041,7 +3100,9 @@ struct App {
             L"    recorded separately (mic distance, room, tone controls), and\n"
             L"    Match volume evens out their loudness \u2014 each to the average,\n"
             L"    or to one clip you pick as the standard; one setting per clip\n"
-            L"  \u2022 Drag the volume slider to change a clip's level\n\n"
+            L"  \u2022 Drag the volume slider at the bottom of a card to change a clip's\n"
+            L"    level; to type it in (150%, +3.5 dB), double-click the % beside it\n"
+            L"    or right-click \u2192 Set volume\n\n"
             L"Full-window editor:\n"
             L"  \u2022 Drag across the big waveform to select; buttons to play/crop/save\n"
             L"  \u2022 Fine-tune edges: two zoomed strips for the selection's start & end\n"
@@ -3060,7 +3121,13 @@ struct App {
             L"    \u2014 no modifier needed, and Shift then means \"just this clip\"\n"
             L"  \u2022 Right-click a placed clip to set the space before it exactly,\n"
             L"    or to close it \u2014 later clips move to match, either way\n"
-            L"  \u2022 Drag a track's volume slider to change the track level\n"
+            L"  \u2022 Drag a track's volume slider (in its header) to change the track\n"
+            L"    level; double-click its Volume line, or right-click the header \u2192\n"
+            L"    Set track volume, to type it in\n"
+            L"  \u2022 Mix volume (toolbar, by Play All) sets the whole mix: Play All and\n"
+            L"    Export Mixdown, on top of track and clip volumes; double-click its %\n"
+            L"    or use Track \u25b8 Mix volume to type it in. Volumes change while\n"
+            L"    playing, so you can set them by ear\n"
             L"  \u2022 Right-click a track header to clean/isolate voice, match timbre\n"
             L"    or volume (this track, or all tracks), rename or remove the track\n"
             L"  \u2022 Right-click a placed clip to match its timbre or volume to the\n"
@@ -3082,43 +3149,59 @@ struct App {
 
     // The engine plays a *snapshot* of the arrangement, not the arrangement itself:
     // handing it the live project would mean touching model data from the audio
-    // thread. The snapshot therefore goes stale the moment a clip is moved, muted,
-    // regained or deleted, and both resuming and continuing it would then play an
+    // thread. The snapshot therefore goes stale the moment a clip is moved, muted
+    // or deleted, and both resuming and continuing it would then play an
     // arrangement that no longer exists. `armedFingerprint` records which
     // arrangement the engine is currently holding so staleness can be detected.
+    //
+    // Volumes are deliberately not in it: they are handed to the playing source as
+    // they change (syncPlaybackGains), so dragging a slider is heard as it moves.
+    // Re-arming instead would restart the audio from the heard position on every
+    // step of the drag, repeating what was already queued each time.
     uint64_t timelineFingerprint() const {
         uint64_t h = 1469598103934665603ull;                 // FNV-1a, 64-bit
         auto mix = [&h](uint64_t v) {
             for (int i = 0; i < 8; ++i) { h ^= (v >> (i * 8)) & 0xFF; h *= 1099511628211ull; }
         };
-        auto mixf = [&mix](float f) { uint32_t b = 0; memcpy(&b, &f, sizeof b); mix(b); };
         for (const auto& t : doc.project().tracks) {
-            mix((uint64_t)t.id); mix(t.muted ? 1 : 0); mixf(t.gain);
+            mix((uint64_t)t.id); mix(t.muted ? 1 : 0);
             for (const auto& pc : t.clips) {
                 mix((uint64_t)pc.clipId); mix((uint64_t)pc.startFrame); mix((uint64_t)pc.lengthFrames);
                 const Clip* c = doc.project().findClip(pc.clipId);
                 // The buffer pointer covers destructive edits: an edit copies before
                 // it writes (undo snapshots share the buffer), so it lands elsewhere.
                 mix(c ? (uint64_t)(uintptr_t)c->heard().get() : 0);   // an EQ change re-arms too
-                mixf(c ? c->gain : 0.0f);
                 mix(c && c->buffer ? (uint64_t)c->buffer->frames() : 0);
             }
         }
         mix((uint64_t)doc.project().timelineLengthFrames());
         return h;
     }
-    // Returns false when there is nothing to play at all.
-    bool buildTimelineSegments(std::vector<TimelineSegment>& segs, int64_t& total) const {
-        for (auto& t : doc.project().tracks) {
+    // Every placement the timeline plays, in the order its segments are built:
+    // `f(track, clip)` once each. The one walk both building the segments and
+    // updating their volumes go through, so segment i is the same placement in both.
+    template <class F> void forEachTimelineSegment(F&& f) const {
+        for (const Track& t : doc.project().tracks) {
             if (t.muted) continue;
-            for (auto& pc : t.clips) {
+            for (const PlacedClip& pc : t.clips) {
                 const Clip* c = doc.project().findClip(pc.clipId);
                 if (!c || !c->buffer) continue;
-                TimelineSegment s; s.buf = c->heard(); s.timelineStart = pc.startFrame; s.length = pc.lengthFrames;
-                s.gain = c->gain * t.gain;
-                segs.push_back(s);
+                f(t, pc, *c);
             }
         }
+    }
+    // A placement's volume in the mix -- the product Document::renderMix applies, in
+    // the same order, so Export Mixdown writes what Play All played.
+    float segmentGain(const Track& t, const Clip& c) const {
+        return c.gain * t.gain * doc.project().mixGain;
+    }
+    // Returns false when there is nothing to play at all.
+    bool buildTimelineSegments(std::vector<TimelineSegment>& segs, int64_t& total) const {
+        forEachTimelineSegment([&](const Track& t, const PlacedClip& pc, const Clip& c) {
+            TimelineSegment s; s.buf = c.heard(); s.timelineStart = pc.startFrame; s.length = pc.lengthFrames;
+            s.gain = segmentGain(t, c);
+            segs.push_back(s);
+        });
         total = doc.project().timelineLengthFrames();
         return total > 0;
     }
@@ -3126,8 +3209,8 @@ struct App {
         std::vector<TimelineSegment> segs; int64_t total = 0;
         if (!buildTimelineSegments(segs, total)) { stopAll(); return; }
         armedFingerprint = timelineFingerprint();
-        engine.play(std::make_shared<TimelineSource>(std::move(segs), total),
-                    std::min(atFrame, total));
+        armedTimeline = std::make_shared<TimelineSource>(std::move(segs), total);
+        engine.play(armedTimeline, std::min(atFrame, total));
     }
     // Edits made while the arrangement is running are heard straight away rather
     // than at the next Space. Driven from the timer, so it catches every way the
@@ -3137,6 +3220,23 @@ struct App {
         if (timelineFingerprint() == armedFingerprint) return;
         armTimeline(engine.position());
     }
+    // Hand the current volumes to whatever the engine is playing, or holding paused:
+    // the timeline's segments, or the previewed clip. Called from the timer and as a
+    // slider moves. A timeline snapshot whose arrangement has changed since it was
+    // armed is left alone -- its segment i may no longer be this walk's i -- until
+    // syncTimelineSource or the next Play re-arms it.
+    void syncPlaybackGains() {
+        if (!engine.hasSource()) return;
+        if (timelinePlaying) {
+            if (!armedTimeline || timelineFingerprint() != armedFingerprint) return;
+            size_t i = 0;
+            forEachTimelineSegment([&](const Track& t, const PlacedClip&, const Clip& c) {
+                armedTimeline->setSegmentGain(i++, segmentGain(t, c));
+            });
+        } else if (armedPreview && previewClipId >= 0 && previewClipId == armedPreviewClipId) {
+            if (const Clip* c = doc.project().findClip(previewClipId)) armedPreview->setGain(c->gain);
+        }
+    }
 
     void playAll() {
         // Space must always pause a running arrangement, stale snapshot or not.
@@ -3144,7 +3244,7 @@ struct App {
         // Resuming is only honest while the engine still holds the arrangement the
         // user can see; otherwise fall through and re-arm from the playhead.
         if (timelinePlaying && engine.isPaused() && timelineFingerprint() == armedFingerprint) {
-            engine.resume(); refresh(); return;
+            syncPlaybackGains(); engine.resume(); refresh(); return;
         }
         if (doc.project().timelineLengthFrames() <= 0) return;
         previewClipId = -1; previewIsSel = false; timelinePlaying = true;
@@ -3157,6 +3257,7 @@ struct App {
     }
     void stopAll() {
         engine.stop(); timelinePlaying = false; armedFingerprint = 0;
+        armedTimeline.reset(); armedPreview.reset(); armedPreviewClipId = -1;
         previewClipId = -1; previewIsSel = false; previewSeekPending = false;
         previewBegin = previewEnd = 0; previewCursor = 0;
         refresh();
@@ -3184,6 +3285,9 @@ struct App {
     // step covers both cases without having to guess which one it is, and telling
     // the user there is nothing left to undo is worth as much as the undo itself.
     void doUndo() {
+        // Mid-drag, the edit to take back is the drag itself: it isn't a step yet, so
+        // undoing the one before it would leave a half-made one to land on top.
+        if (isVolumeDrag(mode)) { cancelDrag(); toast(L"Undone: the volume being dragged"); return; }
         if (canSelUndo()) {
             applySel(selHist.undo(curSel())); validateSelection(); refresh();
             toast(L"Undone: selection change");
@@ -3195,6 +3299,7 @@ struct App {
         toast(L"Undone: " + what, historyDetail(true));
     }
     void doRedo() {
+        if (isVolumeDrag(mode)) return;   // nothing to redo while an edit is under way
         if (canSelRedo()) {
             applySel(selHist.redo(curSel())); validateSelection(); refresh();
             toast(L"Redone: selection change");
@@ -3469,6 +3574,13 @@ struct App {
                 setZoomFrac((float)(p.x - zoomRc.left) / std::max(1, (int)(zoomRc.right - zoomRc.left)));
                 SetCapture(hwnd); clampScroll(); refresh(); return;
             }
+            if (dbl && (PtInRect(&mixPctRc, p) || PtInRect(&mixLabRc, p))) { editMixVolume(); return; }
+            RECT mh = sliderHit(mixVolRc);
+            if (PtInRect(&mh, p)) {
+                mode = Mode::MixVolume; volDragFrom = doc.project().mixGain;
+                doc.project().mixGain = sliderGainAt(mixVolRc, p.x);
+                syncPlaybackGains(); SetCapture(hwnd); refresh(); return;
+            }
             if (tb >= 0) handleTB(tb);
             return;
         }
@@ -3484,11 +3596,15 @@ struct App {
             }
             if (PtInRect(&cl->play, p)) { togglePlayClip(cl->clipId); return; }
             if (PtInRect(&cl->del, p)) { deleteClipConfirm(cl->clipId); return; }
+            if (dbl && PtInRect(&cl->volPct, p)) { editClipVolume(cl->clipId); return; }
             { RECT vh = sliderHit(cl->vol);
               if (PtInRect(&vh, p)) {
-                mode = Mode::ClipVolume; dragClipId = cl->clipId;
-                if (Clip* c = doc.project().findClip(cl->clipId)) c->gain = sliderGainAt(cl->vol, p.x);
-                SetCapture(hwnd); refresh(); return;
+                if (Clip* c = doc.project().findClip(cl->clipId)) {
+                    mode = Mode::ClipVolume; dragClipId = cl->clipId; volDragFrom = c->gain;
+                    c->gain = sliderGainAt(cl->vol, p.x);
+                    syncPlaybackGains(); SetCapture(hwnd); refresh();
+                }
+                return;
               } }
             if (PtInRect(&cl->wave, p)) {
                 if (dbl) { openClipEditor(cl->clipId); return; }
@@ -3547,11 +3663,15 @@ struct App {
                 if (PtInRect(&tl.delRc, p) && doc.project().tracks.size() > 1) {
                     doc.removeTrack(tl.trackId); afterHistory(); return;
                 }
+                if (dbl && PtInRect(&tl.volLab, p)) { editTrackVolume(tl.trackId); return; }
                 { RECT vh = sliderHit(tl.volRc);
                   if (PtInRect(&vh, p) && p.x < tl.header.right) {
-                    mode = Mode::TrackVolume; volTrackId = tl.trackId;
-                    if (Track* t = doc.project().findTrack(tl.trackId)) t->gain = sliderGainAt(tl.volRc, p.x);
-                    SetCapture(hwnd); refresh(); return;
+                    if (Track* t = doc.project().findTrack(tl.trackId)) {
+                        mode = Mode::TrackVolume; volTrackId = tl.trackId; volDragFrom = t->gain;
+                        t->gain = sliderGainAt(tl.volRc, p.x);
+                        syncPlaybackGains(); SetCapture(hwnd); refresh();
+                    }
+                    return;
                   } }
                 if (PtInRect(&tl.nameRc, p) && dbl) {
                     const Track* t=nullptr; for(auto&tt:doc.project().tracks) if(tt.id==tl.trackId)t=&tt;
@@ -3650,10 +3770,16 @@ struct App {
             }
         } else if (mode == Mode::ClipVolume) {
             const CardLayout* cl = nullptr; for (auto& c : cards) if (c.clipId == dragClipId) cl = &c;
-            if (cl) if (Clip* c = doc.project().findClip(dragClipId)) { c->gain = sliderGainAt(cl->vol, p.x); refresh(); }
+            if (cl) if (Clip* c = doc.project().findClip(dragClipId)) {
+                c->gain = sliderGainAt(cl->vol, p.x); syncPlaybackGains(); refresh();
+            }
         } else if (mode == Mode::TrackVolume) {
             const TrackLayout* tl = nullptr; for (auto& t : trackLays) if (t.trackId == volTrackId) tl = &t;
-            if (tl) if (Track* t = doc.project().findTrack(volTrackId)) { t->gain = sliderGainAt(tl->volRc, p.x); refresh(); }
+            if (tl) if (Track* t = doc.project().findTrack(volTrackId)) {
+                t->gain = sliderGainAt(tl->volRc, p.x); syncPlaybackGains(); refresh();
+            }
+        } else if (mode == Mode::MixVolume) {
+            doc.project().mixGain = sliderGainAt(mixVolRc, p.x); syncPlaybackGains(); refresh();
         } else if (mode == Mode::ZoomDrag) {
             setZoomFrac((float)(p.x - zoomRc.left) / std::max(1, (int)(zoomRc.right - zoomRc.left)));
             clampScroll(); refresh();
@@ -3738,12 +3864,34 @@ struct App {
                 afterPlaceRefresh();
             }
             rippleDrag = rippleShift = false;
-        } else if (m == Mode::ClipVolume) {
-            doc.commitEdit(L"Set clip volume"); refresh();
-        } else if (m == Mode::TrackVolume) {
-            doc.commitEdit(L"Set track volume"); refresh();
+        } else if (isVolumeDrag(m)) {
+            finishVolumeDrag(m, true);
         }
         refresh();
+    }
+
+    static bool isVolumeDrag(Mode m) {
+        return m == Mode::ClipVolume || m == Mode::TrackVolume || m == Mode::MixVolume;
+    }
+
+    // End a volume slider drag. The drag moves the volume live so it is heard and
+    // seen as it goes; this puts the volume it started from back and, when the drag
+    // is kept, sets the one it ended on through the Document -- so a drag is one undo
+    // step, and a click that leaves the volume where it was is none.
+    void finishVolumeDrag(Mode m, bool keep) {
+        float* live = nullptr;
+        if (m == Mode::ClipVolume) { if (Clip* c = doc.project().findClip(dragClipId)) live = &c->gain; }
+        else if (m == Mode::TrackVolume) { if (Track* t = doc.project().findTrack(volTrackId)) live = &t->gain; }
+        else if (m == Mode::MixVolume) live = &doc.project().mixGain;
+        if (!live) return;
+        const float to = *live;
+        *live = volDragFrom;
+        if (keep) {
+            if (m == Mode::ClipVolume) setClipVolume(dragClipId, to);
+            else if (m == Mode::TrackVolume) setTrackVolume(volTrackId, to);
+            else setMixVolume(to);
+        }
+        syncPlaybackGains();
     }
     void afterPlaceRefresh() { clampScroll(); refresh(); }
 
@@ -3835,6 +3983,11 @@ struct App {
                             L"Match this clip's timbre to the rest of the track\u2026");
                 AppendMenuW(m, MF_STRING | rest, IDM_TL_VOLUME,
                             L"Match this clip's volume to the rest of the track\u2026");
+                // The clip's own volume -- the one its card's slider sets. A placement
+                // has none of its own, which the dialog says.
+                if (const Clip* c = doc.project().findClip(gClip))
+                    AppendMenuW(m, MF_STRING, IDM_TL_SETVOL,
+                                (L"Set this clip's volume (now " + gainLabel(c->gain) + L")\u2026").c_str());
                 AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
                 AppendMenuW(m, MF_STRING, IDM_TL_REMOVE, L"Remove from timeline");
                 POINT sp = p; ClientToScreen(hwnd, &sp);
@@ -3850,6 +4003,7 @@ struct App {
                 else if (cmd == IDM_TL_VOLUME)
                     matchVolumeClips(match::clipToTrack(doc.project(), gClip, gTrack),
                                      TrackPick({ gTrack }, gClip));
+                else if (cmd == IDM_TL_SETVOL) editClipVolume(gClip);
                 return;
             }
             // right-click a track header or empty lane -> track menu
@@ -3905,6 +4059,70 @@ struct App {
         setGapBefore(trackId, index, (int64_t)(secs * rate + 0.5), L"Set space before clip");
     }
 
+    // --------------------------------------------------------- volume
+    // Set a volume as one undo step, named for the History window with what was set
+    // and to what. Nothing is stopped: the new volume reaches playback live
+    // (syncPlaybackGains), which is how a volume is judged -- by ear, while it plays.
+    void setClipVolume(int clipId, float g) {
+        const Clip* c = doc.project().findClip(clipId);
+        if (!c) return;
+        const std::wstring desc = L"Set the volume of '" + c->name + L"' to " + gainLabel(g);
+        if (doc.setClipGain(clipId, g, desc)) refresh();
+    }
+    void setTrackVolume(int trackId, float g) {
+        const Track* t = doc.project().findTrack(trackId);
+        if (!t) return;
+        const std::wstring desc = L"Set the volume of track '" + t->name + L"' to " + gainLabel(g);
+        if (doc.setTrackGain(trackId, g, desc)) refresh();
+    }
+    void setMixVolume(float g) {
+        if (doc.setMixGain(g, L"Set the mix volume to " + gainLabel(g))) refresh();
+    }
+
+    // Type a volume in exactly (dlg::volume). Each dialog says what else sets the level
+    // that is heard, since three volumes multiply in the mix and only one is being set.
+    void editClipVolume(int clipId) {
+        dlg::VolumeContext ctx;
+        {   // Scoped so no Clip* is held across the modal dialog below.
+            const Clip* c = doc.project().findClip(clipId);
+            if (!c) return;
+            int places = 0;
+            for (const Track& t : doc.project().tracks)
+                for (const PlacedClip& pc : t.clips) places += pc.clipId == clipId;
+            // A clip has one volume, wherever it plays; a placement has none of its own.
+            ctx.scopeLabel = L"'" + c->name + L"'" +
+                (places == 0 ? std::wstring()
+                 : places == 1 ? std::wstring(L", on its card and on the timeline")
+                 : L", on its card and in all " + std::to_wstring(places) + L" places it is on the timeline");
+            ctx.gain = c->gain;
+        }
+        ctx.title = L"Clip volume";
+        ctx.note = L"In the mix, the track's volume and the mix volume apply on top of this one.";
+        if (dlg::volume(hwnd, ctx)) setClipVolume(clipId, ctx.gain);
+    }
+    void editTrackVolume(int trackId) {
+        dlg::VolumeContext ctx;
+        {
+            const Track* t = doc.project().findTrack(trackId);
+            if (!t) return;
+            const size_t n = t->clips.size();
+            ctx.scopeLabel = L"track '" + t->name + L"' (" + std::to_wstring(n) + (n == 1 ? L" clip)" : L" clips)");
+            ctx.gain = t->gain;
+        }
+        ctx.title = L"Track volume";
+        ctx.note = L"Each clip's own volume applies too, and the mix volume on top.";
+        if (dlg::volume(hwnd, ctx)) setTrackVolume(trackId, ctx.gain);
+    }
+    void editMixVolume() {
+        dlg::VolumeContext ctx;
+        ctx.title = L"Mix volume";
+        ctx.scopeLabel = L"the whole mix — Play All, and Export Mixdown";
+        ctx.note = L"On top of every track's and every clip's own volume. A clip played on its "
+                   L"card, or exported on its own, isn't affected.";
+        ctx.gain = doc.project().mixGain;
+        if (dlg::volume(hwnd, ctx)) setMixVolume(ctx.gain);
+    }
+
     void trackContextMenu(int trackId, POINT p) {
         const Track* t = doc.project().findTrack(trackId);
         if (!t) return;
@@ -3931,6 +4149,12 @@ struct App {
         AppendMenuW(m, MF_STRING | (trackEq ? 0 : MF_GRAYED), IDM_TRK_EQ_OFF,
                     L"Remove the EQ \u2014 this track");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        // The two volumes a track's level in the mix is set by besides its clips'.
+        AppendMenuW(m, MF_STRING, IDM_TRK_SETVOL,
+                    (L"Set track volume (now " + gainLabel(t->gain) + L")\u2026").c_str());
+        AppendMenuW(m, MF_STRING, IDM_TRK_MIXVOL,
+                    (L"Mix volume \u2014 all tracks (now " + gainLabel(doc.project().mixGain) + L")\u2026").c_str());
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_TRK_RENAME, L"Rename track\u2026");
         AppendMenuW(m, MF_STRING | (doc.project().tracks.size() > 1 ? 0 : MF_GRAYED),
                     IDM_TRK_REMOVE, L"Remove track");
@@ -3952,6 +4176,8 @@ struct App {
             for (const auto& pc : t->clips) ids.push_back(pc.clipId);
             removeEq(ids, L"track '" + t->name + L"'");
         }
+        else if (cmd == IDM_TRK_SETVOL) editTrackVolume(trackId);
+        else if (cmd == IDM_TRK_MIXVOL) editMixVolume();
         else if (cmd == IDM_TRK_RENAME) {
             std::wstring nm = t->name;
             if (dlg::promptText(hwnd, L"Rename track", L"Track name:", nm)) { doc.renameTrack(trackId, nm); refresh(); }
@@ -4086,6 +4312,9 @@ struct App {
         AppendMenuW(m, MF_POPUP, (UINT_PTR)tm, L"Match timbre (EQ)");
         AppendMenuW(m, MF_POPUP, (UINT_PTR)matchMenu(IDM_VOL_ONE, IDM_VOL_TL, IDM_VOL_LIB),
                     L"Match volume");
+        if (const Clip* self = doc.project().findClip(clipId))
+            AppendMenuW(m, MF_STRING, IDM_SETVOL,
+                        (L"Set volume (now " + gainLabel(self->gain) + L")\u2026").c_str());
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_RENAME, L"Rename\u2026");
         AppendMenuW(m, MF_STRING, IDM_DELETE, L"Delete clip");
@@ -4135,6 +4364,7 @@ struct App {
         }
         else if (cmd >= IDM_APPLYCAP_BASE && cmd < IDM_APPLYCAP_BASE + 100)
             applyCaptureToClip(clipId, cmd - IDM_APPLYCAP_BASE);
+        else if (cmd == IDM_SETVOL) editClipVolume(clipId);
         else if (cmd == IDM_RENAME) renameClip(clipId);
         else if (cmd == IDM_DELETE) deleteClipConfirm(clipId);
         else if (cmd >= IDM_ADDTL_BASE && cmd < IDM_TL_REMOVE) {
@@ -4219,6 +4449,8 @@ struct App {
 
         HMENU track = CreatePopupMenu();
         AppendMenuW(track, MF_STRING, IDC_ADDTRACK, L"Add Track");
+        AppendMenuW(track, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(track, MF_STRING, IDC_MIXVOL, L"Mix volume (all tracks)…");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)track, L"Track");
 
         // "Arrange", not "Timeline": this menu is about the track lanes, but a
@@ -4265,6 +4497,7 @@ struct App {
         case IDC_REDO: doRedo(); break;
         case IDC_HISTORY: showHistory(); break;
         case IDC_ADDTRACK: addTrackAndReveal(); break;
+        case IDC_MIXVOL: editMixVolume(); break;
         case IDC_CONTROLS: showControls(); break;
         case IDC_RIPPLEMODE: toggleRippleMode(); break;
         case IDC_SAVEHISTORY: toggleSaveHistory(); break;
@@ -4286,6 +4519,17 @@ struct App {
             if (editDrag == 0) return false;    // main sweep, or either fine-tune strip
             editDrag = 0; mainEdgeDrag = false;
         } else {
+            // A volume drag is put back where it started; the selection was never
+            // touched by it.
+            if (isVolumeDrag(mode)) {
+                const Mode m = mode;
+                mode = Mode::None;
+                finishVolumeDrag(m, false);
+                if (GetCapture() == hwnd) ReleaseCapture();
+                dragged = false;
+                refresh();
+                return true;
+            }
             // CardDrag is included because a sweep on a card *becomes* one when the
             // pointer leaves the library, and that conversion clears the selection;
             // cancelling has to undo that too, not just skip the drop.
@@ -4396,6 +4640,9 @@ struct App {
         const bool playing = engine.isPlaying();
         // Without a device playback waits where it is: nothing moves, so no fast ticks.
         setTimerRate(playing && engine.hasDevice());
+        // A volume, however it was changed, reaches what is playing (or paused)
+        // within a tick.
+        syncPlaybackGains();
         if (playing) {
             syncTimelineSource();
             if (timelinePlaying) { playheadFrame = engine.position(); followPlayheadIfPlaying(); }

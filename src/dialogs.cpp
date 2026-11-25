@@ -1,6 +1,7 @@
 #include "dialogs.h"
 #include "appicon.h"
 #include "resource.h"
+#include "volume.h"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellscalingapi.h>
@@ -1050,6 +1051,115 @@ bool volumeMatch(HWND parent, VolumeMatchContext& ctx) {
         L"sliders, which you can still adjust afterwards.";
     return matchDialog(parent, L"Match Volume", kInfo, L"As loud as ", ctx.ref, ctx.tracks,
                        ctx.scopeLabel, nullptr, nullptr);
+}
+
+// ------------------------------------------------------------------ volume
+struct VolumeState {
+    VolumeContext* ctx = nullptr;
+    std::wstring shown;         // the text the box opened with
+    HWND edit = nullptr, reading = nullptr, how = nullptr, ok = nullptr;
+    bool accepted = false;
+};
+
+static const wchar_t* kVolumeHow =
+    L"Type a percentage (150%) or decibels (+3.5 dB, -6 dB). 100% plays it as "
+    L"recorded, 0% is silent, and the most is 1600% (+24 dB).";
+
+// What the box reads as, beside it, in both units since it may have been typed in
+// either: "= 150%, +3.5 dB". Text it can't read leaves that blank and says why in
+// place of the how-to line under the box, which is what that line is for.
+static void volumeUpdate(VolumeState* st) {
+    wchar_t buf[128]; GetWindowTextW(st->edit, buf, 128);
+    const std::wstring text = buf;
+    std::wstring reading, how = kVolumeHow;
+    bool usable = true;
+    if (text == st->shown) {
+        reading = L"= " + vol::percent(st->ctx->gain) + L", " + vol::decibels(st->ctx->gain) + L" (as now)";
+    } else {
+        const vol::Parsed p = vol::parse(text);
+        usable = p.ok;
+        if (p.ok) reading = L"= " + vol::percent(p.gain) + L", " + vol::decibels(p.gain);
+        else how = p.why;
+    }
+    SetWindowTextW(st->reading, reading.c_str());
+    SetWindowTextW(st->how, how.c_str());
+    EnableWindow(st->ok, usable);
+}
+
+static LRESULT CALLBACK VolumeProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    auto* st = (VolumeState*)GetWindowLongPtrW(h, GWLP_USERDATA);
+    switch (m) {
+    case WM_COMMAND:
+        if (st && (HWND)l == st->edit && HIWORD(w) == EN_CHANGE) { volumeUpdate(st); return 0; }
+        if (LOWORD(w) == IDOK && st) {
+            wchar_t buf[128]; GetWindowTextW(st->edit, buf, 128);
+            if (buf != st->shown) {
+                const vol::Parsed p = vol::parse(buf);
+                if (!p.ok) { MessageBeep(MB_ICONWARNING); return 0; }   // Enter while unreadable
+                st->ctx->gain = p.gain;
+            }
+            st->accepted = true; DestroyWindow(h); return 0;
+        }
+        if (LOWORD(w) == IDCANCEL) { DestroyWindow(h); return 0; }
+        break;
+    case WM_CLOSE: DestroyWindow(h); return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+bool volume(HWND parent, VolumeContext& ctx) {
+    static bool reg = false;
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    if (!reg) {
+        WNDCLASSW wc{}; wc.lpfnWndProc = VolumeProc; wc.hInstance = hInst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"ACE_Volume"; RegisterClassW(&wc); reg = true;
+    }
+    static const wchar_t* kLabel = L"Volume:";
+    VolumeState st; st.ctx = &ctx; st.shown = vol::percent(ctx.gain);
+    DlgUI ui(parent);
+    ScopeLine scope(ctx.scopeLabel);
+
+    // The reading beside the box is sized for its longest form, so it never wraps
+    // or clips as the text changes. The how-to line under it is given two lines at
+    // least, which every refusal parse() can give fits in.
+    const int labelW = ui.textW(kLabel) + ui.S(8);
+    const int editW = ui.S(100);
+    const int readW = ui.textW(L"= 1600%, +24.1 dB (as now)") + ui.S(8);
+    int contentW = std::max(ui.S(380), labelW + editW + ui.S(10) + readW);
+    scope.widen(ui, contentW);
+    scope.measure(ui, contentW);
+    const int howH = std::max((int)ui.measure(kVolumeHow, contentW).cy, ui.lineH * 2);
+    const int noteH = ctx.note.empty() ? 0 : (int)ui.measure(ctx.note.c_str(), contentW).cy;
+    const int bw = ui.btnW(L"Cancel"), bh = ui.btnH(), eh = ui.editH();
+    const int clientH = ui.margin + scope.step(ui) + eh + ui.S(12) + howH +
+                        (noteH ? ui.S(8) + noteH : 0) + ui.S(18) + bh + ui.margin;
+    HWND h = ui.create(L"ACE_Volume", ctx.title.c_str(), parent, ui.margin * 2 + contentW, clientH);
+    SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
+
+    int y = ui.margin;
+    scope.build(ui, y, contentW);
+    ui.rowLabel(kLabel, ui.margin, y, labelW, eh);
+    st.edit = ui.edit(st.shown.c_str(), ui.margin + labelW, y, editW);
+    st.reading = ui.label(L"", ui.margin + labelW + editW + ui.S(10), y + (eh - ui.lineH) / 2,
+                          contentW - labelW - editW - ui.S(10), ui.lineH, SS_NOPREFIX);
+    y += eh + ui.S(12);
+    st.how = ui.label(kVolumeHow, ui.margin, y, contentW, howH, SS_NOPREFIX);
+    y += howH;
+    // SS_NOPREFIX: the note may quote a clip's or track's name, and an & in it is a
+    // character, not a mnemonic.
+    if (noteH) { y += ui.S(8); ui.label(ctx.note.c_str(), ui.margin, y, contentW, noteH, SS_NOPREFIX); y += noteH; }
+    y += ui.S(18);
+    const int right = ui.margin + contentW;
+    st.ok = ui.button(L"OK", right - bw * 2 - ui.S(8), y, bw, bh, IDOK, true);
+    ui.button(L"Cancel", right - bw, y, bw, bh, IDCANCEL);
+    volumeUpdate(&st);
+    SendMessageW(st.edit, EM_SETSEL, 0, -1);
+    SetFocus(st.edit);
+
+    runModal(h, parent);
+    return st.accepted;
 }
 
 // ------------------------------------------------------------------ history

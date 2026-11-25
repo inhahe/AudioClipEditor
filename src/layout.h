@@ -84,47 +84,48 @@ inline FlowedRow flowButtons(const std::vector<int>& widths, int left, int top,
     return f;
 }
 
-// The main transport bar is not a plain flow: it is three groups, and the last
-// one hugs the right edge (Scale slider, Undo, Redo, History), which is where
-// the eye expects it and where it has always been. What it shares with
-// flowButtons is the rule that nothing may run off the edge -- a clipped
-// control is an unusable one, and the position/length readout in the middle
-// group is the one thing on this bar with no menu equivalent, so it may not be
-// the thing that gets cut. (It was: before the History button existed the bar
-// happened to fit, and adding a fourth right-hand button pushed "0:00.00 /
-// 0:20.00" off the edge mid-digit at the default window size.)
+// The main transport bar is not a plain flow: it is four groups -- the buttons
+// (Add Files, Add Track, Play All, Stop), the mix volume, the position/length
+// readout, and the history group (Scale slider, Undo, Redo, History) -- and the
+// last one hugs the right edge, which is where the eye expects it and where it has
+// always been. What it shares with flowButtons is the rule that nothing may run
+// off the edge -- a clipped control is an unusable one, and the readout is the one
+// thing on this bar with no menu equivalent, so it may not be the thing that gets
+// cut. (It was: before the History button existed the bar happened to fit, and
+// adding a fourth right-hand button pushed "0:00.00 / 0:20.00" off the edge
+// mid-digit at the default window size.)
 //
 // So the groups are assigned to rows greedily: each one stays on the current
-// row if it fits after what is already there, and drops to a new row if it
-// doesn't. The left group is always first on row 0; the right group is always
-// right-aligned on whatever row it lands on; the middle group starts after the
-// left group when they share a row and at the left margin when it has wrapped.
+// row if it fits after what is already there, and drops to a new row, at the left
+// margin, if it doesn't. The buttons are always first on row 0; the history group
+// is always right-aligned on whatever row it lands on.
 struct TransportFlow {
-    int midX = 0;        // left edge of the middle group
-    int midRow = 0;      // 0-based row index of the middle group
+    int mixX = 0;        // left edge of the mix volume group
+    int mixRow = 0;      // 0-based row index of the mix volume group
+    int midX = 0;        // left edge of the readout
+    int midRow = 0;      // ditto for its row
     int rightX = 0;      // left edge of the right-aligned group
     int rightRow = 0;    // ditto for its row
     int rows = 1;
 };
 
-inline TransportFlow flowTransport(int width, int margin, int gap,
-                                   int leftW, int midGap, int midW, int rightW) {
+inline TransportFlow flowTransport(int width, int margin, int gap, int leftW,
+                                   int mixGap, int mixW, int midGap, int midW, int rightW) {
     TransportFlow f;
     const int limit = width - margin;      // nothing may extend past this
     int row = 0;
     int used = margin + leftW;             // rightmost x occupied on the current row
 
-    f.midX = used + midGap;
     // Never wrap off an empty row: a group wider than the whole bar has to go
     // somewhere, and a fresh row would not make it fit either.
-    if (f.midX + midW > limit && leftW > 0) {
-        row = 1;
-        f.midX = margin;
-        used = margin + midW;
-    } else {
-        used = f.midX + midW;
-    }
-    f.midRow = row;
+    auto follow = [&](int groupGap, int w, int& x, int& r) {
+        x = used + groupGap;
+        if (x + w > limit && used > margin) { ++row; x = margin; }
+        r = row;
+        used = x + w;
+    };
+    follow(mixGap, mixW, f.mixX, f.mixRow);
+    follow(midGap, midW, f.midX, f.midRow);
 
     // Right-aligned, but never off the left edge: on an absurdly narrow window
     // the group starts at the margin and the outermost button is the one that
@@ -136,6 +137,44 @@ inline TransportFlow flowTransport(int width, int margin, int gap,
 
     f.rows = row + 1;
     return f;
+}
+
+// The main transport bar's measurements at UI scale `sc` (S(v) = v * sc, rounded,
+// as App::S does): one definition, read by App::layoutTransport to place the bar and
+// by the selftest to check how it wraps and that its labels fit. The test used to
+// keep a copy of these numbers, and the copy drifted -- History grew by 26 px and
+// the test went on checking the old width.
+struct TransportMetrics {
+    int y0 = 0, h = 0;                  // top of row 0, and every row's height
+    int gap = 0, margin = 0;            // between controls, and at the bar's ends
+    // The buttons: + Add Files, + Add Track, (playGap) Play All, Stop.
+    int addW = 0, trackW = 0, playGap = 0, playW = 0, stopW = 0;
+    // The mix volume: caption, (capGap) slider, (pctGap) readout.
+    int mixGap = 0, mixLabW = 0, capGap = 0, mixSliderW = 0, pctGap = 0, mixPctW = 0;
+    int timeGap = 0, timeW = 0;         // the readout: wide enough for "12:34.56  /  12:34.56"
+    // The history group: Scale caption, (capGap) slider, (undoGap) Undo, Redo, History.
+    int scaleLabW = 0, zoomW = 0, undoGap = 0, undoW = 0, redoW = 0, historyW = 0;
+    int sliderH = 0;                    // a slider's height, centred on its row
+    // Each group's whole width, as flowTransport takes it.
+    int leftW = 0, mixW = 0, rightW = 0;
+};
+
+inline TransportMetrics transportMetrics(float sc) {
+    auto S = [sc](int v) { return (int)(v * sc + 0.5f); };
+    TransportMetrics m;
+    m.y0 = S(12); m.h = S(38); m.gap = S(8); m.margin = S(12);
+    m.addW = S(96); m.trackW = S(96); m.playGap = m.gap + S(16); m.playW = S(140); m.stopW = S(70);
+    m.mixGap = S(20); m.mixLabW = S(66); m.capGap = S(4); m.mixSliderW = S(100);
+    m.pctGap = S(6); m.mixPctW = S(40);
+    m.timeGap = S(16); m.timeW = S(190);
+    m.scaleLabW = S(46); m.zoomW = S(120); m.undoGap = S(12);
+    m.undoW = S(70); m.redoW = S(70); m.historyW = S(118);
+    m.sliderH = S(14);
+    m.leftW = m.addW + m.gap + m.trackW + m.playGap + m.playW + m.gap + m.stopW;
+    m.mixW = m.mixLabW + m.capGap + m.mixSliderW + m.pctGap + m.mixPctW;
+    m.rightW = m.scaleLabW + m.capGap + m.zoomW + m.undoGap +
+               m.undoW + m.gap + m.redoW + m.gap + m.historyW;
+    return m;
 }
 
 // ---------------------------------------------------------------- scrollbars

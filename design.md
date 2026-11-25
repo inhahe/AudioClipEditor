@@ -11,17 +11,18 @@ sync with behavior changes.
 | File | Role |
 |---|---|
 | `audio_buffer.h` | `AudioBuffer` (interleaved float PCM, `sampleRate`/`channels`/`samples`), `AudioBufferPtr` (`shared_ptr`), `sliceBuffer` (the one range copy that crop, new clip, export and split-out all use), `PeakCache` min/max bucket envelope for waveform drawing |
-| `model.h` | `Clip` (id, name, `buffer` = its own audio, `eq` = its timbre EQ curve and `eqBuffer` the audio through it, `heard()`, peaks of what is heard, gain, **timestamp**), `ClipEq`, `Track` (id, name, gain, placed clips, plus the pure lane arithmetic `gapBefore`/`ripple`/`overlaps`), `PlacedClip` (clipId + start frame), `Project` (library order = display order) |
+| `model.h` | `Clip` (id, name, `buffer` = its own audio, `eq` = its timbre EQ curve and `eqBuffer` the audio through it, `heard()`, peaks of what is heard, gain, **timestamp**), `ClipEq`, `Track` (id, name, gain, placed clips, plus the pure lane arithmetic `gapBefore`/`ripple`/`overlaps`), `PlacedClip` (clipId + start frame), `Project` (library order = display order; `mixGain`, the mix volume) |
 | `decoder.{h,cpp}` | MF Source Reader → stereo float at the project rate |
 | `encoder.{h,cpp}` | WAV writer (manual RIFF; 16/24-bit PCM, 32-bit float) + MF Sink Writer (MP3/AAC/WMA); output-rate resampling |
-| `engine.{h,cpp}` | WASAPI shared-mode render thread, which owns the device's COM objects in its own apartment (opens, renders, closes); `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix); linear resample project→device rate on the audio thread |
+| `engine.{h,cpp}` | WASAPI shared-mode render thread, which owns the device's COM objects in its own apartment (opens, renders, closes); `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix), whose volumes can be changed while they play (`LiveGain`, ramped across a block); linear resample project→device rate on the audio thread |
 | `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker; `chain()` flattens the walkable line for the History window and `gotoNode()` jumps to any point on it; `allNodes()`/`rebuild()` round-trip the whole tree through the project file, `hasSnapshot` marks steps stored by name only, and `~UndoNode` tears down iteratively so a long history can't overflow the stack |
 | `document.{h,cpp}` | Owns `Project` + undo tree + `ViewState`; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`); `history()`/`gotoHistory()` expose the step list |
 | `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware K-weighted loudness, three noise-reduction algorithms, voice isolation, LTAS timbre matching, manual region edits (see below) |
 | `match.{h,cpp}` | Making clips alike, shared by the volume and timbre matchers: which clips a command involves (`ClipSet` — a track, all tracks, the library, or one clip to the rest), what they are matched to, and each matcher's compute-and-measure pass (`matchVolume`, `matchTimbre`); pure, so the selftest reaches it |
 | `waveform.{h,cpp}` | GDI oscilloscope: per-column min/max envelope (one `PolyPolyline`) zoomed out, per-sample trace zoomed in |
-| `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner, remove-non-voice, match-timbre and match-volume options, history list, file/project pickers |
-| `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`), toolbar row wrapping (`flowButtons` for the editor toolbar, `flowTransport` for the main transport bar), scrollbar sizing (`scrollBarsNeeded`, `scrollThumb`, `scrollFromThumb`), `scrollToReveal`, and the volume slider's scale (`volumeToFrac` / `fracToVolume`: 0–100% linear on the left half, 100% → +24 dB on the right with dB rising as the square of the distance, so every volume a clip or track can have — including what volume matching sets — has a position, and 100–200% keeps half of that side for fine work) |
+| `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner, remove-non-voice, match-timbre and match-volume options, a volume typed in (`volume`), history list, file/project pickers |
+| `volume.h` | Pure: a volume as text — the readouts' `percent` and `decibels`, and `parse` for what is typed into the volume box (a percentage or dB, refused past 0% … +24 dB) |
+| `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`), toolbar row wrapping (`flowButtons` for the editor toolbar, `flowTransport` for the main transport bar, whose widths are `transportMetrics`), scrollbar sizing (`scrollBarsNeeded`, `scrollThumb`, `scrollFromThumb`), `scrollToReveal`, and the volume slider's scale (`volumeToFrac` / `fracToVolume`: 0–100% linear on the left half, 100% → +24 dB on the right with dB rising as the square of the distance, so every volume a clip or track can have — including what volume matching sets — has a position, and 100–200% keeps half of that side for fine work) |
 | `transport.h` | Pure play/pause decision logic, likewise split out to be testable: `decide(State, Press)` → pause / resume / restart-from-where, for both the single combined control and the editor's labelled button pair |
 | `selhistory.h` | Pure undo/redo state machine for the waveform selection, kept out of the document's snapshot tree; a `base` token ties the stack to a point in the document history |
 | `snap.h` | Pure directional-snapping state machine for dragging clips along a lane: pulls only when moving *away* from a target, so snapping stays convenient without making near-miss positions unreachable |
@@ -860,10 +861,10 @@ correct match still sound wrong:
 
 - **Held at a limit.** A clip needing more than −26 … +24 dB is usually different in
   some other way too; the box names it and says to check it belongs.
-- **Over full scale.** Playback and export clamp at ±1 (`renderMix`, the engine, the
-  encoder), so raising a quiet but peaky clip can make it distort with nothing on screen
-  to show it. A clip is heard two ways — on its own (its card, *Export clip*) at its own
-  volume, and in the mix at that times its loudest unmuted track's — so both are checked,
+- **Over full scale.** Playback and export clamp at ±1 (the engine, the encoder), so
+  raising a quiet but peaky clip can make it distort with nothing on screen to show it. A
+  clip is heard two ways — on its own (its card, *Export clip*) at its own volume, and in
+  the mix at that times its loudest unmuted track's times the mix volume — so both are checked,
   and the box says which one clips (`OverFullScale::inMix`) and how far over. Only clips
   the match turned **up** are checked: one it left alone or lowered was not made to clip
   by it, and saying "now peaks over" about it would blame the match.
@@ -960,6 +961,14 @@ than by reading on from the history trailer: a history that can't be parsed leav
 the position unknown, and that must cost only the history's EQs, not the live
 clips'. (Offsets are 64-bit; project files of float audio pass 2 GB.)
 
+There are two such sections now — this one and the mix volume's (`ACMX`, see *Volume:
+clip, track and mix*) — and the reader walks their footers back from the end of the
+file: the last 12 bytes are the last section's footer, and the 12 bytes before a
+section's start are the footer of the one in front of it, if any. A footer whose
+offset doesn't hold the same tag, or a tag it doesn't know, ends the walk; each tag is
+taken once. `ACMX` is written *before* `ACEQ`, so the EQ footer stays in the last 12
+bytes, where builds from before the walk look for it.
+
 Projects matched before this (0.36.x and earlier) have their EQ baked into the
 audio; that audio is simply each clip's own audio now, so it stays as it was.
 
@@ -1015,6 +1024,67 @@ box says that instead, because re-running the same match with the same settings 
 otherwise the obvious next thing to try and it cannot possibly help. The cost is one
 extra profiling pass over the audio, which is worth it: without the number,
 distinguishing the two cases is guesswork.
+
+## Volume: clip, track and mix
+
+Three volumes, all linear gains held to 0 … `kMaxClipGain` (+24 dB), all
+non-destructive settings rather than rewritten audio:
+
+| Volume | Where it is | Applies to |
+|---|---|---|
+| **Clip** (`Clip::gain`) | the slider and % along the bottom of its card | the clip wherever it plays: its card, *Export clip*, and every placement of it — a placement has no volume of its own |
+| **Track** (`Track::gain`) | the slider in its header, under a "Volume 100%" line | its placements, in the mix |
+| **Mix** (`Project::mixGain`) | **Mix volume** on the toolbar, by Play All | the whole mix — Play All and *Export Mixdown* — on top of the other two |
+
+In the mix a placement is heard at clip × track × mix (`App::segmentGain` for
+playback, `Document::renderMix` for the file, the same product in the same order).
+The mix volume deliberately does **not** reach a clip heard on its own: the card's
+play button and *Export clip* play the clip at its own volume, which is what keeps
+"the card plays what Export clip writes" true; a mix volume there would be a second,
+hidden clip volume.
+
+**Setting one.** Three ways, each reaching the same Document setter
+(`setClipGain`, `setTrackGain`, `setMixGain`), which clamps, and records one undo step
+named for the History window ("Set the volume of 'take 2' to 150%") — or none, and
+returns false, when the volume is already that. That last rule is what lets a click
+on a slider that doesn't move it, or OK on a volume typed in unchanged, leave nothing
+in the history.
+
+- **Drag the slider.** The drag moves the volume live (so it is heard and seen as it
+  goes); `App::finishVolumeDrag` then puts the starting volume back and sets the final
+  one through the setter, so a drag is one step. Esc puts it back; Ctrl+Z mid-drag
+  does the same, since the drag is the edit to take back and isn't a step yet. A
+  project replaced mid-drag (another copy handing one over) drops the drag *without*
+  putting anything back: the clip, track or mix it would write to is the new
+  project's.
+- **Type it in** (`dlg::volume`): right-click a card → *Set volume (now 150%)…*, a
+  placed clip → *Set this clip's volume…*, a track header → *Set track volume…* or
+  *Mix volume — all tracks…*, or *Track ▸ Mix volume…* — or double-click the % readout
+  beside a slider (the track's "Volume" line, the toolbar's %). `vol::parse` reads a
+  percentage or decibels — a bare number is a percentage, as the readouts are; a
+  signed one is dB, since only a change has a sign — and refuses rather than clamps
+  past the limits. The box says beside it what it reads the text as, in both units,
+  and OK stays disabled while it can't be read, with the reason where the how-to
+  line was. Text left as shown leaves the volume exactly as it was, so opening the
+  box on a matched 123.4% and pressing OK doesn't round it to the 123% displayed.
+  Each box says what else sets the level heard, since in the mix three volumes
+  multiply and only one is being set.
+- **Volume matching** sets clip volumes (see *Matching clips to each other*); its
+  "peaks over full scale in the mix" check includes the track's and the mix volume.
+
+**Heard while playing.** A volume changed by any of these reaches the playing (or
+paused) source within a tick, without re-arming it — see *Timeline playback*.
+
+**Saved** as a tagged section of its own (`ACMX`, version 1: the live mix volume,
+then one per history node written, 100% for a node stored by name only), found the
+way the EQ section is (see *The EQ is a setting on the clip*). Written only when some
+state has a mix volume other than 100%, so such projects stay byte-for-byte what
+earlier builds wrote; an earlier build opens a project that has one at 100%. A
+section whose length disagrees with its own count is ignored whole: misread, a volume
+could be anything, and 0 would silence the project.
+
+**Export Mixdown** warns when the mix goes past full scale, by how much, and what mix
+volume would fit (see *Getting audio back out*).
 
 ## Applying an effect to the selection only
 
@@ -1087,10 +1157,11 @@ selection)" when the run was narrowed.
 
 ## Transport bar layout (`App::layoutTransport`, `layout::flowTransport`)
 
-The bar is three groups: transport actions from the left (**+ Add Files**,
-**+ Add Track**, **▶ Play All**, **■ Stop**), the position/length readout in the
-middle, and the history group pinned to the right (**Scale** slider, **Undo**,
-**Redo**, **≡ History**). Their positions used to be computed independently from
+The bar is four groups: transport actions from the left (**+ Add Files**,
+**+ Add Track**, **▶ Play All**, **■ Stop**), then the **Mix volume** (caption,
+slider, readout — by Play All because it is the volume of what Play All plays) and
+the position/length readout, and the history group pinned to the right (**Scale**
+slider, **Undo**, **Redo**, **≡ History**). Their positions used to be computed independently from
 the two edges, which works only as long as they happen not to meet. Adding the
 History button broke that: at the old default 1500 px window on a 150% DPI
 display the client is 1478 px while the content wants ≈1653, and the readout —
@@ -1099,9 +1170,13 @@ drawn with `DT_LEFT` and no ellipsis — was silently cut off mid-digit
 everything else is a button whose label fits its own box.
 
 `layout::flowTransport` assigns each group a **row** greedily: the left group is
-always first on row 0; the middle group stays on the current row if it fits after
-it and drops to a new row at the left margin if it doesn't; the right group is
-right-aligned on whatever row it lands on, dropping again if that would collide.
+always first on row 0; the mix volume and then the readout each stay on the current
+row if they fit after what is there and drop to a new row at the left margin if they
+don't; the right group is right-aligned on whatever row it lands on, dropping again
+if that would collide. The widths are `layout::transportMetrics(scale)`, read by
+both `layoutTransport` and the selftest: the test used to keep its own copy of the
+numbers, which drifted (History grew 26 px; the test went on checking the old width,
+and so went on claiming one row at 150% after the bar had become two).
 `layoutTransport` turns those rows into rects and publishes the total height as
 `App::transportH`, which `computeLayout()` reads **before** sizing anything else
 — the tracks pane and library start under whatever height the bar came to. The
@@ -1113,14 +1188,14 @@ runs off the edge is unreachable, and a number that runs off the edge is
 misinformation, so the bar grows downwards instead. It costs pixels; clipping
 costs meaning. Keeping the row assignment in `layout.h` lets the selftest sweep
 every plausible client width at 100/125/150/200% DPI and assert that the readout
-is never clipped, the history group never starts off the left edge, and three
-rows is the worst case.
+and the mix volume are never clipped, the history group never starts off the left
+edge, and a row per group is the worst case.
 
-The **default window is 1700×950** (`WinMain`) rather than 1500×950 so that the
-out-of-the-box toolbar is one row at 150% DPI — wrapping is the fallback, not the
-normal state. (Window size and position are persisted in
-`HKCU\Software\AudioClipEditor\WindowPlacement`, so the default only applies on a
-first run.)
+The **default window is 1700×950** (`WinMain`). At 100% DPI the toolbar is one row
+there; at 150% the four groups need about 2050 px, so the history group takes a
+second row and everything else keeps the first. (Window size and position are
+persisted in `HKCU\Software\AudioClipEditor\WindowPlacement`, so the default only
+applies on a first run.)
 
 ## Timeline: scrolling a long arrangement
 
@@ -1464,7 +1539,12 @@ sort-by-time mtime). The edited audio therefore lives solely in the `.acep`,
 which embeds raw float samples — so the only ways out are:
 
 - **`App::exportMix()`** — *File → Export Mixdown*: `Document::renderMix()` of all
-  tracks, defaults to the project rate and stereo.
+  tracks at the mix volume, defaults to the project rate and stereo. `renderMix`
+  does not clamp, so the peak the encoder is handed (`encodedPeak`, shared with the
+  clip export below) can be measured; past full scale the user is told how far, and
+  what mix volume would fit — rounded down to a whole percent so the number named
+  really does — since the mix volume is the one control that brings everything back
+  under at once, whatever took it over.
 - **`App::exportClipAudio(clipId, selectionOnly)`** — clip menu *Export clip to
   file…* / *Export selection to file…* (`IDM_EXPORTCLIP` / `IDM_EXPORTSEL`, the
   latter greyed via the same `sel` flag as the other selection entries). Writes
@@ -1608,13 +1688,26 @@ construction.
 The cost of a snapshot is that it goes stale the instant the arrangement changes,
 and a stale snapshot is *inaudibly* wrong — it plays a perfectly plausible
 arrangement that simply isn't the one on screen. `App` therefore records
-**`armedFingerprint`**: an FNV-1a hash of exactly the inputs the snapshot is
-built from (per track: id, mute, gain; per placed clip: clip id, start, length,
-the clip's gain and buffer pointer and frame count; then the total length). It is
+**`armedFingerprint`**: an FNV-1a hash of exactly the inputs the snapshot's
+*arrangement* is built from (per track: id, mute; per placed clip: clip id, start,
+length, the clip's buffer pointer and frame count; then the total length). It is
 derived rather than maintained, so no mutation site has to remember to invalidate
 anything — which matters, since the arrangement can change from clip drags,
-ripples, mutes, gain changes, deletions, destructive edits, undo, redo and
-history jumps.
+ripples, mutes, deletions, destructive edits, undo, redo and history jumps.
+
+**Volumes are not in it.** Each segment's gain (clip × track × mix,
+`App::segmentGain`, the product `renderMix` applies too) is a `LiveGain` the UI
+can set while the source plays: `syncPlaybackGains` walks the placements in the
+same order the segments were built (`forEachTimelineSegment`, the one walk both
+use) and hands each its volume — from every timer tick, from each step of a slider
+drag, and before a resume. Re-arming for a volume would restart from the *heard*
+position on every step of a drag, repeating the audio already queued each time. A
+`LiveGain` ramps a change across the next block rendered, since a step is a click
+and a dragged slider is a run of steps; a segment not sounding in that block takes
+the new volume at once. The gains are only handed over while the fingerprint still
+matches — after an arrangement change segment *i* may no longer be the walk's *i*,
+and the re-arm builds them fresh anyway. The preview's `BufferSource` gets its
+clip's volume the same way (`armedPreview`, for the clip it was armed for).
 
 Two places consult it:
 
@@ -2045,14 +2138,25 @@ in view doesn't move the position, one past either edge comes in with its margin
 one too wide to fit lines up its start, both ends clamp to the scroll range, and
 a viewport of zero or one smaller than two margins degrades sanely), the
 **transport bar wrapping**
-(`layout::flowTransport`: one row at the default window at both 100% and 150%
-DPI, the history group wrapping first, the readout wrapping rather than being
+(`layout::flowTransport` over `layout::transportMetrics`, the widths the bar is
+drawn with: one row at the default window at 100% DPI and only the history group
+wrapping at 150%, the readout and then the mix volume wrapping rather than being
 cut off and restarting at the left margin — plus a sweep of every client width
-from 420 to 2600 px at 100/125/150/200% DPI asserting the readout is never
-clipped, the history group never starts off the left edge, and three rows is the
-worst case — and a text-measurement check that every transport button label fits
-its hand-sized box, including *≡ History* and both *Play All* / *Pause*
-alternates),
+from 420 to 2600 px at 100/125/150/200% DPI asserting neither the readout nor the
+mix volume is ever clipped, the history group never starts off the left edge, and
+a row per group is the worst case — and a text-measurement check that every
+transport button label fits its hand-sized box, including *≡ History* beside its
+badge and both *Play All* / *Pause* alternates, and the *Mix volume* caption and
+its widest readout theirs),
+**volumes** (`vol::parse` reads percentages and decibels and refuses what it
+can't, a readout typed back in reads as itself; a volume set to what it already is
+records no step; the mixdown is at clip × track × mix and unclamped while a clip's
+own export ignores the mix volume; the mix volume round-trips through the project
+file and its history, beside the EQ section that stays last, is absent from a file
+that never needed it, and a damaged section costs only it; a playing preview and a
+playing timeline segment take a new volume ramped across one block, and a segment
+not yet sounding takes it at once — each of these was checked to fail with the fix
+it guards undone),
 **`clampSelection`** (a selection survives removing an unrelated placement or
 deleting a different clip — the reported bug — is clamped rather than dropped
 when it merely runs past a shortened buffer, and is dropped only when its clip is

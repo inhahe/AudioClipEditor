@@ -159,13 +159,27 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   played as silence, an edit made while it's running is heard straight away, and
   pausing, rearranging and then playing again picks up the new arrangement rather
   than the one you paused.
-- **Per-clip and per-track volume.** Every card and every track header has a
-  volume slider: silence at the left end, 100% in the middle (it snaps there),
-  and up to +24 dB (1600%) at the right end, with 100–200% taking the first half of
-  the right side so fine adjustments stay fine. Every volume a clip can have —
-  including what *Match volume* sets — shows on the slider, so you can always
-  adjust it by hand. Gain is applied live to preview, timeline mixing, and export,
-  and each change is a single undo step.
+- **Clip, track and mix volume.** Three volumes, each with a slider and its value
+  beside it:
+  - a **clip's**, along the bottom of its card — it applies wherever the clip plays:
+    its card, *Export clip*, and every place it is on the timeline;
+  - a **track's**, in its header under the *Volume* line;
+  - the **mix volume**, on the toolbar by *Play All* — the whole mix, *Play All* and
+    *Export Mixdown*, on top of the track and clip volumes. A clip played on its card
+    or exported on its own isn't affected.
+
+  In the mix a clip is heard at its volume × its track's × the mix volume. Each
+  slider runs from silence at the left end through 100% in the middle (it snaps
+  there) to +24 dB (1600%) at the right, with 100–200% taking the first half of the
+  right side so fine adjustments stay fine; every volume — including what *Match
+  volume* sets — has a place on it. To **type a volume in** exactly, as a percentage
+  (`150%`) or in decibels (`+3.5 dB`, `-6 dB`), double-click the % beside a slider, or
+  right-click: a card → *Set volume…*, a placed clip → *Set this clip's volume…*, a
+  track header → *Set track volume…* or *Mix volume…*, or *Track ▸ Mix volume…*. Volumes
+  change **while playing**, so you can set them by ear. Each change is one undo step
+  (a click that leaves a slider where it was is none), and Esc during a drag puts the
+  volume back. The mix volume is saved with the project; *Export Mixdown* tells you
+  if the mix clips, and what mix volume would fit.
 - **Voice cleaner (noise reduction).** Right-click → *Voice cleaner* runs an STFT
   denoiser to strip steady background noise. Three **algorithms**: automatic
   **spectral subtraction** or **Wiener filter** (noise floor estimated from the
@@ -394,10 +408,12 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   disk is overwritten: a name that's taken steps to `… (2)`, `… (3)`, and a toast
   shows where the file landed. It's a single undo step, and it only asks a question
   when the clip is on the timeline — those placements go with it.
-- **Export the mixdown.** *File → Export Mixdown* renders all tracks together and
-  saves through the same audio dialog — pick **format, sample rate, bit depth**
-  (16/24-bit PCM or 32-bit float for WAV), **bitrate** (compressed formats), and
-  mono/stereo. The mix is resampled to the chosen output rate on the way out.
+- **Export the mixdown.** *File → Export Mixdown* renders all tracks together, at
+  the mix volume, and saves through the same audio dialog — pick **format, sample
+  rate, bit depth** (16/24-bit PCM or 32-bit float for WAV), **bitrate** (compressed
+  formats), and mono/stereo. The mix is resampled to the chosen output rate on the
+  way out. If it goes past full scale you're told by how much — those peaks are
+  clipped in the file — and what mix volume would fit.
 - **Mixed source rates are unified.** Clips can come from files of any sample rate
   or bit depth; each is resampled to the project's internal rate on load. The
   project runs at **≥ 48 kHz internally** and the engine resamples to the audio
@@ -445,11 +461,13 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Crop to a selection | **Crop** button on the card while a selection is active |
 | Make a new clip from a selection | **New clip** button on the card, or right-click the card → *New clip from selection* |
 | Keep only the selection, as a file | right-click the card → *Split selection out to a WAV file (replaces this clip)* — new clip + WAV + the old clip gone, no dialogs, one undo step |
-| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, export clip / selection to a file, split the selection out to a file, voice cleaner, remove non-voice, match timbre, match volume, rename, delete, add to a track |
+| Clip actions | **right-click a card**: play selection, save selection as new clip, crop, export clip / selection to a file, split the selection out to a file, voice cleaner, remove non-voice, match timbre, match volume, set volume, rename, delete, add to a track |
 | Rename a clip | right-click → Rename |
 | Reorder clips | drag a card by its title bar to a new spot in the library (caret shows the drop point) |
 | Sort clips | right-click the empty library area → *Sort clips by name* / *by time* |
 | Set clip / track volume | drag the volume slider on the card or track header |
+| Set the mix volume (all tracks) | drag the **Mix volume** slider on the toolbar |
+| Type a volume in (`150%`, `+3.5 dB`) | double-click the % beside a slider (a track's *Volume* line); or right-click a card → *Set volume…*, a placed clip → *Set this clip's volume…*, a track header → *Set track volume…* / *Mix volume…*; or *Track ▸ Mix volume…* |
 | Make clips equally loud | right-click a track header → *Match volume — this track…* / *— all tracks…*; a card → *Match volume ▸* (*This clip, to match the others* / *Clips on the timeline* / *All clips*); or a placed clip → *Match this clip's volume to the rest of the track…* |
 | Clean up noise | right-click a card → *Voice cleaner → This clip / All clips*, or right-click a track header → *Voice cleaner — this track* |
 | Remove bumps / shuffling (keep only voice) | right-click a card → *Remove non-voice → This clip / All clips*, or right-click a track header → *Remove non-voice — this track* |
@@ -461,7 +479,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | Get rid of a noise *Remove non-voice* won't touch | drag a selection over it, then right-click a card (or use the editor toolbar) → *Silence selection (keep timing)* / *Delete selection (close gap)* |
 | Capture a noise profile | select a noise-only stretch, then right-click → *Voice cleaner → Capture noise from selection* (or the **Get noise profile** button in the dialog); or *Capture noise from whole clip*; or the **Capture noise** button in the full-window editor |
 | Apply a saved noise capture | right-click a card → *Voice cleaner → Apply noise capture ▸* and pick a recent capture |
-| Track actions | **right-click a track header/lane**: voice-clean the track, remove non-voice, match timbre or volume (this track, or all tracks), rename, remove |
+| Track actions | **right-click a track header/lane**: voice-clean the track, remove non-voice, match timbre or volume (this track, or all tracks), set the track or mix volume, rename, remove |
 | Add a track | **+ Add Track** |
 | Place a clip on a track | drag a clip card up into a track lane (drops at any time offset), or right-click → **Add to “Track 1”** (**Add to track ▸** when there are several) |
 | Move a placed clip | drag it along the track — a live ghost shows where it will land (drag vertically to change tracks) |
@@ -498,13 +516,14 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 | `model.h` | `Clip`, `Track`, `PlacedClip`, `Project` |
 | `decoder.{h,cpp}` | Media Foundation Source Reader → stereo float at the device rate |
 | `encoder.{h,cpp}` | WAV (manual RIFF, 16/24-bit PCM or 32-bit float) + Media Foundation Sink Writer (MP3/AAC/WMA); resamples to the chosen output rate |
-| `engine.{h,cpp}` | WASAPI render engine; `BufferSource` (preview) + `TimelineSource` (mix all tracks); linear-resamples the project rate to the device rate on the audio thread |
+| `engine.{h,cpp}` | WASAPI render engine; `BufferSource` (preview) + `TimelineSource` (mix all tracks), whose volumes change while they play; linear-resamples the project rate to the device rate on the audio thread |
 | `undo.h` | Snapshot-based undo **tree** with branching redo; flattens to the step list the History window shows, and can jump to any step on it |
 | `document.{h,cpp}` | Owns the project + undo tree; every edit commits a snapshot |
 | `waveform.{h,cpp}` | GDI oscilloscope rendering: min/max envelope zoomed out, sample line zoomed in |
 | `dsp.{h,cpp}` | FFT, speech-aware K-weighted loudness, STFT noise reduction (spectral subtraction / Wiener / Audacity-style profile gate), voice isolation (non-speech removal), LTAS timbre matching, manual silence/delete edits |
 | `match.{h,cpp}` | Making clips alike, shared by *Match timbre* and *Match volume*: which clips a command covers, what they're matched to, and the before/after measurements |
-| `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, remove-non-voice options, match-timbre and match-volume options, history list, open/save file & project dialogs |
+| `dialogs.{h,cpp}` | Text prompt, export-options modal, voice-cleaner options, remove-non-voice options, match-timbre and match-volume options, typing a volume in, history list, open/save file & project dialogs |
+| `volume.h` | A volume as text: the % and dB readouts, and reading a typed volume |
 | `ui.cpp` | Main window: menu bar, layout, painting, hit-testing, all interaction |
 | `launch.h` | What a command line asks to open: the project, and audio files to add |
 | `placement.h` | How the main window first appears: as it was when last closed, or as a shortcut's *Run* setting asks |

@@ -117,8 +117,8 @@ constexpr float kMaxMatchGain = kMaxClipGain;
 struct OverFullScale {
     int index = -1;         // set index
     double db = 0.0;        // how far over, at the louder of the two ways it is heard
-    bool inMix = false;     // over in the mix too (at its loudest track's volume), not
-                            // only on its own -- its card, and Export clip
+    bool inMix = false;     // over in the mix too (at its loudest track's volume and the
+                            // mix volume), not only on its own -- its card, and Export clip
 };
 
 struct VolumeResult {

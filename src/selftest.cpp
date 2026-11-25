@@ -18,6 +18,7 @@
 #include "transport.h"
 #include "selhistory.h"
 #include "snap.h"
+#include "volume.h"
 #include "waveform.h"
 #include <windows.h>
 #include <objbase.h>
@@ -1822,80 +1823,85 @@ int runSelfTest() {
     // clipped -- checked here across a sweep of widths, because the failure only
     // shows up at whatever size the user happens to drag the window to.
     {
-        // Exactly the widths layoutTransport passes, scaled the way S() would.
-        struct TB3 { layout::TransportFlow f; int margin, timeW, leftW, rightW; };
+        // The widths layoutTransport uses, from the one place both read them.
+        struct TB4 { layout::TransportFlow f; layout::TransportMetrics m; };
         auto bar = [](float sc, int clientW) {
-            auto S = [&](int v) { return (int)(v * sc + 0.5f); };
-            const int gap = S(8), margin = S(12), timeGap = S(16), timeW = S(190);
-            const int leftW = S(96) + gap + S(96) + S(16) + S(140) + gap + S(70);
-            const int rightW = S(46) + S(4) + S(120) + S(12) +
-                               S(70) + gap + S(70) + gap + S(92);
-            TB3 t{ layout::flowTransport(clientW, margin, gap, leftW, timeGap, timeW, rightW),
-                   margin, timeW, leftW, rightW };
+            const layout::TransportMetrics m = layout::transportMetrics(sc);
+            TB4 t{ layout::flowTransport(clientW, m.margin, m.gap, m.leftW, m.mixGap, m.mixW,
+                                         m.timeGap, m.timeW, m.rightW), m };
             return t;
         };
 
-        // The default window is 1700x950, i.e. a 1678 px client at 150% DPI --
-        // deliberately wide enough that the out-of-the-box toolbar is one row.
+        // The default window is 1700x950, i.e. a 1678 px client at 150% DPI. Four
+        // groups don't fit on one row there, so the history group goes below and
+        // the buttons, the mix volume and the readout keep the top row.
         auto def150 = bar(1.5f, 1678);
-        check(def150.f.rows == 1, L"transport bar: one row at the default window, 150% DPI",
-              std::to_wstring(def150.f.rows));
-        // 100% DPI has even more room to spare.
-        check(bar(1.0f, 1478).f.rows == 1, L"transport bar: one row at 100% DPI");
-        // Narrower: the history group drops below, the readout keeps its place.
-        auto mid150 = bar(1.5f, 1178);
-        check(mid150.f.rows == 2 && mid150.f.midRow == 0 && mid150.f.rightRow == 1,
-              L"transport bar: history group wraps first",
-              std::to_wstring(mid150.f.rows) + L" rows, mid on " +
-                  std::to_wstring(mid150.f.midRow));
-        // Narrower still: the readout wraps too rather than being clipped, and
-        // lands at the left margin of its own row.
-        auto narrow = bar(1.5f, 878);
-        check(narrow.f.rows == 3 && narrow.f.midRow == 1 && narrow.f.rightRow == 2,
-              L"transport bar: readout wraps rather than being cut off",
-              std::to_wstring(narrow.f.rows) + L" rows, mid on " +
-                  std::to_wstring(narrow.f.midRow));
-        check(narrow.f.midX == (int)(12 * 1.5f + 0.5f),
-              L"transport bar: a wrapped readout starts at the left margin",
-              std::to_wstring(narrow.f.midX));
+        check(def150.f.rows == 2 && def150.f.mixRow == 0 && def150.f.midRow == 0 &&
+              def150.f.rightRow == 1,
+              L"transport bar: at the default window, 150% DPI, only the history group wraps",
+              std::to_wstring(def150.f.rows) + L" rows");
+        // At 100% DPI the default window holds all four on one row.
+        check(bar(1.0f, 1478).f.rows == 1, L"transport bar: one row at the default window, 100% DPI");
+        // Narrower: the readout drops too rather than being cut off, and lands at the
+        // left margin of its own row, with the history group beside it if it fits.
+        auto narrow = bar(1.5f, 1178);
+        check(narrow.f.mixRow == 0 && narrow.f.midRow == 1 &&
+              narrow.f.midX == (int)(12 * 1.5f + 0.5f),
+              L"transport bar: the readout wraps to the left margin rather than being cut off",
+              std::to_wstring(narrow.f.rows) + L" rows, readout on " +
+                  std::to_wstring(narrow.f.midRow) + L" at " + std::to_wstring(narrow.f.midX));
+        // Narrower still: the mix volume goes to a row of its own rather than off the edge.
+        auto narrower = bar(1.5f, 878);
+        check(narrower.f.mixRow == 1 && narrower.f.mixX == (int)(12 * 1.5f + 0.5f),
+              L"transport bar: the mix volume wraps rather than running off the edge",
+              std::to_wstring(narrower.f.rows) + L" rows, mix on " + std::to_wstring(narrower.f.mixRow));
 
         // The property, over every width the window can plausibly take: the
-        // readout always has its full width available, and the history group
-        // never starts left of the margin.
-        bool readoutFits = true, rightOnScreen = true, sane = true;
-        int worstW = 0;
+        // readout and the mix volume always have their full width available, and
+        // the history group never starts left of the margin.
+        bool readoutFits = true, mixFits = true, rightOnScreen = true, sane = true;
+        int worstW = 0, worstMixW = 0;
         for (float sc : { 1.0f, 1.25f, 1.5f, 2.0f }) {
             for (int w = 420; w <= 2600; w += 7) {
                 auto t = bar(sc, w);
-                const int limit = w - t.margin;
-                if (t.f.midX + t.timeW > limit && limit - t.margin >= t.timeW) {
+                const int limit = w - t.m.margin;
+                if (t.f.midX + t.m.timeW > limit && limit - t.m.margin >= t.m.timeW) {
                     readoutFits = false; worstW = w;
                 }
-                if (t.f.rightX < t.margin) rightOnScreen = false;
-                if (t.f.rows < 1 || t.f.rows > 3) sane = false;
+                if (t.f.mixX + t.m.mixW > limit && limit - t.m.margin >= t.m.mixW) {
+                    mixFits = false; worstMixW = w;
+                }
+                if (t.f.rightX < t.m.margin) rightOnScreen = false;
+                if (t.f.rows < 1 || t.f.rows > 4) sane = false;
             }
         }
         check(readoutFits, L"transport bar: the readout is never clipped at any width",
               L"failed at client width " + std::to_wstring(worstW));
+        check(mixFits, L"transport bar: the mix volume is never clipped at any width",
+              L"failed at client width " + std::to_wstring(worstMixW));
         check(rightOnScreen, L"transport bar: the history group never starts off the left edge");
-        check(sane, L"transport bar: never needs more than three rows");
+        check(sane, L"transport bar: never needs more than a row per group");
 
         // The transport buttons draw centred with no ellipsis, so a label wider
         // than its button is clipped at both ends. Same drift risk as the editor
         // toolbar above; History is the newest and the tightest.
         for (float sc : { 1.0f, 1.5f }) {
             auto S = [&](int v) { return (int)(v * sc + 0.5f); };
+            const layout::TransportMetrics m = layout::transportMetrics(sc);
             HDC sdc = GetDC(nullptr);
             HFONT f = CreateFontW(-S(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
                                   OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                   VARIABLE_PITCH, L"Segoe UI");
             HGDIOBJ of = SelectObject(sdc, f);
             struct TL { const wchar_t* text; int w; };
+            // History's button also carries the "steps undone" badge (at least S(26)
+            // wide, inset S(6), with S(2) before it), which takes its right end; the
+            // label, inset S(6) at the left, has to fit in what is left (paintTransport).
             const TL tls[] = {
-                { L"+ Add Files", S(96) }, { L"+ Add Track", S(96) },
-                { L"\u25A0 Stop", S(70) },
-                { L"\u21B6 Undo", S(70) }, { L"\u21B7 Redo", S(70) },
-                { L"\u2261 History", S(92) },
+                { L"+ Add Files", m.addW }, { L"+ Add Track", m.trackW },
+                { L"\u25A0 Stop", m.stopW },
+                { L"\u21B6 Undo", m.undoW }, { L"\u21B7 Redo", m.redoW },
+                { L"\u2261 History", m.historyW - S(6) - S(6) - S(26) - S(2) },
             };
             std::wstring worst; int worstOver = -100000;
             for (const TL& b : tls) {
@@ -1912,14 +1918,31 @@ int runSelfTest() {
             SelectObject(sdc, fb);
             for (const wchar_t* t : { L"\u25B6  Play All", L"\u275A\u275A  Pause" }) {
                 SIZE sz{}; GetTextExtentPoint32W(sdc, t, (int)wcslen(t), &sz);
-                const int over = sz.cx - S(140);
+                const int over = sz.cx - m.playW;
                 if (over > worstOver) { worstOver = over; worst = t; }
             }
-            SelectObject(sdc, of); DeleteObject(fb); DeleteObject(f); ReleaseDC(nullptr, sdc);
             check(worstOver <= -6,
                   std::wstring(L"transport bar: every button label fits at ") +
                       (sc == 1.0f ? L"100%" : L"150%") + L" DPI",
                   L"tightest \"" + worst + L"\" with " + std::to_wstring(-worstOver) + L" px spare");
+            // The captions and readouts are drawn in the small font, unclipped: the
+            // mix volume's caption, and its readout at its widest ("1600%").
+            HFONT fs = CreateFontW(-S(12), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                                   OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                   VARIABLE_PITCH, L"Segoe UI");
+            SelectObject(sdc, fs);
+            int capSpare = 100000;
+            std::wstring capWorst;
+            const TL caps[] = { { L"Mix volume", m.mixLabW }, { L"1600%", m.mixPctW }, { L"Scale", m.scaleLabW } };
+            for (const TL& c : caps) {
+                SIZE sz{}; GetTextExtentPoint32W(sdc, c.text, (int)wcslen(c.text), &sz);
+                if (c.w - sz.cx < capSpare) { capSpare = c.w - sz.cx; capWorst = c.text; }
+            }
+            SelectObject(sdc, of); DeleteObject(fs); DeleteObject(fb); DeleteObject(f); ReleaseDC(nullptr, sdc);
+            check(capSpare >= 2,
+                  std::wstring(L"transport bar: the captions and the mix volume's readout fit at ") +
+                      (sc == 1.0f ? L"100%" : L"150%") + L" DPI",
+                  L"tightest \"" + capWorst + L"\" with " + std::to_wstring(capSpare) + L" px spare");
         }
     }
 
@@ -2912,6 +2935,13 @@ int runSelfTest() {
             const match::VolumeResult r2 = match::matchVolume(d.project(), one, -1);
             check(r2.overFullScale.size() == 1 && !r2.overFullScale[0].inMix,
                   L"match volume: ...on its own as well as in the mix, which its track decides");
+            // The mix volume multiplies in on top of the track's, so turning it up
+            // takes the mix back over.
+            d.setMixGain(4.0f, L"mix up");
+            const match::VolumeResult r3 = match::matchVolume(d.project(), one, -1);
+            check(r3.overFullScale.size() == 1 && r3.overFullScale[0].inMix,
+                  L"match volume: ...and the mix volume counts in the mix, on top of the track's");
+            d.setMixGain(1.0f, L"mix back");
 
             // Track volume applies on top, so differing tracks are worth a word.
             const match::ClipSet tl = match::timelineSet(d.project());
@@ -3167,6 +3197,230 @@ int runSelfTest() {
                 mono = false;
         check(mono && layout::fracToVolume(2.0f, top) == top && layout::fracToVolume(-1.0f, top) == 0.0f,
               L"volume slider: louder all the way along, and clamped at both ends");
+    }
+
+    // ---- a volume as text (volume.h): what the readouts say and the box reads
+    // Both units, since people think of a volume both ways; refused rather than quietly
+    // clamped past the limits, since a typed number that silently became another is
+    // worse than one sent back.
+    {
+        auto about = [](float a, double b) { return std::fabs(a - b) < 1e-4 * std::max(1.0, b); };
+        struct Case { const wchar_t* text; double gain; };   // gain < 0: refused
+        const Case cases[] = {
+            { L"150%", 1.5 }, { L" 150 % ", 1.5 }, { L"150", 1.5 }, { L"100", 1.0 },
+            { L"0", 0.0 }, { L"0%", 0.0 }, { L"2.5%", 0.025 }, { L"1,5%", 0.015 },
+            { L"+6 dB", 1.99526 }, { L"-6dB", 0.501187 }, { L"+6", 1.99526 }, { L"-6", 0.501187 },
+            { L"0 dB", 1.0 }, { L"+0", 1.0 }, { L"−6 dB", 0.501187 }, { L"–6 DB", 0.501187 },
+            { L"-inf dB", 0.0 }, { L"1600%", 16.0 }, { L"+24 dB", 15.8489 }, { L"+24.1 dB", 16.0 },
+            { L"1601%", -1 }, { L"+25 dB", -1 }, { L"-5%", -1 }, { L"abc", -1 }, { L"", -1 },
+            { L"12.5.3", -1 }, { L"dB", -1 }, { L"%", -1 }, { L"5 x", -1 },
+        };
+        std::wstring bad;
+        for (const Case& c : cases) {
+            const vol::Parsed p = vol::parse(c.text);
+            const bool good = c.gain < 0 ? (!p.ok && !p.why.empty()) : (p.ok && about(p.gain, c.gain));
+            if (!good)
+                bad += std::wstring(L"'") + c.text + L"' -> " +
+                       (p.ok ? std::to_wstring(p.gain) : std::wstring(L"refused")) + L"; ";
+        }
+        check(bad.empty(), L"volume text: percentages and decibels are read, and what can't be is refused", bad);
+        check(vol::percent(1.5f) == L"150%" && vol::percent(0.025f) == L"2.5%" &&
+              vol::percent(0.0f) == L"0%" && vol::percent(16.0f) == L"1600%" &&
+              vol::percent(1.2345f) == L"123%",
+              L"volume text: whole percents, with a decimal only under 10%",
+              vol::percent(0.025f) + L" " + vol::percent(1.2345f));
+        check(vol::decibels(1.0f) == L"0.0 dB" && vol::decibels(2.0f) == L"+6.0 dB" &&
+              vol::decibels(0.5f) == L"-6.0 dB" && vol::decibels(0.0f) == L"silent",
+              L"volume text: decibels are signed, 100% is 0 dB, and 0% is silent",
+              vol::decibels(2.0f) + L" " + vol::decibels(0.5f));
+        // What a readout shows, typed back in, is the volume it shows.
+        bool round = true; std::wstring rb;
+        for (float g : { 0.0f, 0.01f, 0.025f, 0.5f, 1.0f, 1.5f, 2.0f, 10.0f, 16.0f }) {
+            const vol::Parsed p = vol::parse(vol::percent(g));
+            if (!p.ok || std::fabs(p.gain - g) > 0.005f * std::max(1.0f, g)) { round = false; rb += vol::percent(g) + L" "; }
+        }
+        check(round, L"volume text: a readout typed back in reads as the volume it shows", rb);
+    }
+
+    // ---- setting a volume: one undo step when it moves, none when it doesn't
+    // A click on a slider that leaves it where it was, or OK on a volume typed in
+    // unchanged, is not an edit, and must not leave a do-nothing step in the history.
+    {
+        Document d; d.init(rate);
+        const int c = d.addClip(L"c", makeSine(rate, 0.2, 300.0), L"", L"add");
+        const int t = d.project().tracks[0].id;
+        int s0 = 0, s1 = 0, s2 = 0, u = 0;
+        d.historyCounts(s0, u);
+        const bool same = !d.setClipGain(c, 1.0f, L"x") && !d.setTrackGain(t, 1.0f, L"x") &&
+                          !d.setMixGain(1.0f, L"x");
+        d.historyCounts(s1, u);
+        check(same && s1 == s0, L"volume: setting a volume to what it already is records no step");
+        const bool moved = d.setClipGain(c, 2.0f, L"clip") && d.setTrackGain(t, 0.5f, L"track") &&
+                           d.setMixGain(0.25f, L"mix");
+        d.historyCounts(s2, u);
+        check(moved && s2 == s0 + 3 && d.undoDesc() == L"mix",
+              L"volume: a clip's, a track's and the mix's volume are each one step");
+        check(d.setTrackGain(t, 99.0f, L"big") && d.project().findTrack(t)->gain == kMaxClipGain &&
+              !d.setMixGain(std::nanf(""), L"nan") && d.project().mixGain == 0.25f &&
+              !d.setClipGain(c + 999, 0.5f, L"none"),
+              L"volume: held to the limit; no volume at all, or no such clip, is refused");
+        d.undo(); d.undo();
+        check(d.project().mixGain == 1.0f && d.project().findTrack(t)->gain == 0.5f &&
+              d.project().findClip(c)->gain == 2.0f,
+              L"volume: undo takes the mix volume back like any other");
+    }
+
+    // ---- the mix volume: in the mixdown, and in the project file
+    {
+        auto peakOf = [](const AudioBufferPtr& b) {
+            float m = 0.0f;
+            if (b) for (float v : b->samples) m = std::max(m, std::fabs(v));
+            return m;
+        };
+        auto readAll = [](const std::wstring& path) {
+            std::vector<char> bytes;
+            if (FILE* f = _wfopen(path.c_str(), L"rb")) {
+                char buf[65536]; size_t n;
+                while ((n = fread(buf, 1, sizeof buf, f)) > 0) bytes.insert(bytes.end(), buf, buf + n);
+                fclose(f);
+            }
+            return bytes;
+        };
+        auto holds = [](const std::vector<char>& b, const char* tag) {
+            return std::search(b.begin(), b.end(), tag, tag + 4) != b.end();
+        };
+        auto num = [](double v) { wchar_t b[32]; swprintf(b, 32, L"%.4g", v); return std::wstring(b); };
+
+        Document d; d.init(rate);
+        const int c = d.addClip(L"c", makeSine(rate, 0.5, 440.0), L"", L"add");
+        const int t = d.project().tracks[0].id;
+        d.placeClip(t, c, 0, L"place");
+        const float p100 = peakOf(d.renderMix());
+        d.setMixGain(0.5f, L"mix");
+        const float p50 = peakOf(d.renderMix());
+        check(p100 > 0.3f && std::fabs(p50 - 0.5f * p100) < 1e-5f,
+              L"mix volume: the mixdown is at the mix volume", num(p50) + L" of " + num(p100));
+        d.setClipGain(c, 4.0f, L"loud clip");
+        d.setTrackGain(t, 2.0f, L"loud track");
+        const float over = peakOf(d.renderMix());
+        check(std::fabs(over - p100 * 4.0f * 2.0f * 0.5f) < 1e-4f,
+              L"mix volume: clip x track x mix, and not clamped, so how far past full scale can be said",
+              num(over));
+        check(std::fabs(peakOf(d.exportAudio(c)) - p100 * 4.0f) < 1e-4f,
+              L"mix volume: a clip exported on its own is at its own volume, not the mix's");
+
+        std::wstring proj = dir + L"\\_selftest_mix.acep";
+        Document r;
+        const bool loaded = d.saveProject(proj) && r.loadProject(proj);
+        check(loaded && r.project().mixGain == 0.5f, L"mix volume: a saved project reopens at its mix volume");
+        if (loaded) {
+            r.undo(); r.undo();   // the two loud steps: back to just after "mix"
+            const float atMix = r.project().mixGain;
+            r.undo();             // before it
+            check(atMix == 0.5f && r.project().mixGain == 1.0f,
+                  L"mix volume: ...and its history holds the volume each step had",
+                  num(atMix) + L" then " + num(r.project().mixGain));
+        }
+        // Builds from before the mix volume look for the EQ footer in the last 12 bytes
+        // only, so with both sections in a file the EQs' must still be last.
+        auto flat = std::make_shared<const std::vector<float>>((size_t)dsp::timbreBins(), 3.0f);
+        d.applyMatch({ { c, flat, nullptr } }, {}, L"eq");
+        Document r2;
+        const bool both = d.saveProject(proj) && r2.loadProject(proj);
+        const std::vector<char> bytes = readAll(proj);
+        const bool eqLast = bytes.size() > 4 && memcmp(bytes.data() + bytes.size() - 4, "ACEQ", 4) == 0;
+        check(both && eqLast && holds(bytes, "ACMX") && r2.project().mixGain == 0.5f &&
+              r2.project().findClip(c) && r2.project().findClip(c)->hasEq(),
+              L"mix volume: saved beside the EQs, which stay last where older builds look for them");
+        // Saved without history, the mix volume is still the project's.
+        Document r3;
+        check(d.saveProject(proj, false) && r3.loadProject(proj) && r3.project().mixGain == 0.5f,
+              L"mix volume: a project saved without its history keeps its mix volume");
+
+        // A project that never had a mix volume other than 100% is written exactly as
+        // before the mix volume existed: no section for it.
+        {
+            Document plain; plain.init(rate);
+            plain.addClip(L"p", makeSine(rate, 0.1, 300.0), L"", L"add");
+            const bool ok = plain.saveProject(proj);
+            check(ok && !holds(readAll(proj), "ACMX"),
+                  L"mix volume: a project at 100% throughout has no mix section, as earlier builds wrote it");
+        }
+        // A damaged section is ignored whole: read wrong, a volume could be anything,
+        // and 0 would silence the project. Its count, 16 bytes from the end of a file
+        // ending in it, made to disagree with its length.
+        {
+            Document m; m.init(rate);
+            m.addClip(L"m", makeSine(rate, 0.1, 300.0), L"", L"add");
+            m.setMixGain(0.5f, L"mix");
+            bool wrecked = false;
+            if (m.saveProject(proj, false)) {
+                if (FILE* fw = _wfopen(proj.c_str(), L"r+b")) {
+                    const int32_t bogus = 5;
+                    wrecked = _fseeki64(fw, -16, SEEK_END) == 0 && fwrite(&bogus, 4, 1, fw) == 1;
+                    fclose(fw);
+                }
+            }
+            Document w;
+            const bool wl = wrecked && w.loadProject(proj);
+            check(wl && w.project().mixGain == 1.0f && w.project().library.size() == 1,
+                  L"mix volume: a damaged mix section costs the mix volume, never the project",
+                  !wrecked ? L"couldn't set up" : !wl ? L"didn't load" : num(w.project().mixGain));
+        }
+        DeleteFileW(proj.c_str());
+    }
+
+    // ---- volumes change while they play (LiveGain): ramped across one block, not stepped
+    // A step in the middle of a sound is a click, and a slider being dragged is a run
+    // of steps; ramping each change across the next block makes it a smooth move.
+    {
+        auto buf = std::make_shared<AudioBuffer>();
+        buf->sampleRate = rate; buf->channels = 2;
+        buf->samples.assign(2 * 4800, 0.5f);
+        std::vector<float> out(2 * 480);
+        auto all = [&](float v) {
+            for (float x : out) if (std::fabs(x - v) > 1e-6f) return false;
+            return true;
+        };
+        auto falling = [&]() {   // left channel, frame by frame
+            for (int i = 1; i < 480; ++i) if (out[(size_t)i * 2] > out[(size_t)(i - 1) * 2]) return false;
+            return true;
+        };
+
+        BufferSource s(buf, 0, 4800, 1.0f);
+        s.render(out.data(), 480);
+        const bool before = all(0.5f);
+        s.setGain(0.5f);
+        s.render(out.data(), 480);
+        const bool ramp = out[0] < 0.5f && out[0] > 0.45f && std::fabs(out[958] - 0.25f) < 1e-6f && falling();
+        s.render(out.data(), 480);
+        check(before && ramp && all(0.25f),
+              L"live volume: a clip's preview takes a new volume while it plays, ramped over one block",
+              L"first " + std::to_wstring(out[0]));
+
+        std::vector<TimelineSegment> segs(2);
+        segs[0].buf = buf; segs[0].timelineStart = 0;    segs[0].length = 4800; segs[0].gain = 1.0f;
+        segs[1].buf = buf; segs[1].timelineStart = 2400; segs[1].length = 2400; segs[1].gain = 1.0f;
+        TimelineSource ts(std::move(segs), 4800);
+        ts.render(out.data(), 480);             // [0, 480): only the first is playing
+        ts.setSegmentGain(1, 0.0f);             // the second, before it starts
+        ts.setSegmentGain(7, 3.0f);             // no such segment: ignored
+        ts.render(out.data(), 480);             // [480, 960)
+        const bool untouched = all(0.5f);
+        ts.seek(2400);
+        ts.render(out.data(), 480);             // [2400, 2880): both, the second at 0
+        // Silent when its volume changed, it takes the new one at once: no ramp down
+        // from 100% at the moment it starts.
+        const bool atOnce = all(0.5f);
+        ts.setSegmentGain(0, 2.0f);
+        ts.render(out.data(), 480);
+        const bool rampUp = out[0] > 0.5f && out[0] < 0.55f && std::fabs(out[958] - 1.0f) < 1e-6f;
+        check(ts.segmentCount() == 2 && untouched && atOnce && rampUp,
+              L"live volume: a timeline segment's volume changes while it plays; one not yet "
+              L"sounding takes it at once, and the others are left alone",
+              std::wstring(untouched ? L"" : L"another segment moved; ") +
+              (atOnce ? L"" : L"one starting silent ramped down from its old volume; ") +
+              (rampUp ? L"" : L"no ramp up"));
     }
 
     // ---- a new clip cut from a take keeps the take's volume

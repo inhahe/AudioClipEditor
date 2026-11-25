@@ -35,42 +35,55 @@ int BufferSource::render(float* out, int frames) {
     if (!buf_) return 0;
     const int ch = buf_->channels;
     const float* s = buf_->samples.data();
-    int produced = 0;
-    for (int i = 0; i < frames; ++i) {
-        if (pos_ >= end_) break;
+    const int n = (int)std::max<int64_t>(0, std::min<int64_t>(frames, end_ - pos_));
+    const float to = gain_.target();
+    const bool steady = gain_.steady(to);
+    for (int i = 0; i < n; ++i) {
         const float* fr = s + pos_ * ch;
-        float l = fr[0];
-        float r = ch > 1 ? fr[1] : fr[0];
-        out[i * 2]     = l * gain_;
-        out[i * 2 + 1] = r * gain_;
+        const float g = steady ? to : gain_.at(to, i, n);
+        out[i * 2]     = fr[0] * g;
+        out[i * 2 + 1] = (ch > 1 ? fr[1] : fr[0]) * g;
         ++pos_;
-        ++produced;
     }
-    return produced;
+    gain_.end(to);
+    return n;
 }
 
 // ---------------- TimelineSource ----------------
 TimelineSource::TimelineSource(std::vector<TimelineSegment> segs, int64_t totalFrames)
-    : segs_(std::move(segs)), total_(totalFrames) {}
+    : segs_(std::move(segs)), gains_(new LiveGain[segs_.size()]), total_(totalFrames) {
+    for (size_t i = 0; i < segs_.size(); ++i) {
+        gains_[i].set(segs_[i].gain);
+        gains_[i].end(segs_[i].gain);
+    }
+}
 
 int TimelineSource::render(float* out, int frames) {
     if (pos_ >= total_) return 0;
     int n = (int)std::min<int64_t>(frames, total_ - pos_);
     std::memset(out, 0, sizeof(float) * 2 * n);
-    for (const auto& seg : segs_) {
+    for (size_t si = 0; si < segs_.size(); ++si) {
+        const TimelineSegment& seg = segs_[si];
+        LiveGain& lg = gains_[si];
+        // A segment silent in this block takes a new volume at once: nothing is
+        // playing that a step could click.
+        const float to = lg.target();
         int64_t segEnd = seg.timelineStart + seg.length;
         int64_t a = std::max(pos_, seg.timelineStart);
         int64_t b = std::min<int64_t>(pos_ + n, segEnd);
-        if (a >= b) continue;
+        if (a >= b) { lg.end(to); continue; }
+        const bool steady = lg.steady(to);
         const int ch = seg.buf->channels;
         const float* s = seg.buf->samples.data();
         for (int64_t p = a; p < b; ++p) {
             int64_t src = p - seg.timelineStart;
             const float* fr = s + src * ch;
             int oi = (int)(p - pos_);
-            out[oi * 2]     += fr[0] * seg.gain;
-            out[oi * 2 + 1] += (ch > 1 ? fr[1] : fr[0]) * seg.gain;
+            const float g = steady ? to : lg.at(to, oi, n);
+            out[oi * 2]     += fr[0] * g;
+            out[oi * 2 + 1] += (ch > 1 ? fr[1] : fr[0]) * g;
         }
+        lg.end(to);
     }
     // soft clamp against overlap clipping
     for (int i = 0; i < n * 2; ++i)

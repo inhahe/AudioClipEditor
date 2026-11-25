@@ -30,6 +30,20 @@ fix belongs in `design.md`.
 
 ## Technical debt
 
+### Tracks can't be muted from the UI
+
+- **Where:** `Track::muted` (`model.h`). Everything honours it — timeline playback
+  (`App::forEachTimelineSegment`), `Document::renderMix`, volume matching (a muted
+  track's clips don't count toward "in the mix"), and the project file stores it —
+  but nothing in `ui.cpp` ever sets it, so it is only ever false unless a project file
+  says otherwise.
+- **Proper fix:** a mute toggle in the track header (an **M** button beside the
+  name, drawn lit when muted) plus *Mute track* in the track menu, set through a
+  `Document::setTrackMuted` that records one undo step only when it changes, like the
+  volume setters. Playback needs nothing more: a mute is part of the arrangement
+  fingerprint, so toggling it while playing re-arms. Solo would be the natural
+  companion.
+
 ### A loaded history holds all its audio in RAM
 
 - **Where:** `document.cpp`, `loadProject` — the v4 trailer reader fills a

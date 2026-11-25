@@ -102,6 +102,20 @@ struct VolumeMatchContext {
 };
 bool volumeMatch(HWND parent, VolumeMatchContext& ctx);
 
+// Type a volume in exactly: a clip's, a track's or the mix's. The box takes a
+// percentage or decibels (vol::parse) and says beside it what it reads that as, in
+// the other unit too; OK is disabled while it can't be read, and the line says why.
+// Returns true on OK with `gain` set -- left exactly as it came in if the text was
+// left as shown, so opening the box and pressing OK never rounds a volume that a
+// match set to 123.4% down to the 123% it displays.
+struct VolumeContext {
+    std::wstring title;         // "Clip volume"
+    std::wstring scopeLabel;    // what it applies to, for the "Applies to:" line
+    std::wstring note;          // a line under the box: what else sets the level heard
+    float gain = 1.0f;          // in/out, linear
+};
+bool volume(HWND parent, VolumeContext& ctx);
+
 // History window: everything done to the project, oldest first, with the steps
 // that are currently in effect distinguished from the ones that were undone.
 // Effects such as timbre matching or noise reduction change how clips *sound*

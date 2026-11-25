@@ -16,7 +16,8 @@ int runSelfTest();  // selftest.cpp
 // the long "Applies to: the selection in ..." scope label, which is the widest
 // thing either effect dialog has to fit -- or, for the two matchers (5 = timbre,
 // 6 = volume), the one-clip-to-the-rest wording and its longer "average of the
-// other N clips on ..." reference item.
+// other N clips on ..." reference item. 7 is the box a volume is typed into, a
+// clip's -- or with "sel", the mix's, at a volume a match left between percents.
 static int runDialogTest(HINSTANCE hInst, int which, bool withSelection) {
     WNDCLASSW wc{}; wc.lpfnWndProc = DefWindowProcW; wc.hInstance = hInst;
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); wc.lpszClassName = L"ACE_DlgTestParent";
@@ -79,6 +80,21 @@ static int runDialogTest(HINSTANCE hInst, int which, bool withSelection) {
             ctx.ref = ref; ctx.tracks = tracks; ctx.scopeLabel = matchScope;
             dlg::volumeMatch(p, ctx);
         }
+    } else if (which == 7) {
+        dlg::VolumeContext ctx;
+        if (withSelection) {
+            ctx.title = L"Mix volume";
+            ctx.scopeLabel = L"the whole mix — Play All, and Export Mixdown";
+            ctx.note = L"On top of every track's and every clip's own volume. A clip played on its "
+                       L"card, or exported on its own, isn't affected.";
+            ctx.gain = 1.2345f;
+        } else {
+            ctx.title = L"Clip volume";
+            ctx.scopeLabel = L"'consciousness p1s1', on its card and in all 3 places it is on the timeline";
+            ctx.note = L"In the mix, the track's volume and the mix volume apply on top of this one.";
+            ctx.gain = 1.5f;
+        }
+        dlg::volume(p, ctx);
     } else {
         std::wstring t = L"consciousness p1s1";
         dlg::promptText(p, L"Rename clip", L"Clip name:", t);

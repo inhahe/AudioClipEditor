@@ -296,11 +296,21 @@ int64_t Document::rippleClips(int trackId, int placedIndex, int64_t delta, const
     return applied;
 }
 
-void Document::setClipGain(int id, float g, const std::wstring& desc) {
+// The one rule every volume is set by: clamped to what a volume can be, and an undo
+// step only when it actually moved.
+static bool setVolume(float& at, float g) {
+    if (std::isnan(g)) return false;          // no volume at all (and min/max would make it 16)
+    g = std::max(0.0f, std::min(kMaxClipGain, g));
+    if (g == at) return false;
+    at = g;
+    return true;
+}
+
+bool Document::setClipGain(int id, float g, const std::wstring& desc) {
     Clip* c = project_.findClip(id);
-    if (!c) return;
-    c->gain = std::max(0.0f, std::min(kMaxClipGain, g));
+    if (!c || !setVolume(c->gain, g)) return false;
     commit(desc);
+    return true;
 }
 
 bool Document::setClipGains(const std::vector<std::pair<int, float>>& gains,
@@ -334,11 +344,17 @@ bool Document::applyMatch(const std::vector<ClipEq>& eqs,
     return any;
 }
 
-void Document::setTrackGain(int id, float g, const std::wstring& desc) {
+bool Document::setTrackGain(int id, float g, const std::wstring& desc) {
     Track* t = project_.findTrack(id);
-    if (!t) return;
-    t->gain = std::max(0.0f, std::min(kMaxClipGain, g));
+    if (!t || !setVolume(t->gain, g)) return false;
     commit(desc);
+    return true;
+}
+
+bool Document::setMixGain(float g, const std::wstring& desc) {
+    if (!setVolume(project_.mixGain, g)) return false;
+    commit(desc);
+    return true;
 }
 
 AudioBufferPtr Document::exportAudio(int clipId, int64_t begin, int64_t end) const {
@@ -365,7 +381,9 @@ AudioBufferPtr Document::renderMix() const {
         for (const auto& pc : t.clips) {
             const Clip* c = project_.findClip(pc.clipId);
             if (!c || !c->buffer) continue;
-            float g = c->gain * t.gain;
+            // The same product, in the same order, as the engine's timeline segments
+            // (App::segmentGain), so the file is what Play All played.
+            const float g = c->gain * t.gain * project_.mixGain;
             const AudioBuffer& heard = *c->heard();
             int ch = heard.channels;
             const float* s = heard.samples.data();
@@ -380,7 +398,6 @@ AudioBufferPtr Document::renderMix() const {
             }
         }
     }
-    for (auto& v : out->samples) v = std::max(-1.0f, std::min(1.0f, v));
     return out;
 }
 
@@ -658,6 +675,29 @@ bool Document::saveProject(const std::wstring& path, bool withHistory) {
         }
     }
 
+    // The mix volume: a tagged section like the EQs' below, and for the same reasons
+    // (see there). It goes *before* them, because builds from before it look for the
+    // EQ footer in the last 12 bytes only; this way they still find it, and play the
+    // project at 100%. The live volume, then one per history node written above (100%
+    // for a node stored by name only). Written only when some state has a mix volume
+    // other than 100%, so a project without one stays byte-for-byte what they wrote.
+    {
+        bool any = project_.mixGain != 1.0f;
+        for (size_t i = 0; i < nodes.size() && !any; ++i)
+            any = nodeHasSnapshot[i] && nodes[i]->snapshot.mixGain != 1.0f;
+        if (any) {
+            const int64_t start = _ftelli64(f);
+            fwrite("ACMX", 1, 4, f);
+            wU32(f, 1u);
+            wF32(f, project_.mixGain);
+            wI32(f, (int32_t)nodes.size());
+            for (size_t i = 0; i < nodes.size(); ++i)
+                wF32(f, nodeHasSnapshot[i] ? nodes[i]->snapshot.mixGain : 1.0f);
+            wI64(f, start);
+            fwrite("ACMX", 1, 4, f);
+        }
+    }
+
     // The clips' EQ curves: a tagged section after everything else, because a reader
     // stops at the end of what it knows. An older build therefore opens the project
     // and plays it without the EQs, rather than failing to open it -- the body holds
@@ -804,18 +844,54 @@ bool Document::loadProject(const std::wstring& path) {
         if (!ok) { flat.clear(); histCurrent = -1; }
     }
 
-    // The EQ section (see saveProject). Found from its footer at the end of the file,
-    // not by reading on from here: a history that couldn't be read leaves the
-    // position unknown, and that must not cost the live clips their EQs too.
-    // Validated as a whole before anything in it is used, so a damaged one costs the
-    // EQs -- never the project, nor the history.
+    // The tagged sections after the history (see saveProject): the EQs and the mix
+    // volume. Found from their footers, not by reading on from here: a history that
+    // couldn't be read leaves the position unknown, and that must not cost the live
+    // clips their EQs too. The last 12 bytes are the last section's footer -- its start
+    // and its tag -- and the 12 before a section's start are the footer of the one in
+    // front of it, if any. A footer whose start doesn't hold the same tag ends the walk.
+    struct Section { int64_t at = -1, end = -1; };
+    Section eqSec, mixSec;
+    if (_fseeki64(f, 0, SEEK_END) == 0) {
+        int64_t end = _ftelli64(f);
+        while (end >= 12 + 4) {
+            char tag[4], head[4];
+            if (_fseeki64(f, end - 12, SEEK_SET) != 0) break;
+            const int64_t at = rI64(f);
+            if (fread(tag, 1, 4, f) != 4) break;
+            Section* s = memcmp(tag, "ACEQ", 4) == 0 ? &eqSec
+                       : memcmp(tag, "ACMX", 4) == 0 ? &mixSec : nullptr;
+            if (!s || s->at >= 0 || at <= 0 || at > end - 12 - 4) break;   // each one once
+            if (_fseeki64(f, at, SEEK_SET) != 0 || fread(head, 1, 4, f) != 4 ||
+                memcmp(head, tag, 4) != 0) break;
+            s->at = at; s->end = end;
+            end = at;
+        }
+    }
+
+    // The mix volume. Its size is known from its count, so a section that disagrees
+    // with its own footer is ignored whole: a misread volume could be anything, and 0
+    // would silence the project. A volume out of range is held to it.
+    if (mixSec.at > 0 && _fseeki64(f, mixSec.at + 4, SEEK_SET) == 0 && rU32(f) == 1u) {
+        auto sane = [](float g) { return std::isfinite(g) ? std::max(0.0f, std::min(kMaxClipGain, g)) : 1.0f; };
+        const float live = rF32(f);
+        const int32_t n = rI32(f);
+        if (n >= 0 && mixSec.end - mixSec.at == 4 + 4 + 4 + 4 + 4 * (int64_t)n + 12) {
+            p.mixGain = sane(live);
+            // The history may have been dropped as unreadable; the live volume still applies.
+            if (n == (int32_t)flat.size())
+                for (size_t i = 0; i < flat.size(); ++i) {
+                    const float g = sane(rF32(f));
+                    if (flat[i].hasSnapshot) flat[i].snapshot.mixGain = g;
+                }
+        }
+    }
+
+    // The EQ section. Validated as a whole before anything in it is used, so a damaged
+    // one costs the EQs -- never the project, nor the history.
     {
         char tag[4];
-        int64_t at = -1;
-        if (_fseeki64(f, -12, SEEK_END) == 0) {
-            at = rI64(f);
-            if (fread(tag, 1, 4, f) != 4 || memcmp(tag, "ACEQ", 4) != 0) at = -1;
-        }
+        const int64_t at = eqSec.at;
         if (at > 0 && _fseeki64(f, at, SEEK_SET) == 0 &&
             fread(tag, 1, 4, f) == 4 && memcmp(tag, "ACEQ", 4) == 0 && rU32(f) == 1u) {
             std::vector<EqCurve> curves;
