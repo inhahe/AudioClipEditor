@@ -12,9 +12,11 @@ namespace vol {
 
 // "150%". Whole percents, which is what a slider's readout has room for and finer
 // than anyone hears -- except below 10%, where one percent is a big step (2% to 3%
-// is 3.5 dB), so one decimal is kept there.
+// is 3.5 dB), so one decimal is kept there. A volume too small for that still plays,
+// so it reads "<0.1%": only silence reads 0%.
 inline std::wstring percent(float gain) {
     const double p = std::max(0.0, (double)gain * 100.0);
+    if (p > 0.0 && p < 0.05) return L"<0.1%";
     wchar_t b[32];
     swprintf(b, 32, p > 0.0 && p < 9.95 ? L"%.1f%%" : L"%.0f%%", p);
     return b;

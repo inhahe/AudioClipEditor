@@ -23,26 +23,43 @@ public:
 };
 
 // A volume that may be changed while it plays: set from the UI thread, read by
-// render() on the audio thread. A change is ramped across the next block rendered
-// rather than applied as a step, which on a slider being dragged would be heard as
-// a run of clicks.
+// render() on the audio thread. A change is ramped over kRampFrames frames rather
+// than applied as a step, which on a slider being dragged would be heard as a run of
+// clicks. The ramp is counted in frames, not in calls: when the engine resamples it
+// asks a source for one frame at a time, and a ramp per call would be a step again.
 class LiveGain {
 public:
-    explicit LiveGain(float g = 1.0f) : target_(g), applied_(g) {}
+    static constexpr int kRampFrames = 512;   // ~11 ms at 48 kHz
+    explicit LiveGain(float g = 1.0f) : target_(g), applied_(g), rampTo_(g) {}
     void set(float g) { target_.store(g, std::memory_order_relaxed); }
 
-    // The rest is the audio thread's. A block reads target() once, takes frame k
-    // (0-based) of its n frames at at(to, k, n) -- arriving at `to` on the last
-    // frame -- and then calls end(to).
-    float target() const { return target_.load(std::memory_order_relaxed); }
-    bool steady(float to) const { return to == applied_; }
-    float at(float to, int k, int n) const {
-        return n > 0 ? applied_ + (to - applied_) * (float)(k + 1) / (float)n : to;
+    // The rest is the audio thread's. A render call takes up any change with
+    // begin(), then takes each frame's gain from next() -- or, while steady(), simply
+    // value() -- or, for a source silent in this call, jumps there with snap(): with
+    // nothing sounding, a step can't click.
+    void begin() {
+        const float to = target_.load(std::memory_order_relaxed);
+        if (to == rampTo_) return;
+        rampTo_ = to;
+        left_ = kRampFrames;
+        step_ = (to - applied_) / (float)kRampFrames;
     }
-    void end(float to) { applied_ = to; }
+    bool steady() const { return left_ == 0; }
+    float value() const { return applied_; }
+    float next() {
+        if (left_ > 0) {
+            if (--left_ == 0) applied_ = rampTo_;   // land exactly, whatever the rounding
+            else applied_ += step_;
+        }
+        return applied_;
+    }
+    void snap() { applied_ = rampTo_; left_ = 0; }
 private:
     std::atomic<float> target_;
-    float applied_;                 // what the last block ended on (audio thread only)
+    // Audio thread only: the gain the last frame had, the gain it is heading for, and
+    // how far each frame moves it for how many frames more.
+    float applied_, rampTo_, step_ = 0.0f;
+    int left_ = 0;
 };
 
 // Plays a sub-range [begin,end) of a stereo AudioBuffer at engine rate.

@@ -3178,8 +3178,8 @@ struct App {
         return h;
     }
     // Every placement the timeline plays, in the order its segments are built:
-    // `f(track, clip)` once each. The one walk both building the segments and
-    // updating their volumes go through, so segment i is the same placement in both.
+    // `f(track, placement, clip)` once each. The one walk both building the segments
+    // and updating their volumes go through, so segment i is the same placement in both.
     template <class F> void forEachTimelineSegment(F&& f) const {
         for (const Track& t : doc.project().tracks) {
             if (t.muted) continue;
@@ -3215,20 +3215,23 @@ struct App {
     // Edits made while the arrangement is running are heard straight away rather
     // than at the next Space. Driven from the timer, so it catches every way the
     // project can change without every mutation site having to remember to call in.
-    void syncTimelineSource() {
+    // `fp` is timelineFingerprint(), computed once per tick for this and the gains.
+    void syncTimelineSource(uint64_t fp) {
         if (!timelinePlaying || !engine.isPlaying()) return;
-        if (timelineFingerprint() == armedFingerprint) return;
+        if (fp == armedFingerprint) return;
         armTimeline(engine.position());
     }
     // Hand the current volumes to whatever the engine is playing, or holding paused:
-    // the timeline's segments, or the previewed clip. Called from the timer and as a
-    // slider moves. A timeline snapshot whose arrangement has changed since it was
-    // armed is left alone -- its segment i may no longer be this walk's i -- until
-    // syncTimelineSource or the next Play re-arms it.
-    void syncPlaybackGains() {
+    // the timeline's segments, or the previewed clip. Called from the timer while
+    // playing, as a slider moves, and before a resume. A timeline snapshot whose
+    // arrangement has changed since it was armed is left alone -- its segment i may
+    // no longer be this walk's i -- until syncTimelineSource or the next Play re-arms
+    // it. `fp` is timelineFingerprint(), when the caller has it already.
+    void syncPlaybackGains() { syncPlaybackGains(timelinePlaying ? timelineFingerprint() : 0); }
+    void syncPlaybackGains(uint64_t fp) {
         if (!engine.hasSource()) return;
         if (timelinePlaying) {
-            if (!armedTimeline || timelineFingerprint() != armedFingerprint) return;
+            if (!armedTimeline || fp != armedFingerprint) return;
             size_t i = 0;
             forEachTimelineSegment([&](const Track& t, const PlacedClip&, const Clip& c) {
                 armedTimeline->setSegmentGain(i++, segmentGain(t, c));
@@ -3574,7 +3577,10 @@ struct App {
                 setZoomFrac((float)(p.x - zoomRc.left) / std::max(1, (int)(zoomRc.right - zoomRc.left)));
                 SetCapture(hwnd); clampScroll(); refresh(); return;
             }
-            if (dbl && (PtInRect(&mixPctRc, p) || PtInRect(&mixLabRc, p))) { editMixVolume(); return; }
+            // The caption and the readout come before the slider, whose grab area they
+            // overlap: the first click of the double-click that types a volume in must
+            // not move it.
+            if (PtInRect(&mixPctRc, p) || PtInRect(&mixLabRc, p)) { if (dbl) editMixVolume(); return; }
             RECT mh = sliderHit(mixVolRc);
             if (PtInRect(&mh, p)) {
                 mode = Mode::MixVolume; volDragFrom = doc.project().mixGain;
@@ -3596,7 +3602,8 @@ struct App {
             }
             if (PtInRect(&cl->play, p)) { togglePlayClip(cl->clipId); return; }
             if (PtInRect(&cl->del, p)) { deleteClipConfirm(cl->clipId); return; }
-            if (dbl && PtInRect(&cl->volPct, p)) { editClipVolume(cl->clipId); return; }
+            // Before the slider, whose grab area it overlaps (see the mix volume's).
+            if (PtInRect(&cl->volPct, p)) { if (dbl) editClipVolume(cl->clipId); return; }
             { RECT vh = sliderHit(cl->vol);
               if (PtInRect(&vh, p)) {
                 if (Clip* c = doc.project().findClip(cl->clipId)) {
@@ -3663,7 +3670,8 @@ struct App {
                 if (PtInRect(&tl.delRc, p) && doc.project().tracks.size() > 1) {
                     doc.removeTrack(tl.trackId); afterHistory(); return;
                 }
-                if (dbl && PtInRect(&tl.volLab, p)) { editTrackVolume(tl.trackId); return; }
+                // Before the slider, whose grab area it overlaps (see the mix volume's).
+                if (PtInRect(&tl.volLab, p)) { if (dbl) editTrackVolume(tl.trackId); return; }
                 { RECT vh = sliderHit(tl.volRc);
                   if (PtInRect(&vh, p) && p.x < tl.header.right) {
                     if (Track* t = doc.project().findTrack(tl.trackId)) {
@@ -3796,8 +3804,10 @@ struct App {
 
     void onLUp(POINT p) {
         if (editorActive()) { edUp(p); return; }
-        if (GetCapture() == hwnd) ReleaseCapture();
+        // The gesture is ended before the capture is let go: releasing it sends
+        // WM_CAPTURECHANGED, and onCaptureLost must not find it still running.
         Mode m = mode; mode = Mode::None;
+        if (GetCapture() == hwnd) ReleaseCapture();
 
         if (m == Mode::WaveSelect) {
             if (!dragged && !waveEdgeDrag) {
@@ -3949,6 +3959,8 @@ struct App {
 
     void onRDown(POINT p) {
         if (editorActive()) return;
+        // Not mid-gesture: a menu would take the capture the left button's drag holds.
+        if (mode != Mode::None) return;
         if (PtInRect(&rcLibrary, p)) {
             const CardLayout* cl = cardAt(p);
             if (cl) { clipContextMenu(cl->clipId, p); return; }
@@ -4505,15 +4517,25 @@ struct App {
         }
     }
 
+    // The mouse capture went elsewhere (`to`, or nowhere) while a gesture held it: a
+    // dialog took it, or the window was disabled under a drag. The button's release
+    // will never reach us, so the gesture would otherwise go on following the pointer
+    // with no button held -- a volume drag audibly. It is cancelled as Esc would
+    // cancel it, and one that can't be (zoom, scrolling: nothing to take back) just ends.
+    void onCaptureLost(HWND to) {
+        if (to == hwnd || mode == Mode::None) return;
+        if (!cancelDrag()) { mode = Mode::None; dragged = false; refresh(); }
+    }
+
     // --------------------------------------------------------- keyboard
     // Esc abandons the gesture in progress and puts things back as they were when
     // it started: a selection sweep or edge-nudge restores the previous selection,
-    // a clip drag drops nothing. Returns false when no such drag was running, so
-    // the caller can fall through to Esc's other meaning (closing the editor).
+    // a clip drag drops nothing, a volume drag puts the volume it started from back.
+    // Returns false when no such drag was running, so the caller can fall through to
+    // Esc's other meaning (closing the editor).
     //
-    // Only gestures with a discrete outcome are cancellable here. The continuous
-    // ones -- volume, zoom, the scrollbar -- show their value moving under the
-    // cursor as you drag, so there is no half-finished result to abandon.
+    // Zoom and the scrollbars are not cancellable: they only move the view, which
+    // is no edit to take back.
     bool cancelDrag() {
         if (editorActive()) {
             if (editDrag == 0) return false;    // main sweep, or either fine-tune strip
@@ -4640,11 +4662,12 @@ struct App {
         const bool playing = engine.isPlaying();
         // Without a device playback waits where it is: nothing moves, so no fast ticks.
         setTimerRate(playing && engine.hasDevice());
-        // A volume, however it was changed, reaches what is playing (or paused)
-        // within a tick.
-        syncPlaybackGains();
         if (playing) {
-            syncTimelineSource();
+            const uint64_t fp = timelinePlaying ? timelineFingerprint() : 0;
+            syncTimelineSource(fp);
+            // A volume, however it was changed, is heard within a tick. (A paused
+            // source is brought up to date when it resumes.)
+            syncPlaybackGains(fp);
             if (timelinePlaying) { playheadFrame = engine.position(); followPlayheadIfPlaying(); }
             else if (previewClipId >= 0) previewCursor = previewBegin + engine.position();
             refresh();
@@ -4771,6 +4794,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                       (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT) != 0); return 0;
     case WM_LBUTTONUP: a->onLUp({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }); return 0;
     case WM_RBUTTONDOWN: a->onRDown({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }); return 0;
+    case WM_CAPTURECHANGED: if (a) a->onCaptureLost((HWND)lp); return 0;
     case WM_MOUSEWHEEL:
         a->onWheel({ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }, GET_WHEEL_DELTA_WPARAM(wp),
                    (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) != 0,

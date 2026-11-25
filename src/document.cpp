@@ -336,9 +336,7 @@ bool Document::applyMatch(const std::vector<ClipEq>& eqs,
     }
     for (const auto& u : gains) {
         Clip* c = project_.findClip(u.first);
-        if (!c) continue;
-        const float g = std::max(0.0f, std::min(kMaxClipGain, u.second));
-        if (g != c->gain) { c->gain = g; any = true; }
+        if (c && setVolume(c->gain, u.second)) any = true;
     }
     if (any) commit(desc);
     return any;
@@ -849,22 +847,33 @@ bool Document::loadProject(const std::wstring& path) {
     // couldn't be read leaves the position unknown, and that must not cost the live
     // clips their EQs too. The last 12 bytes are the last section's footer -- its start
     // and its tag -- and the 12 before a section's start are the footer of the one in
-    // front of it, if any. A footer whose start doesn't hold the same tag ends the walk.
+    // front of it, if any. A footer whose start doesn't hold the same tag ends the walk;
+    // a whole section with a tag this build doesn't know -- a later build's -- is
+    // stepped over, so what this build does know behind it is still found. A tag is
+    // four capital letters, which is what keeps the end of a file with no sections at
+    // all (its view state) from being taken for one.
     struct Section { int64_t at = -1, end = -1; };
     Section eqSec, mixSec;
+    auto isTag = [](const char* t) {
+        for (int i = 0; i < 4; ++i) if (t[i] < 'A' || t[i] > 'Z') return false;
+        return true;
+    };
     if (_fseeki64(f, 0, SEEK_END) == 0) {
         int64_t end = _ftelli64(f);
-        while (end >= 12 + 4) {
+        for (int n = 0; n < 32 && end >= 12 + 4; ++n) {
             char tag[4], head[4];
             if (_fseeki64(f, end - 12, SEEK_SET) != 0) break;
             const int64_t at = rI64(f);
-            if (fread(tag, 1, 4, f) != 4) break;
-            Section* s = memcmp(tag, "ACEQ", 4) == 0 ? &eqSec
-                       : memcmp(tag, "ACMX", 4) == 0 ? &mixSec : nullptr;
-            if (!s || s->at >= 0 || at <= 0 || at > end - 12 - 4) break;   // each one once
+            if (fread(tag, 1, 4, f) != 4 || !isTag(tag)) break;
+            if (at <= 0 || at > end - 12 - 4) break;
             if (_fseeki64(f, at, SEEK_SET) != 0 || fread(head, 1, 4, f) != 4 ||
                 memcmp(head, tag, 4) != 0) break;
-            s->at = at; s->end = end;
+            Section* s = memcmp(tag, "ACEQ", 4) == 0 ? &eqSec
+                       : memcmp(tag, "ACMX", 4) == 0 ? &mixSec : nullptr;
+            if (s) {
+                if (s->at >= 0) break;   // each one once
+                s->at = at; s->end = end;
+            }
             end = at;
         }
     }

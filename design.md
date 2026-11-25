@@ -14,7 +14,7 @@ sync with behavior changes.
 | `model.h` | `Clip` (id, name, `buffer` = its own audio, `eq` = its timbre EQ curve and `eqBuffer` the audio through it, `heard()`, peaks of what is heard, gain, **timestamp**), `ClipEq`, `Track` (id, name, gain, placed clips, plus the pure lane arithmetic `gapBefore`/`ripple`/`overlaps`), `PlacedClip` (clipId + start frame), `Project` (library order = display order; `mixGain`, the mix volume) |
 | `decoder.{h,cpp}` | MF Source Reader → stereo float at the project rate |
 | `encoder.{h,cpp}` | WAV writer (manual RIFF; 16/24-bit PCM, 32-bit float) + MF Sink Writer (MP3/AAC/WMA); output-rate resampling |
-| `engine.{h,cpp}` | WASAPI shared-mode render thread, which owns the device's COM objects in its own apartment (opens, renders, closes); `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix), whose volumes can be changed while they play (`LiveGain`, ramped across a block); linear resample project→device rate on the audio thread |
+| `engine.{h,cpp}` | WASAPI shared-mode render thread, which owns the device's COM objects in its own apartment (opens, renders, closes); `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix), whose volumes can be changed while they play (`LiveGain`, ramped over 512 frames); linear resample project→device rate on the audio thread |
 | `undo.h` | Snapshot-based undo **tree**: every edit stores a full `Project` copy; redo with branch picker; `chain()` flattens the walkable line for the History window and `gotoNode()` jumps to any point on it; `allNodes()`/`rebuild()` round-trip the whole tree through the project file, `hasSnapshot` marks steps stored by name only, and `~UndoNode` tears down iteratively so a long history can't overflow the stack |
 | `document.{h,cpp}` | Owns `Project` + undo tree + `ViewState`; all mutations go through `commit(desc)`; tracks the last-saved undo node for the unsaved-changes flag (`markSaved`/`isModified`); `history()`/`gotoHistory()` expose the step list |
 | `dsp.{h,cpp}` | Radix-2 complex FFT, speech-aware K-weighted loudness, three noise-reduction algorithms, voice isolation, LTAS timbre matching, manual region edits (see below) |
@@ -965,9 +965,11 @@ There are two such sections now — this one and the mix volume's (`ACMX`, see *
 clip, track and mix*) — and the reader walks their footers back from the end of the
 file: the last 12 bytes are the last section's footer, and the 12 bytes before a
 section's start are the footer of the one in front of it, if any. A footer whose
-offset doesn't hold the same tag, or a tag it doesn't know, ends the walk; each tag is
-taken once. `ACMX` is written *before* `ACEQ`, so the EQ footer stays in the last 12
-bytes, where builds from before the walk look for it.
+offset doesn't hold the same tag, or whose tag isn't four capital letters, ends the
+walk; each known tag is taken once, and a whole section with a tag this build doesn't
+know (a later build's) is stepped over, so the sections behind it are still found.
+`ACMX` is written *before* `ACEQ`, so the EQ footer stays in the last 12 bytes, where
+builds from before the walk look for it.
 
 Projects matched before this (0.36.x and earlier) have their EQ baked into the
 audio; that audio is simply each clip's own audio now, so it stays as it was.
@@ -1053,7 +1055,12 @@ in the history.
 - **Drag the slider.** The drag moves the volume live (so it is heard and seen as it
   goes); `App::finishVolumeDrag` then puts the starting volume back and sets the final
   one through the setter, so a drag is one step. Esc puts it back; Ctrl+Z mid-drag
-  does the same, since the drag is the edit to take back and isn't a step yet. A
+  does the same, since the drag is the edit to take back and isn't a step yet; so
+  does losing the mouse capture to a dialog (`onCaptureLost`, which ends any gesture
+  whose button release can no longer arrive), and a right-click mid-gesture is
+  ignored rather than opening a menu that would take the capture. The readouts and
+  captions beside a slider overlap its enlarged grab area and are hit-tested first,
+  so the first click of the double-click that opens the box doesn't move it. A
   project replaced mid-drag (another copy handing one over) drops the drag *without*
   putting anything back: the clip, track or mix it would write to is the new
   project's.
@@ -1699,12 +1706,16 @@ ripples, mutes, deletions, destructive edits, undo, redo and history jumps.
 `App::segmentGain`, the product `renderMix` applies too) is a `LiveGain` the UI
 can set while the source plays: `syncPlaybackGains` walks the placements in the
 same order the segments were built (`forEachTimelineSegment`, the one walk both
-use) and hands each its volume — from every timer tick, from each step of a slider
-drag, and before a resume. Re-arming for a volume would restart from the *heard*
-position on every step of a drag, repeating the audio already queued each time. A
-`LiveGain` ramps a change across the next block rendered, since a step is a click
-and a dragged slider is a run of steps; a segment not sounding in that block takes
-the new volume at once. The gains are only handed over while the fingerprint still
+use) and hands each its volume — from every timer tick while playing, from each step
+of a slider drag, and before a resume. Re-arming for a volume would restart from the
+*heard* position on every step of a drag, repeating the audio already queued each
+time. A `LiveGain` ramps a change over `kRampFrames` (512) frames, since a step is a
+click and a dragged slider is a run of steps. The ramp is counted in frames, not
+render calls: when the device's rate differs from the project's (any 44.1 kHz
+device, the project rate being floored at 48 kHz) the engine resamples and asks the
+source for one frame per call, and a ramp spread across each call would be a step
+again. A segment not sounding in a call takes the new volume at once (nothing is
+playing that a step could click). The gains are only handed over while the fingerprint still
 matches — after an arrangement change segment *i* may no longer be the walk's *i*,
 and the re-arm builds them fresh anyway. The preview's `BufferSource` gets its
 clip's volume the same way (`armedPreview`, for the clip it was armed for).
@@ -2153,10 +2164,11 @@ can't, a readout typed back in reads as itself; a volume set to what it already 
 records no step; the mixdown is at clip × track × mix and unclamped while a clip's
 own export ignores the mix volume; the mix volume round-trips through the project
 file and its history, beside the EQ section that stays last, is absent from a file
-that never needed it, and a damaged section costs only it; a playing preview and a
-playing timeline segment take a new volume ramped across one block, and a segment
-not yet sounding takes it at once — each of these was checked to fail with the fix
-it guards undone),
+that never needed it, a damaged section costs only it, and an unknown section after
+it is stepped over; a playing preview and a playing timeline segment take a new
+volume ramped over 512 frames — rendered a frame at a time too, as when resampling —
+and a segment not yet sounding takes it at once — each of these was checked to fail
+with the fix it guards undone),
 **`clampSelection`** (a selection survives removing an unrelated placement or
 deleting a different clip — the reported bug — is clamped rather than dropped
 when it merely runs past a shortened buffer, and is dropped only when its clip is

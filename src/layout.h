@@ -141,9 +141,8 @@ inline TransportFlow flowTransport(int width, int margin, int gap, int leftW,
 
 // The main transport bar's measurements at UI scale `sc` (S(v) = v * sc, rounded,
 // as App::S does): one definition, read by App::layoutTransport to place the bar and
-// by the selftest to check how it wraps and that its labels fit. The test used to
-// keep a copy of these numbers, and the copy drifted -- History grew by 26 px and
-// the test went on checking the old width.
+// by the selftest to check how it wraps and that its labels fit, so what the test
+// checks is what is drawn.
 struct TransportMetrics {
     int y0 = 0, h = 0;                  // top of row 0, and every row's height
     int gap = 0, margin = 0;            // between controls, and at the bar's ends

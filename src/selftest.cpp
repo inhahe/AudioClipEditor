@@ -3229,6 +3229,9 @@ int runSelfTest() {
               vol::percent(1.2345f) == L"123%",
               L"volume text: whole percents, with a decimal only under 10%",
               vol::percent(0.025f) + L" " + vol::percent(1.2345f));
+        check(vol::percent(0.0003f) == L"<0.1%",
+              L"volume text: a volume too small to show still doesn't read as silence",
+              vol::percent(0.0003f));
         check(vol::decibels(1.0f) == L"0.0 dB" && vol::decibels(2.0f) == L"+6.0 dB" &&
               vol::decibels(0.5f) == L"-6.0 dB" && vol::decibels(0.0f) == L"silent",
               L"volume text: decibels are signed, 100% is 0 dB, and 0% is silent",
@@ -3264,6 +3267,9 @@ int runSelfTest() {
               !d.setMixGain(std::nanf(""), L"nan") && d.project().mixGain == 0.25f &&
               !d.setClipGain(c + 999, 0.5f, L"none"),
               L"volume: held to the limit; no volume at all, or no such clip, is refused");
+        check(!d.setClipGains({ { c, std::nanf("") } }, L"nan match") && d.project().findClip(c)->gain == 2.0f,
+              L"volume: a match's commit refuses no volume at all too, rather than making it +24 dB",
+              std::to_wstring(d.project().findClip(c)->gain));
         d.undo(); d.undo();
         check(d.project().mixGain == 1.0f && d.project().findTrack(t)->gain == 0.5f &&
               d.project().findClip(c)->gain == 2.0f,
@@ -3332,6 +3338,27 @@ int runSelfTest() {
         check(both && eqLast && holds(bytes, "ACMX") && r2.project().mixGain == 0.5f &&
               r2.project().findClip(c) && r2.project().findClip(c)->hasEq(),
               L"mix volume: saved beside the EQs, which stay last where older builds look for them");
+        // A section a later build adds after them, with a tag this build doesn't know,
+        // is stepped over: what this build knows behind it is still found.
+        {
+            std::vector<char> grown = bytes;
+            const int64_t start = (int64_t)grown.size();
+            const char body[] = "ACZZ" "\x01\x02\x03\x04\x05\x06\x07\x08";
+            grown.insert(grown.end(), body, body + 12);
+            const char* at = reinterpret_cast<const char*>(&start);
+            grown.insert(grown.end(), at, at + 8);
+            grown.insert(grown.end(), { 'A', 'C', 'Z', 'Z' });
+            bool wrote = false;
+            if (FILE* fw = _wfopen(proj.c_str(), L"wb")) {
+                wrote = fwrite(grown.data(), 1, grown.size(), fw) == grown.size();
+                fclose(fw);
+            }
+            Document r4;
+            const bool ok = wrote && r4.loadProject(proj);
+            check(ok && r4.project().mixGain == 0.5f && r4.project().findClip(c) &&
+                  r4.project().findClip(c)->hasEq(),
+                  L"mix volume: a later build's section after the EQs is stepped over, not taken for the end");
+        }
         // Saved without history, the mix volume is still the project's.
         Document r3;
         check(d.saveProject(proj, false) && r3.loadProject(proj) && r3.project().mixGain == 0.5f,
@@ -3370,10 +3397,12 @@ int runSelfTest() {
         DeleteFileW(proj.c_str());
     }
 
-    // ---- volumes change while they play (LiveGain): ramped across one block, not stepped
+    // ---- volumes change while they play (LiveGain): ramped, not stepped
     // A step in the middle of a sound is a click, and a slider being dragged is a run
-    // of steps; ramping each change across the next block makes it a smooth move.
+    // of steps; ramping each change over LiveGain::kRampFrames makes it a smooth move,
+    // however many frames each render call asks for.
     {
+        const int R = LiveGain::kRampFrames;
         auto buf = std::make_shared<AudioBuffer>();
         buf->sampleRate = rate; buf->channels = 2;
         buf->samples.assign(2 * 4800, 0.5f);
@@ -3391,12 +3420,33 @@ int runSelfTest() {
         s.render(out.data(), 480);
         const bool before = all(0.5f);
         s.setGain(0.5f);
+        s.render(out.data(), 480);              // frames 0..479 of the ramp
+        const bool ramp = out[0] < 0.5f && out[0] > 0.49f && out[958] > 0.25f && falling();
+        s.render(out.data(), 480);              // ...the rest of it, then steady
+        bool landed = std::fabs(out[(size_t)(R - 480 - 1) * 2] - 0.25f) < 1e-7f;
+        for (int i = R - 480; i < 480; ++i) landed = landed && out[(size_t)i * 2] == 0.25f;
         s.render(out.data(), 480);
-        const bool ramp = out[0] < 0.5f && out[0] > 0.45f && std::fabs(out[958] - 0.25f) < 1e-6f && falling();
-        s.render(out.data(), 480);
-        check(before && ramp && all(0.25f),
-              L"live volume: a clip's preview takes a new volume while it plays, ramped over one block",
+        check(before && ramp && landed && all(0.25f),
+              L"live volume: a clip's preview takes a new volume while it plays, ramped over "
+              + std::to_wstring(R) + L" frames to exactly the new volume",
               L"first " + std::to_wstring(out[0]));
+
+        // When the device runs at another rate than the project the engine resamples,
+        // and asks the source for one frame per call: the ramp must not collapse into
+        // a step there (it did, when it was spread across each call).
+        BufferSource one(buf, 0, 4800, 1.0f);
+        one.setGain(0.5f);
+        float prev = 0.5f, first = 0.0f, f[2] = { 0, 0 };
+        bool smooth = true;
+        for (int i = 0; i < R; ++i) {
+            one.render(f, 1);
+            if (i == 0) first = f[0];
+            if (!(f[0] < prev)) smooth = false;
+            prev = f[0];
+        }
+        check(smooth && first > 0.49f && f[0] == 0.25f,
+              L"live volume: ...also when rendered a frame at a time, as when resampling",
+              L"first frame " + std::to_wstring(first) + L", last " + std::to_wstring(f[0]));
 
         std::vector<TimelineSegment> segs(2);
         segs[0].buf = buf; segs[0].timelineStart = 0;    segs[0].length = 4800; segs[0].gain = 1.0f;
@@ -3414,7 +3464,9 @@ int runSelfTest() {
         const bool atOnce = all(0.5f);
         ts.setSegmentGain(0, 2.0f);
         ts.render(out.data(), 480);
-        const bool rampUp = out[0] > 0.5f && out[0] < 0.55f && std::fabs(out[958] - 1.0f) < 1e-6f;
+        bool rampUp = out[0] > 0.5f && out[0] < 0.51f && out[958] < 1.0f;
+        ts.render(out.data(), 480);
+        rampUp = rampUp && out[(size_t)(R - 480 - 1) * 2] == 1.0f && out[958] == 1.0f;
         check(ts.segmentCount() == 2 && untouched && atOnce && rampUp,
               L"live volume: a timeline segment's volume changes while it plays; one not yet "
               L"sounding takes it at once, and the others are left alone",
