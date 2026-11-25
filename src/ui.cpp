@@ -69,7 +69,7 @@ static std::vector<std::wstring> launchFiles(const std::vector<std::wstring>& ar
 }
 
 // Where this app keeps what it remembers between sessions, under HKEY_CURRENT_USER:
-// the window's placement, and the folder the last project was loaded from.
+// the window's placement, and the folder of the last project opened or saved.
 static const wchar_t* kRegKey = L"Software\\AudioClipEditor";
 static const wchar_t* kLastProjectFolder = L"LastProjectFolder";
 
@@ -134,8 +134,9 @@ enum {
     IDC_SAVEHISTORY, IDC_ASSOC, IDC_MIXVOL
 };
 
-// `volPct` is the readout beside a slider, which a double-click types a volume into.
-struct CardLayout { int clipId; RECT card, top, play, del, wave, vol, volPct, crop, savesel; };
+// A laid-out card: its clip, its frame, and its parts (layout::cardRects) -- `volPct`
+// is the readout beside the volume slider, which a double-click types a volume into.
+struct CardLayout : layout::CardRects { int clipId = -1; RECT card{}; };
 struct PlacedLayout { int trackId, index, clipId; RECT rc; };
 // `volLab` is the "Volume  100%" row above the track's slider.
 struct TrackLayout { int trackId; RECT header, lane; RECT nameRc, delRc, volRc, volLab; };
@@ -626,7 +627,7 @@ struct App {
         layoutTransport(rc.right);
         const int tH = std::max(transportH, S(62));
         rcTransport = { 0, 0, rc.right, tH };
-        trackHeaderW = S(128);
+        trackHeaderW = layout::cardMetrics(sc).headerW;   // holds the cards' volume slider
         rulerH = S(22);
 
         // Tracks view on top, sized to just fit the current number of tracks;
@@ -788,9 +789,7 @@ struct App {
             cl.card = { x, y, x + cardW, y + cardH };
             // Crop and New clip are only drawn and hit-tested while this clip has a
             // selection; the narrowest card is wide enough for both (cardMetrics).
-            const layout::CardRects r = layout::cardRects(cm, cl.card);
-            cl.top = r.top; cl.play = r.play; cl.del = r.del; cl.wave = r.wave;
-            cl.vol = r.vol; cl.volPct = r.volPct; cl.crop = r.crop; cl.savesel = r.savesel;
+            static_cast<layout::CardRects&>(cl) = layout::cardRects(cm, cl.card);
             cards.push_back(cl);
             x += cardW + pad;
         }
@@ -2655,24 +2654,27 @@ struct App {
         noiseCaptures.clear();
         resetSelHistory();
     }
-    // The folder the last project was loaded from -- by this copy or another, in this
-    // session or an earlier one -- or, if it has gone, the nearest folder above it
-    // that is still there. Empty if none is known.
+    // `dir` if it exists, else the nearest folder above it that does -- but asked
+    // with a time limit, since this runs on the way to a dialog and a folder on a
+    // share whose server is gone answers only when the network gives up. Empty if
+    // none, or no answer in time: the dialog then starts wherever Windows would.
+    static std::wstring startFolder(const std::wstring& dir) {
+        return folders::nearestExistingWithin(dir, 1500);
+    }
+    // The folder of the last project opened or saved -- by this copy or another, in
+    // this session or an earlier one (setProjectPath keeps it). Empty if none is known.
     static std::wstring lastProjectFolder() {
-        return folders::nearestExisting(folders::remembered(kRegKey, kLastProjectFolder));
+        return startFolder(folders::remembered(kRegKey, kLastProjectFolder));
     }
     void openProjectFile() {
         if (!confirmDiscardChanges()) return;
-        // Where the last project came from: projects are kept together, and the
-        // dialog's own default -- the exe's folder -- is nowhere anyone keeps them.
+        // Where the last project was: projects are kept together, and the dialog's
+        // own default -- the exe's folder -- is nowhere anyone keeps them.
         std::wstring path = dlg::openProject(hwnd, lastProjectFolder());
         if (path.empty()) return;
         openProjectPath(path);
     }
     // Load `path` as the project. The caller has already dealt with unsaved changes.
-    // However it came -- Open Project, a double-click in Explorer, the taskbar's
-    // recent list, another copy handing it over -- its folder is where Open Project
-    // starts next time.
     bool openProjectPath(const std::wstring& path) {
         if (!doc.loadProject(path)) {
             const bool exists = GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
@@ -2680,7 +2682,6 @@ struct App {
                                + path).c_str(), L"Open", MB_ICONWARNING);
             return false;
         }
-        folders::remember(kRegKey, kLastProjectFolder, folders::parentOf(path));
         resetForAnotherProject();
         // Follow the loaded project's internal rate so playback resamples correctly.
         rate = doc.project().sampleRate > 0 ? doc.project().sampleRate : rate;
@@ -2836,7 +2837,7 @@ struct App {
         // Beside itself when it has been saved before; else where the last project
         // was loaded from, since that is where projects are kept.
         const std::wstring start = projectPath.empty()
-            ? lastProjectFolder() : folders::nearestExisting(folders::parentOf(projectPath));
+            ? lastProjectFolder() : startFolder(folders::parentOf(projectPath));
         std::wstring path = dlg::saveProject(hwnd, suggested, start);
         if (path.empty()) return false;
         storeViewState();
@@ -2868,6 +2869,11 @@ struct App {
         // leaves it out when the user has turned recent items off. When the path
         // changes, not on every save: each call writes a shortcut, on the UI thread.
         if (!path.empty() && another) SHAddToRecentDocs(SHARD_PATHW, path.c_str());
+        // Where Open Project starts next time, in any copy, this session or a later
+        // one: the folder of the last project opened or saved, however it was opened
+        // (Open Project, a double-click, the taskbar's recent list, a hand-off --
+        // including the open project's own file reached under a new name).
+        if (!path.empty()) folders::remember(kRegKey, kLastProjectFolder, folders::parentOf(path));
     }
     // A save that quietly grew the file by a gigabyte, or quietly dropped the steps
     // that answer "did I apply that?", is exactly the kind of thing you only find
@@ -4800,19 +4806,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         break;
-    case WM_GETMINMAXINFO:
+    case WM_GETMINMAXINFO: {
         // Never narrower than one card and the space beside it. A card is never
         // narrower than its controls (layout::cardMetrics), so a narrower library would
-        // cut its right side -- its x among it -- off.
-        if (a) {
-            const layout::CardMetrics cm = layout::cardMetrics(a->sc);
-            RECT r = { 0, 0, cm.minW + 2 * cm.pad, 0 };
-            AdjustWindowRectExForDpi(&r, (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE), TRUE,
-                                     (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE), GetDpiForWindow(hwnd));
-            auto* mm = (MINMAXINFO*)lp;
-            mm->ptMinTrackSize.x = std::max<LONG>(mm->ptMinTrackSize.x, r.right - r.left);
-        }
+        // cut its right side -- its x among it -- off. Both the card and the frame are
+        // measured at the window's DPI as it is now: App::sc follows only once
+        // WM_DPICHANGED has been handled, which a move between monitors precedes.
+        UINT dpi = GetDpiForWindow(hwnd);
+        if (dpi == 0) dpi = 96;
+        const layout::CardMetrics cm = layout::cardMetrics(dpi / 96.0f);
+        RECT r = { 0, 0, cm.minW + 2 * cm.pad, 0 };
+        AdjustWindowRectExForDpi(&r, (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE), TRUE,
+                                 (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE), dpi);
+        auto* mm = (MINMAXINFO*)lp;
+        mm->ptMinTrackSize.x = std::max<LONG>(mm->ptMinTrackSize.x, r.right - r.left);
         return 0;
+    }
     case WM_DPICHANGED: {
         a->sc = LOWORD(wp) / 96.0f; a->makeFonts();
         setWindowIcons(hwnd);

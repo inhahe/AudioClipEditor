@@ -285,6 +285,9 @@ struct CardMetrics {
     // Crop before it.
     int selInset = 0, selTop = 0, selH = 0, selGap = 0, saveW = 0, cropW = 0;
     int minW = 0;             // the narrowest card
+    // A track header holds the same slider at the same inset, so it is as wide as
+    // that and a margin: lengthening the slider widens the header with it.
+    int headerW = 0;
 };
 
 inline CardMetrics cardMetrics(float sc) {
@@ -300,6 +303,7 @@ inline CardMetrics cardMetrics(float sc) {
     const int volumeRow = m.volLeft + m.volW + m.pctGap + m.pctW + m.rightPad;
     const int buttons = 2 * m.waveInset + m.selInset + m.saveW + m.selGap + m.cropW;
     m.minW = std::max(volumeRow, buttons);
+    m.headerW = m.volLeft + m.volW + S(10);
     return m;
 }
 

@@ -378,9 +378,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   prompt on exit, and never lose a carefully-placed selection by accident. (The
   playhead is saved but doesn't flag the project, since it moves on its own
   during playback.) `Ctrl+S` saves; the File menu has New / Open / Save / Save As.
-  **Open Project starts in the folder you last loaded a project from** — however
-  you loaded it, and in a later session too — and **Save As starts beside the
-  project** (or, for one never saved, in that same folder).
+  **Open Project starts in the folder of the last project you opened or saved** —
+  however you opened it, and in a later session too — and **Save As starts beside
+  the project** (or, for one never saved, in that same folder).
   The title bar shows a `*` while there are unsaved changes, and the app **prompts
   you to save** (Save / Don't Save / Cancel) before closing or opening another
   project if the current one has unsaved edits — so you never lose work by accident.

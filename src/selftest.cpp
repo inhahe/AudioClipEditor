@@ -3216,7 +3216,7 @@ int runSelfTest() {
                 if (r.vol.right - r.vol.left != m.volW || r.vol.left != card.left + m.volLeft) {
                     same = false; bad = std::to_wstring(w) + L" px card";
                 }
-                if (r.volPct.right > card.right || r.volPct.left < r.vol.right) fits = false;
+                if (r.volPct.right > card.right - m.rightPad || r.volPct.left < r.vol.right) fits = false;
                 if (r.crop.left < r.wave.left || r.savesel.right > r.wave.right ||
                     r.crop.right > r.savesel.left || r.del.left < r.play.right)
                     buttons = false;
@@ -3225,6 +3225,14 @@ int runSelfTest() {
         check(same, L"card volume: the slider is the same length on every card, however long its clip", bad);
         check(fits, L"card volume: ...and it and its readout fit on the narrowest card");
         check(buttons, L"card: the narrowest card's waveform holds the Crop and New clip buttons");
+        // A track header holds the same slider, its grab margin (S(6), App::sliderHit)
+        // short of the lanes, where a click is meant for a clip.
+        bool header = true;
+        for (float sc : scales) {
+            const layout::CardMetrics m = layout::cardMetrics(sc);
+            if (m.volLeft + m.volW + (int)(6 * sc + 0.5f) >= m.headerW) header = false;
+        }
+        check(header, L"track header: holds the cards' volume slider and its grab area, short of the lanes");
         // The readout is drawn in the small font, clipped to its box with no ellipsis,
         // so a value too wide is silently cut: at its widest, and the smallest volume
         // it shows, at every common scale.
@@ -4099,12 +4107,19 @@ int runSelfTest() {
               folders::parentOf(L"\\\\server\\share\\show.acep") == L"\\\\server\\share" &&
               folders::parentOf(L"show.acep").empty(),
               L"folders: a project's folder; a drive's root keeps its backslash; a bare name has none");
+        // Nothing above a share's root is a folder: not "\\server", and not "\", which
+        // would be the current drive's root -- where a vanished share used to lead.
+        check(folders::parentOf(L"\\\\server\\share").empty() &&
+              folders::parentOf(L"\\\\server").empty() &&
+              folders::parentOf(L"//server/share/a") == L"//server/share",
+              L"folders: a network share's root has nothing above it");
 
         const std::wstring base = dir + L"\\_selftest_folders";
         CreateDirectoryW(base.c_str(), nullptr);
         CreateDirectoryW((base + L"\\a").c_str(), nullptr);
         CreateDirectoryW((base + L"\\a\\b").c_str(), nullptr);
-        const bool here = folders::nearestExisting(base + L"\\a\\b") == base + L"\\a\\b";
+        const bool here = folders::nearestExisting(base + L"\\a\\b") == base + L"\\a\\b" &&
+                          folders::nearestExistingWithin(base + L"\\a\\b", 5000) == base + L"\\a\\b";
         RemoveDirectoryW((base + L"\\a\\b").c_str());
         const bool up = folders::nearestExisting(base + L"\\a\\b") == base + L"\\a";
         RemoveDirectoryW((base + L"\\a").c_str());

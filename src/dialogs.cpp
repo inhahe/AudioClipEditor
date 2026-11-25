@@ -1380,8 +1380,9 @@ WaitChoice waitForOtherCopy(const std::wstring& message, const std::function<boo
 // The Vista file dialogs (IFileDialog), not GetOpenFileName: told a folder with
 // SetFolder, they start there. GetOpenFileName can set aside the folder it is given
 // for its own memory of the last one, and given none it starts in the process's
-// current directory -- the exe's, when started from Explorer. These also leave the
-// current directory as it was, where GetOpenFileName moves it to the chosen folder.
+// current directory -- the exe's, when started from Explorer. These are also told
+// (FOS_NOCHANGEDIR) to leave the current directory as it was, where GetOpenFileName
+// moved it to the chosen folder.
 static void startIn(IFileDialog* d, const std::wstring& dir) {
     if (dir.empty()) return;
     Microsoft::WRL::ComPtr<IShellItem> folder;
@@ -1407,7 +1408,7 @@ std::wstring openProject(HWND parent, const std::wstring& startDir) {
     d->SetFileTypes(2, types);
     DWORD o = 0;
     d->GetOptions(&o);
-    d->SetOptions(o | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+    d->SetOptions(o | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
     startIn(d.Get(), startDir);
     return SUCCEEDED(d->Show(parent)) ? chosenPath(d.Get()) : std::wstring();
 }
@@ -1422,7 +1423,7 @@ std::wstring saveProject(HWND parent, const std::wstring& suggestedName, const s
     d->SetFileName((suggestedName + L".acep").c_str());
     DWORD o = 0;
     d->GetOptions(&o);
-    d->SetOptions(o | FOS_OVERWRITEPROMPT | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
+    d->SetOptions(o | FOS_OVERWRITEPROMPT | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
     startIn(d.Get(), startDir);
     return SUCCEEDED(d->Show(parent)) ? chosenPath(d.Get()) : std::wstring();
 }
