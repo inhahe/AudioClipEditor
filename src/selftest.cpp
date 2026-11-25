@@ -1782,19 +1782,20 @@ int runSelfTest() {
                   L"tightest \"" + worst + L"\" with " + std::to_wstring(-worstOver) + L" px spare");
         }
 
-        // The clip card's selection buttons are sized by hand (layoutCards: savW /
-        // crpW) rather than measured, and they sit *over* the waveform, so a label
-        // that outgrows its button spills onto the audio instead of being clipped.
-        // They use fSmall, which is smaller than the toolbar font.
+        // The clip card's selection buttons are sized by hand (layout::cardMetrics:
+        // saveW / cropW) rather than measured, and they sit *over* the waveform, so a
+        // label that outgrows its button spills onto the audio instead of being
+        // clipped. They use fSmall, which is smaller than the toolbar font.
         for (float sc : { 1.0f, 1.5f }) {
             auto S = [&](int v) { return (int)(v * sc + 0.5f); };
+            const layout::CardMetrics cm = layout::cardMetrics(sc);
             HDC sdc = GetDC(nullptr);
             HFONT f = CreateFontW(-S(12), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
                                   OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                   VARIABLE_PITCH, L"Segoe UI");
             HGDIOBJ of = SelectObject(sdc, f);
             struct CB { const wchar_t* text; int w; };
-            const CB cbs[] = { { L"New clip", S(58) }, { L"Crop", S(42) } };
+            const CB cbs[] = { { L"New clip", cm.saveW }, { L"Crop", cm.cropW } };
             std::wstring worst; int worstOver = -100000;
             for (const CB& b : cbs) {
                 SIZE sz{}; GetTextExtentPoint32W(sdc, b.text, (int)wcslen(b.text), &sz);
@@ -1921,8 +1922,9 @@ int runSelfTest() {
                   std::wstring(L"transport bar: every button label fits at ") +
                       (sc == 1.0f ? L"100%" : L"150%") + L" DPI",
                   L"tightest \"" + worst + L"\" with " + std::to_wstring(-worstOver) + L" px spare");
-            // The captions and readouts are drawn in the small font, unclipped: the
-            // mix volume's caption, and its readout at its widest ("1600%").
+            // The captions and readouts are drawn in the small font, clipped to their
+            // boxes with no ellipsis, so text too wide is silently cut: the mix
+            // volume's caption, and its readout at its widest ("1600%").
             HFONT fs = CreateFontW(-S(12), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
                                    OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                    VARIABLE_PITCH, L"Segoe UI");
@@ -3195,33 +3197,38 @@ int runSelfTest() {
               L"volume slider: louder all the way along, and clamped at both ends");
     }
 
-    // ---- a card's volume row (layout::cardMetrics / cardVolumeRow)
+    // ---- a card's layout (layout::cardMetrics / cardRects)
     // A card is as wide as its clip is long, but its volume slider is one length on
     // every card, so the same drag is the same change whichever clip it is on, and a
     // short clip's is long enough to set. The narrowest card holds that row and the
-    // selection's Crop / New clip buttons.
+    // selection's Crop / New clip buttons. Checked on the rectangles the library is
+    // laid out with, on cards of every width.
     {
+        const float scales[] = { 1.0f, 1.25f, 1.5f, 1.75f, 2.0f };
         bool same = true, fits = true, buttons = true;
         std::wstring bad;
-        for (float sc : { 1.0f, 1.25f, 1.5f, 2.0f }) {
+        for (float sc : scales) {
             const layout::CardMetrics m = layout::cardMetrics(sc);
             for (int w = m.minW; w <= 3000; w += 37) {
-                const RECT card = { 50, 200, 50 + w, 320 };
-                const layout::CardVolumeRow r = layout::cardVolumeRow(m, card);
-                if (r.slider.right - r.slider.left != m.volW || r.slider.left != card.left + m.volLeft) {
+                const RECT card = { 50, 200, 50 + w, 200 + m.h };
+                const layout::CardRects r = layout::cardRects(m, card);
+                if (r.vol.right - r.vol.left != m.volW || r.vol.left != card.left + m.volLeft) {
                     same = false; bad = std::to_wstring(w) + L" px card";
                 }
-                if (r.readout.right > card.right - m.rightPad) fits = false;
+                if (r.volPct.right > card.right || r.volPct.left < r.vol.right) fits = false;
+                if (r.crop.left < r.wave.left || r.savesel.right > r.wave.right ||
+                    r.crop.right > r.savesel.left || r.del.left < r.play.right)
+                    buttons = false;
             }
-            if (m.minW - 2 * m.waveInset < m.selInset + m.saveW + m.selGap + m.cropW) buttons = false;
         }
         check(same, L"card volume: the slider is the same length on every card, however long its clip", bad);
         check(fits, L"card volume: ...and it and its readout fit on the narrowest card");
         check(buttons, L"card: the narrowest card's waveform holds the Crop and New clip buttons");
-        // The readout is drawn in the small font, unclipped: at its widest, and the
-        // smallest volume it shows.
+        // The readout is drawn in the small font, clipped to its box with no ellipsis,
+        // so a value too wide is silently cut: at its widest, and the smallest volume
+        // it shows, at every common scale.
         int spare = 100000;
-        for (float sc : { 1.0f, 1.5f }) {
+        for (float sc : scales) {
             auto S = [&](int v) { return (int)(v * sc + 0.5f); };
             const layout::CardMetrics m = layout::cardMetrics(sc);
             HDC sdc = GetDC(nullptr);
@@ -3235,7 +3242,7 @@ int runSelfTest() {
             }
             SelectObject(sdc, of); DeleteObject(fs); ReleaseDC(nullptr, sdc);
         }
-        check(spare >= 2, L"card volume: the readout fits its widest value at 100% and 150% DPI",
+        check(spare >= 2, L"card volume: the readout fits its widest value at 100% to 200% DPI",
               std::to_wstring(spare) + L" px spare");
     }
 

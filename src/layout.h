@@ -261,45 +261,68 @@ inline int scrollToReveal(int scrollPos, int visLen, int x0, int x1,
 }
 
 // A library card's volume row, and the narrowest a card may be, at UI scale `sc`
-// (S as in transportMetrics). A card is as wide as its clip is long, but its volume
-// slider is one length on every card -- the length of the track headers' -- so the
-// same drag is the same change of volume whichever clip it is on, and a short clip's
+// (S as in transportMetrics), and where its parts go (cardRects). A card is as wide as
+// its clip is long, but its volume slider is one length on every card -- the length
+// of the track headers', which are placed from the same numbers -- so the same drag
+// is the same change of volume whichever clip or track it is on, and a short clip's
 // slider is not too short to set. The narrowest card is the one that holds that row
 // (the speaker, the slider, and the readout after it at its widest, "1600%") and the
 // Crop / New clip buttons a selection puts over the waveform.
 struct CardMetrics {
+    int h = 0, pad = 0;       // every card's height, and the space between cards
+    int titleH = 0;           // the title row along the top (name; where a drag starts)
+    int playInset = 0, delInset = 0;  // the play button (left) and the x (right), in from the sides
+    int btnTop = 0, btnSize = 0;      // ...down from the top, and their size
+    int waveTop = 0, waveBottom = 0;   // the waveform, down from the top / up from the bottom
+    int waveInset = 0;        // ...and in from the sides
     int volLeft = 0;          // the slider's left edge, from the card's; the speaker is before it
     int volW = 0;             // the slider's length, on every card
     int pctGap = 0, pctW = 0; // the readout, right after the slider
     int rightPad = 0;         // from the readout to the card's right edge, at its narrowest
     int rowTop = 0, rowBottom = 0;   // the slider's band, measured up from the card's bottom
     int readoutOverhang = 0;  // the readout's band reaches this far past the slider's
-    int waveInset = 0;        // the waveform's inset from the card's sides
-    int selInset = 0, selGap = 0, saveW = 0, cropW = 0;   // the selection buttons
+    // The selection's buttons, at the waveform's top right: New clip at the right,
+    // Crop before it.
+    int selInset = 0, selTop = 0, selH = 0, selGap = 0, saveW = 0, cropW = 0;
     int minW = 0;             // the narrowest card
 };
 
 inline CardMetrics cardMetrics(float sc) {
     auto S = [sc](int v) { return (int)(v * sc + 0.5f); };
     CardMetrics m;
+    m.h = S(120); m.pad = S(12); m.titleH = S(24);
+    m.playInset = S(6); m.delInset = S(4); m.btnTop = S(4); m.btnSize = S(16);
+    m.waveTop = S(28); m.waveBottom = S(30); m.waveInset = S(8);
     m.volLeft = S(34); m.volW = S(84); m.pctGap = S(6); m.pctW = S(40); m.rightPad = S(8);
     m.rowTop = S(24); m.rowBottom = S(8); m.readoutOverhang = S(2);
-    m.waveInset = S(8); m.selInset = S(4); m.selGap = S(4); m.saveW = S(58); m.cropW = S(42);
+    m.selInset = S(4); m.selTop = S(3); m.selH = S(17); m.selGap = S(4);
+    m.saveW = S(58); m.cropW = S(42);
     const int volumeRow = m.volLeft + m.volW + m.pctGap + m.pctW + m.rightPad;
     const int buttons = 2 * m.waveInset + m.selInset + m.saveW + m.selGap + m.cropW;
     m.minW = std::max(volumeRow, buttons);
     return m;
 }
 
-// The slider and its readout on `card`: the same length and the same place on every
-// card, whatever its width.
-struct CardVolumeRow { RECT slider, readout; };
-inline CardVolumeRow cardVolumeRow(const CardMetrics& m, const RECT& card) {
-    CardVolumeRow r;
-    r.slider = { card.left + m.volLeft, card.bottom - m.rowTop,
-                 card.left + m.volLeft + m.volW, card.bottom - m.rowBottom };
-    r.readout = { r.slider.right + m.pctGap, r.slider.top - m.readoutOverhang,
-                  r.slider.right + m.pctGap + m.pctW, r.slider.bottom + m.readoutOverhang };
+// Where everything on `card` goes. The volume slider and its readout are the same
+// length and in the same place on every card, whatever its width.
+struct CardRects {
+    RECT top, play, del, wave;
+    RECT vol, volPct;          // the volume slider, and its readout
+    RECT crop, savesel;        // the selection's Crop and New clip buttons
+};
+inline CardRects cardRects(const CardMetrics& m, const RECT& card) {
+    CardRects r;
+    const int x = card.left, y = card.top, right = card.right, bottom = card.bottom;
+    r.top  = { x, y, right, y + m.titleH };
+    r.play = { x + m.playInset, y + m.btnTop, x + m.playInset + m.btnSize, y + m.btnTop + m.btnSize };
+    r.del  = { right - m.delInset - m.btnSize, y + m.btnTop, right - m.delInset, y + m.btnTop + m.btnSize };
+    r.wave = { x + m.waveInset, y + m.waveTop, right - m.waveInset, bottom - m.waveBottom };
+    r.vol  = { x + m.volLeft, bottom - m.rowTop, x + m.volLeft + m.volW, bottom - m.rowBottom };
+    r.volPct = { r.vol.right + m.pctGap, r.vol.top - m.readoutOverhang,
+                 r.vol.right + m.pctGap + m.pctW, r.vol.bottom + m.readoutOverhang };
+    const int by = r.wave.top + m.selTop, bx = r.wave.right - m.selInset;
+    r.savesel = { bx - m.saveW, by, bx, by + m.selH };
+    r.crop = { r.savesel.left - m.selGap - m.cropW, by, r.savesel.left - m.selGap, by + m.selH };
     return r;
 }
 

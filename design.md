@@ -22,7 +22,7 @@ sync with behavior changes.
 | `waveform.{h,cpp}` | GDI oscilloscope: per-column min/max envelope (one `PolyPolyline`) zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner, remove-non-voice, match-timbre and match-volume options, a volume typed in (`volume`), history list, file/project pickers |
 | `volume.h` | Pure: a volume as text — the readouts' `percent` and `decibels`, and `parse` for what is typed into the volume box (a percentage or dB, refused past 0% … +24 dB, and a "1,600" that could be read two ways asked about rather than guessed) |
-| `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`), toolbar row wrapping (`flowButtons` for the editor toolbar, `flowTransport` for the main transport bar, whose widths are `transportMetrics`), a library card's volume row and narrowest width (`cardMetrics`, `cardVolumeRow`: one slider length on every card, and the narrowest card holds it and the selection buttons), scrollbar sizing (`scrollBarsNeeded`, `scrollThumb`, `scrollFromThumb`), `scrollToReveal`, and the volume slider's scale (`volumeToFrac` / `fracToVolume`: 0–100% linear on the left half, 100% → +24 dB on the right with dB rising as the square of the distance, so every volume a clip or track can have — including what volume matching sets — has a position, and 100–200% keeps half of that side for fine work) |
+| `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`), toolbar row wrapping (`flowButtons` for the editor toolbar, `flowTransport` for the main transport bar, whose widths are `transportMetrics`), a library card's layout and narrowest width (`cardMetrics`, `cardRects`: one volume slider length on every card and in every track header, and the narrowest card holds it and the selection buttons — the window's minimum width holds the narrowest card), scrollbar sizing (`scrollBarsNeeded`, `scrollThumb`, `scrollFromThumb`), `scrollToReveal`, and the volume slider's scale (`volumeToFrac` / `fracToVolume`: 0–100% linear on the left half, 100% → +24 dB on the right with dB rising as the square of the distance, so every volume a clip or track can have — including what volume matching sets — has a position, and 100–200% keeps half of that side for fine work) |
 | `transport.h` | Pure play/pause decision logic, likewise split out to be testable: `decide(State, Press)` → pause / resume / restart-from-where, for both the single combined control and the editor's labelled button pair |
 | `selhistory.h` | Pure undo/redo state machine for the waveform selection, kept out of the document's snapshot tree; a `base` token ties the stack to a point in the document history |
 | `snap.h` | Pure directional-snapping state machine for dragging clips along a lane: pulls only when moving *away* from a target, so snapping stays convenient without making near-miss positions unreachable |
@@ -1059,9 +1059,10 @@ in the history.
   does the same, since the drag is the edit to take back and isn't a step yet; so
   does losing the mouse capture to a dialog (`onCaptureLost`, which ends any gesture
   whose button release can no longer arrive), and a right-click mid-gesture is
-  ignored rather than opening a menu that would take the capture. The readouts and
-  captions beside a slider overlap its enlarged grab area and are hit-tested first,
-  so the first click of the double-click that opens the box doesn't move it. A
+  ignored rather than opening a menu that would take the capture. The track's
+  Volume line and the mix caption overlap a slider's enlarged grab area, and a card's
+  readout begins just where it ends; all are hit-tested before the slider, so the
+  first click of the double-click that opens the box never moves it. A
   project replaced mid-drag (another copy handing one over) drops the drag *without*
   putting anything back: the clip, track or mix it would write to is the new
   project's. A save mid-drag (Ctrl+S) writes the volume the drag started from

@@ -760,14 +760,12 @@ struct App {
     void layoutCards() {
         cards.clear();
         const auto& lib = doc.project().library;
-        int pad = S(12);
-        int cardH = S(120);
         // Card widths are proportional to clip duration at the shared timeline
         // scale (pxPerSec), so a clip is drawn the same length here as it is on a
         // track. Floored so the controls fit (layout::cardMetrics), capped to the
-        // viewport.
+        // viewport -- which the window's minimum size keeps at least that wide.
         const layout::CardMetrics cm = layout::cardMetrics(sc);
-        int minW = cm.minW;
+        const int pad = cm.pad, cardH = cm.h, minW = cm.minW;
         int maxRight = rcLibrary.right - pad;
         int maxW = std::max(minW, (int)(rcLibrary.right - rcLibrary.left) - 2 * pad);
         int x = rcLibrary.left + pad;
@@ -782,20 +780,11 @@ struct App {
             }
             CardLayout cl; cl.clipId = c.id;
             cl.card = { x, y, x + cardW, y + cardH };
-            cl.top = { x, y, x + cardW, y + S(24) };
-            cl.play = { x + S(6), y + S(4), x + S(6) + S(16), y + S(4) + S(16) };
-            cl.del = { x + cardW - S(20), y + S(4), x + cardW - S(4), y + S(20) };
-            cl.wave = { x + cm.waveInset, y + S(28), x + cardW - cm.waveInset, y + cardH - S(30) };
-            const layout::CardVolumeRow vr = layout::cardVolumeRow(cm, cl.card);
-            cl.vol = vr.slider;
-            cl.volPct = vr.readout;
-            // Selection-action buttons overlaid at the top-right of the waveform;
-            // only drawn / hit-tested while this clip has an active selection. The
-            // narrowest card is wide enough for both (cardMetrics).
-            { int bh = S(17), by0 = cl.wave.top + S(3);
-              int bx1 = cl.wave.right - cm.selInset;
-              cl.savesel = { bx1 - cm.saveW, by0, bx1, by0 + bh };
-              cl.crop    = { cl.savesel.left - cm.selGap - cm.cropW, by0, cl.savesel.left - cm.selGap, by0 + bh }; }
+            // Crop and New clip are only drawn and hit-tested while this clip has a
+            // selection; the narrowest card is wide enough for both (cardMetrics).
+            const layout::CardRects r = layout::cardRects(cm, cl.card);
+            cl.top = r.top; cl.play = r.play; cl.del = r.del; cl.wave = r.wave;
+            cl.vol = r.vol; cl.volPct = r.volPct; cl.crop = r.crop; cl.savesel = r.savesel;
             cards.push_back(cl);
             x += cardW + pad;
         }
@@ -806,6 +795,7 @@ struct App {
     void layoutTracks() {
         trackLays.clear(); placed.clear();
         const auto& tracks = doc.project().tracks;
+        const layout::CardMetrics cm = layout::cardMetrics(sc);
         int laneH = trackLaneH();
         int y = rcTimeline.top + rulerH - tlScrollY;
         int laneLeft = rcTimeline.left + trackHeaderW;
@@ -815,7 +805,10 @@ struct App {
             tl.header = { rcTimeline.left, y, laneLeft, y + laneH };
             tl.lane = { laneLeft, y, rcTimeline.right, y + laneH };
             tl.nameRc = { tl.header.left + S(8), y + S(6), tl.header.right - S(8), y + S(24) };
-            tl.volRc = { tl.header.left + S(34), y + laneH - S(24), tl.header.right - S(10), y + laneH - S(8) };
+            // The same length and inset as a card's slider (layout::cardMetrics), so a
+            // drag is the same change of volume on either.
+            tl.volRc = { tl.header.left + cm.volLeft, y + laneH - S(24),
+                         tl.header.left + cm.volLeft + cm.volW, y + laneH - S(8) };
             tl.volLab = { tl.header.left + S(8), y + S(27), tl.header.right - S(10), y + laneH - S(25) };
             tl.delRc = { tl.header.right - S(28), y + S(6), tl.header.right - S(8), y + S(24) };
             trackLays.push_back(tl);
@@ -3602,7 +3595,9 @@ struct App {
             }
             if (PtInRect(&cl->play, p)) { togglePlayClip(cl->clipId); return; }
             if (PtInRect(&cl->del, p)) { deleteClipConfirm(cl->clipId); return; }
-            // Before the slider, whose grab area it overlaps (see the mix volume's).
+            // Before the slider, whose grab area reaches S(6) past its end -- just to
+            // where this begins (cardMetrics' pctGap) -- so a click here is never a
+            // slider click, should the two ever meet (see the mix volume's).
             if (PtInRect(&cl->volPct, p)) { if (dbl) editClipVolume(cl->clipId); return; }
             { RECT vh = sliderHit(cl->vol);
               if (PtInRect(&vh, p)) {
@@ -4781,6 +4776,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         break;
+    case WM_GETMINMAXINFO:
+        // Never narrower than one card and the space beside it. A card is never
+        // narrower than its controls (layout::cardMetrics), so a narrower library would
+        // cut its right side -- its x among it -- off.
+        if (a) {
+            const layout::CardMetrics cm = layout::cardMetrics(a->sc);
+            RECT r = { 0, 0, cm.minW + 2 * cm.pad, 0 };
+            AdjustWindowRectExForDpi(&r, (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE), TRUE,
+                                     (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE), GetDpiForWindow(hwnd));
+            auto* mm = (MINMAXINFO*)lp;
+            mm->ptMinTrackSize.x = std::max<LONG>(mm->ptMinTrackSize.x, r.right - r.left);
+        }
+        return 0;
     case WM_DPICHANGED: {
         a->sc = LOWORD(wp) / 96.0f; a->makeFonts();
         setWindowIcons(hwnd);
