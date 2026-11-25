@@ -31,14 +31,22 @@ class LiveGain {
 public:
     static constexpr int kRampFrames = 512;   // ~11 ms at 48 kHz
     explicit LiveGain(float g = 1.0f) : target_(g), applied_(g), rampTo_(g) {}
-    void set(float g) { target_.store(g, std::memory_order_relaxed); }
+    // `now`: take it at once instead of ramping -- for a source that isn't sounding
+    // (paused), where a ramp would only start, when it resumes, from a volume that
+    // has since been changed.
+    void set(float g, bool now = false) {
+        target_.store(g, std::memory_order_relaxed);
+        if (now) jump_.store(true, std::memory_order_release);
+    }
 
     // The rest is the audio thread's. A render call takes up any change with
     // begin(), then takes each frame's gain from next() -- or, while steady(), simply
     // value() -- or, for a source silent in this call, jumps there with snap(): with
     // nothing sounding, a step can't click.
     void begin() {
+        const bool jump = jump_.exchange(false, std::memory_order_acquire);
         const float to = target_.load(std::memory_order_relaxed);
+        if (jump) { applied_ = rampTo_ = to; left_ = 0; return; }
         if (to == rampTo_) return;
         rampTo_ = to;
         left_ = kRampFrames;
@@ -56,6 +64,7 @@ public:
     void snap() { applied_ = rampTo_; left_ = 0; }
 private:
     std::atomic<float> target_;
+    std::atomic<bool> jump_{ false };   // set(.., now): begin() lands on target_ at once
     // Audio thread only: the gain the last frame had, the gain it is heading for, and
     // how far each frame moves it for how many frames more.
     float applied_, rampTo_, step_ = 0.0f;
@@ -70,8 +79,8 @@ public:
     void seek(int64_t frame) override;      // frame relative to begin
     int64_t position() const override { return pos_ - begin_; }
     int64_t total() const override { return end_ - begin_; }
-    // Change the volume while it plays (any thread).
-    void setGain(float g) { gain_.set(g); }
+    // Change the volume while it plays (any thread); `now` as LiveGain::set.
+    void setGain(float g, bool now = false) { gain_.set(g, now); }
 private:
     AudioBufferPtr buf_;
     int64_t begin_, end_, pos_;
@@ -95,9 +104,10 @@ public:
     int64_t position() const override { return pos_; }
     int64_t total() const override { return total_; }
     // Change segment `i`'s volume while it plays (any thread): the arrangement is
-    // fixed when the source is built, but its volumes are not. Out of range is ignored.
+    // fixed when the source is built, but its volumes are not. Out of range is ignored;
+    // `now` as LiveGain::set.
     size_t segmentCount() const { return segs_.size(); }
-    void setSegmentGain(size_t i, float g) { if (i < segs_.size()) gains_[i].set(g); }
+    void setSegmentGain(size_t i, float g, bool now = false) { if (i < segs_.size()) gains_[i].set(g, now); }
 private:
     std::vector<TimelineSegment> segs_;
     std::unique_ptr<LiveGain[]> gains_;   // parallel to segs_; atomics, so not a vector

@@ -47,14 +47,14 @@ struct Parsed {
 //                                   sign only means something as a change in dB;
 //   "-inf dB"                        silent.
 // The minus may be typed as a hyphen, a minus sign or an en dash, and a comma may
-// stand for the decimal point. Refused, rather than quietly clamped, past the limits
-// of 0% and +24 dB: a typed number that silently became another is worse than one
-// sent back.
+// stand for the decimal point (but see "1,600" below). Refused, rather than quietly
+// clamped, past the limits of 0% and +24 dB: a typed number that silently became
+// another is worse than one sent back.
 inline Parsed parse(const std::wstring& text) {
     Parsed r;
     std::wstring s;
     for (wchar_t ch : text) {
-        if (ch == L'−' || ch == L'–') ch = L'-';
+        if (ch == L'\u2212' || ch == L'\u2013') ch = L'-';
         if (ch >= L'A' && ch <= L'Z') ch = (wchar_t)(ch - L'A' + L'a');
         s += ch;
     }
@@ -79,11 +79,28 @@ inline Parsed parse(const std::wstring& text) {
     swprintf(maxDbText, 16, L"%+.0f dB", maxDb);
     const std::wstring limit = L"The most a volume can be is " + percent(kMaxClipGain) +
                                L" (" + maxDbText + L").";
-    if (unit == Unit::Db && (s == L"-inf" || s == L"-infinity" || s == L"-∞")) {
+    if (unit == Unit::Db && (s == L"-inf" || s == L"-infinity" || s == L"-\u221E")) {
         r.ok = true; r.gain = 0.0f; return r;
     }
-    if (s.find(L'.') == std::wstring::npos)
+    if (s.find(L'.') == std::wstring::npos) {
+        // A comma with exactly three digits after it is the one place the two readings
+        // part: "1,600" is sixteen hundred to some and 1.6 to others, and either guess
+        // is a volume 60 dB off for the rest. So that is asked about, not guessed --
+        // unless what is before it is a lone 0, which no thousands figure starts with.
+        const size_t comma = s.find(L',');
+        if (comma != std::wstring::npos && comma + 4 == s.size()) {
+            auto digit = [](wchar_t ch) { return ch >= L'0' && ch <= L'9'; };
+            const size_t from = (s[0] == L'+' || s[0] == L'-') ? 1 : 0;
+            const std::wstring whole = s.substr(from, comma - from);
+            const bool three = digit(s[comma + 1]) && digit(s[comma + 2]) && digit(s[comma + 3]);
+            if (three && !whole.empty() && whole != L"0") {
+                r.why = L"Is that comma a thousands separator or a decimal point? Type it "
+                        L"without a comma (1600%), or with a point (1.6%).";
+                return r;
+            }
+        }
         for (wchar_t& ch : s) if (ch == L',') ch = L'.';
+    }
     wchar_t* end = nullptr;
     const double v = s.empty() ? 0.0 : wcstod(s.c_str(), &end);
     if (s.empty() || end == s.c_str() || *end != L'\0' || !std::isfinite(v)) { r.why = kHow; return r; }

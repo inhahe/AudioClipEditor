@@ -53,9 +53,8 @@ int BufferSource::render(float* out, int frames) {
 TimelineSource::TimelineSource(std::vector<TimelineSegment> segs, int64_t totalFrames)
     : segs_(std::move(segs)), gains_(new LiveGain[segs_.size()]), total_(totalFrames) {
     for (size_t i = 0; i < segs_.size(); ++i) {
-        gains_[i].set(segs_[i].gain);
+        gains_[i].set(segs_[i].gain, true);   // starts at its volume, not ramping up to it
         gains_[i].begin();
-        gains_[i].snap();     // starts at its volume, not ramping up to it
     }
 }
 

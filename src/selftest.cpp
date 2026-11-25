@@ -1018,22 +1018,18 @@ int runSelfTest() {
         d.placeClip(tid, a, 0, L"place a");
         d.placeClip(tid, b, len, L"place b");
 
-        // Exactly what the UI's buildTimelineSegments() does, so the thing under
-        // test is the arrangement the user would actually hear.
+        // Built the way the UI's buildTimelineSegments() builds them -- the same walk
+        // and volume (Project::forEachInMix, mixGainOf) and what each clip sounds
+        // like -- so the thing under test is the arrangement the user would hear.
         auto snapshot = [&](const Document& doc) {
             std::vector<TimelineSegment> segs;
-            for (const auto& t : doc.project().tracks) {
-                if (t.muted) continue;
-                for (const auto& pc : t.clips) {
-                    const Clip* c = doc.project().findClip(pc.clipId);
-                    if (!c || !c->buffer) continue;
-                    TimelineSegment s; s.buf = c->buffer; s.timelineStart = pc.startFrame;
-                    s.length = pc.lengthFrames; s.gain = c->gain * t.gain;
-                    segs.push_back(s);
-                }
-            }
-            return std::make_shared<TimelineSource>(std::move(segs),
-                                                    doc.project().timelineLengthFrames());
+            const Project& p = doc.project();
+            p.forEachInMix([&](const Track& t, const PlacedClip& pc, const Clip& c) {
+                TimelineSegment s; s.buf = c.heard(); s.timelineStart = pc.startFrame;
+                s.length = pc.lengthFrames; s.gain = p.mixGainOf(t, c);
+                segs.push_back(s);
+            });
+            return std::make_shared<TimelineSource>(std::move(segs), p.timelineLengthFrames());
         };
         auto peak = [](IPlaybackSource& s, int64_t from, int frames) {
             std::vector<float> buf((size_t)frames * 2, 0.0f);
@@ -3214,6 +3210,9 @@ int runSelfTest() {
             { L"-inf dB", 0.0 }, { L"1600%", 16.0 }, { L"+24 dB", 15.8489 }, { L"+24.1 dB", 16.0 },
             { L"1601%", -1 }, { L"+25 dB", -1 }, { L"-5%", -1 }, { L"abc", -1 }, { L"", -1 },
             { L"12.5.3", -1 }, { L"dB", -1 }, { L"%", -1 }, { L"5 x", -1 },
+            // A comma with three digits after it could be either kind, so it is asked
+            // about -- unless a lone 0 before it settles it.
+            { L"1,600%", -1 }, { L"1,000", -1 }, { L"0,025%", 0.00025 }, { L"12,5%", 0.125 },
         };
         std::wstring bad;
         for (const Case& c : cases) {
@@ -3433,7 +3432,7 @@ int runSelfTest() {
 
         // When the device runs at another rate than the project the engine resamples,
         // and asks the source for one frame per call: the ramp must not collapse into
-        // a step there (it did, when it was spread across each call).
+        // a step there.
         BufferSource one(buf, 0, 4800, 1.0f);
         one.setGain(0.5f);
         float prev = 0.5f, first = 0.0f, f[2] = { 0, 0 };
@@ -3447,6 +3446,23 @@ int runSelfTest() {
         check(smooth && first > 0.49f && f[0] == 0.25f,
               L"live volume: ...also when rendered a frame at a time, as when resampling",
               L"first frame " + std::to_wstring(first) + L", last " + std::to_wstring(f[0]));
+
+        // A source that isn't sounding (paused) takes a new volume at once: resumed, it
+        // must not ramp from the volume it was paused at -- the user has changed it.
+        BufferSource paused(buf, 0, 4800, 1.0f);
+        paused.render(out.data(), 480);
+        paused.setGain(0.5f, true);
+        paused.render(out.data(), 480);
+        const bool previewAtOnce = all(0.25f);
+        std::vector<TimelineSegment> pseg(1);
+        pseg[0].buf = buf; pseg[0].timelineStart = 0; pseg[0].length = 4800; pseg[0].gain = 1.0f;
+        TimelineSource pts(std::move(pseg), 4800);
+        pts.render(out.data(), 480);
+        pts.setSegmentGain(0, 0.5f, true);
+        pts.render(out.data(), 480);
+        check(previewAtOnce && all(0.25f),
+              L"live volume: a paused preview or timeline takes a new volume at once, so resuming "
+              L"doesn't start at the old one");
 
         std::vector<TimelineSegment> segs(2);
         segs[0].buf = buf; segs[0].timelineStart = 0;    segs[0].length = 4800; segs[0].gain = 1.0f;

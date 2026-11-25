@@ -374,28 +374,23 @@ AudioBufferPtr Document::renderMix() const {
     out->channels = 2;
     if (total <= 0) return out;
     out->samples.assign((size_t)total * 2, 0.0f);
-    for (const auto& t : project_.tracks) {
-        if (t.muted) continue;
-        for (const auto& pc : t.clips) {
-            const Clip* c = project_.findClip(pc.clipId);
-            if (!c || !c->buffer) continue;
-            // The same product, in the same order, as the engine's timeline segments
-            // (App::segmentGain), so the file is what Play All played.
-            const float g = c->gain * t.gain * project_.mixGain;
-            const AudioBuffer& heard = *c->heard();
-            int ch = heard.channels;
-            const float* s = heard.samples.data();
-            int64_t len = std::min<int64_t>(pc.lengthFrames, c->frames());
-            for (int64_t i = 0; i < len; ++i) {
-                int64_t d = pc.startFrame + i;
-                if (d < 0 || d >= total) continue;
-                float l = s[i * ch] * g;
-                float r = (ch > 1 ? s[i * ch + 1] : s[i * ch]) * g;
-                out->samples[d * 2]     += l;
-                out->samples[d * 2 + 1] += r;
-            }
+    // The walk and the volume Play All's segments are built from (Project::forEachInMix,
+    // mixGainOf), so the file is what Play All played.
+    project_.forEachInMix([&](const Track& t, const PlacedClip& pc, const Clip& c) {
+        const float g = project_.mixGainOf(t, c);
+        const AudioBuffer& heard = *c.heard();
+        int ch = heard.channels;
+        const float* s = heard.samples.data();
+        int64_t len = std::min<int64_t>(pc.lengthFrames, c.frames());
+        for (int64_t i = 0; i < len; ++i) {
+            int64_t d = pc.startFrame + i;
+            if (d < 0 || d >= total) continue;
+            float l = s[i * ch] * g;
+            float r = (ch > 1 ? s[i * ch + 1] : s[i * ch]) * g;
+            out->samples[d * 2]     += l;
+            out->samples[d * 2 + 1] += r;
         }
-    }
+    });
     return out;
 }
 

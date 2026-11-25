@@ -586,8 +586,9 @@ struct App {
         refresh();
     }
     void edUp(POINT p) {
-        if (GetCapture() == hwnd) ReleaseCapture();
+        // Ended before the capture is let go, as in onLUp (see onCaptureLost).
         int d = editDrag; editDrag = 0;
+        if (GetCapture() == hwnd) ReleaseCapture();
         if (d == 1) {
             if (!dragged && !mainEdgeDrag) { selClipId = editClipId; selStart = selEnd = 0; seekClip(editClipId, edMainFrame(p.x)); }
             // (selStart/selEnd stay sorted during the sweep, so no swap needed; a
@@ -1754,6 +1755,12 @@ struct App {
         const Clip* c = doc.project().findClip(clipId);
         if (!c) return;
         frame = std::max<int64_t>(0, std::min(frame, c->frames()));
+        // The cursor moves to this clip, so whatever else the engine holds -- the
+        // timeline, or another clip's preview -- stops. Left going, it would drive this
+        // clip's cursor (onTimer reads the engine's position as the preview's) with
+        // audio that isn't this clip, and nothing would follow it any more: not the
+        // playhead, not a volume change.
+        if (timelinePlaying || (engine.hasSource() && previewClipId != clipId)) stopAll();
         // Stay inside a selection audition only while the target is still in range.
         const bool keepSel = previewIsSel && previewClipId == clipId && hasSel() &&
                              selClipId == clipId && frame >= selStart && frame < selEnd;
@@ -2809,13 +2816,13 @@ struct App {
         std::wstring path = dlg::saveProject(hwnd, suggested);
         if (path.empty()) return false;
         storeViewState();
-        if (!doc.saveProject(path, saveHistory)) { MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING); return false; }
+        if (!saveDocument(path)) { MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING); return false; }
         setProjectPath(path); setTitle(); reportHistoryCost(); return true;
     }
     bool saveProjectFile() {
         if (projectPath.empty()) return saveProjectAs();
         storeViewState();
-        if (!doc.saveProject(projectPath, saveHistory)) {
+        if (!saveDocument(projectPath)) {
             MessageBoxW(hwnd, L"Could not save project.", L"Save", MB_ICONWARNING);
             return false;
         }
@@ -3177,29 +3184,14 @@ struct App {
         mix((uint64_t)doc.project().timelineLengthFrames());
         return h;
     }
-    // Every placement the timeline plays, in the order its segments are built:
-    // `f(track, placement, clip)` once each. The one walk both building the segments
-    // and updating their volumes go through, so segment i is the same placement in both.
-    template <class F> void forEachTimelineSegment(F&& f) const {
-        for (const Track& t : doc.project().tracks) {
-            if (t.muted) continue;
-            for (const PlacedClip& pc : t.clips) {
-                const Clip* c = doc.project().findClip(pc.clipId);
-                if (!c || !c->buffer) continue;
-                f(t, pc, *c);
-            }
-        }
-    }
-    // A placement's volume in the mix -- the product Document::renderMix applies, in
-    // the same order, so Export Mixdown writes what Play All played.
-    float segmentGain(const Track& t, const Clip& c) const {
-        return c.gain * t.gain * doc.project().mixGain;
-    }
+    // One segment per Project::forEachInMix placement, in its order -- the walk
+    // syncPlaybackGains goes through too, so segment i is the same placement in both.
     // Returns false when there is nothing to play at all.
     bool buildTimelineSegments(std::vector<TimelineSegment>& segs, int64_t& total) const {
-        forEachTimelineSegment([&](const Track& t, const PlacedClip& pc, const Clip& c) {
+        const Project& p = doc.project();
+        p.forEachInMix([&](const Track& t, const PlacedClip& pc, const Clip& c) {
             TimelineSegment s; s.buf = c.heard(); s.timelineStart = pc.startFrame; s.length = pc.lengthFrames;
-            s.gain = segmentGain(t, c);
+            s.gain = p.mixGainOf(t, c);
             segs.push_back(s);
         });
         total = doc.project().timelineLengthFrames();
@@ -3227,17 +3219,23 @@ struct App {
     // arrangement has changed since it was armed is left alone -- its segment i may
     // no longer be this walk's i -- until syncTimelineSource or the next Play re-arms
     // it. `fp` is timelineFingerprint(), when the caller has it already.
+    //
+    // A source that isn't sounding takes its volume at once rather than ramping to it:
+    // resumed, a ramp would start from the volume it was paused at, and play the
+    // first moments at a level the user has since changed.
     void syncPlaybackGains() { syncPlaybackGains(timelinePlaying ? timelineFingerprint() : 0); }
     void syncPlaybackGains(uint64_t fp) {
         if (!engine.hasSource()) return;
+        const bool now = !engine.isPlaying();
         if (timelinePlaying) {
             if (!armedTimeline || fp != armedFingerprint) return;
             size_t i = 0;
-            forEachTimelineSegment([&](const Track& t, const PlacedClip&, const Clip& c) {
-                armedTimeline->setSegmentGain(i++, segmentGain(t, c));
+            const Project& p = doc.project();
+            p.forEachInMix([&](const Track& t, const PlacedClip&, const Clip& c) {
+                armedTimeline->setSegmentGain(i++, p.mixGainOf(t, c), now);
             });
         } else if (armedPreview && previewClipId >= 0 && previewClipId == armedPreviewClipId) {
-            if (const Clip* c = doc.project().findClip(previewClipId)) armedPreview->setGain(c->gain);
+            if (const Clip* c = doc.project().findClip(previewClipId)) armedPreview->setGain(c->gain, now);
         }
     }
 
@@ -3665,8 +3663,13 @@ struct App {
                     SetCapture(hwnd); refresh(); return;
                 }
             }
+            // A track scrolled up under the ruler isn't drawn there (paintTimeline clips
+            // the tracks to start below it), so it takes no clicks there either: the
+            // ruler row is the ruler's, and the header corner beside it is nobody's.
+            const bool belowRuler = p.y >= rcTimeline.top + rulerH;
             // header hits
             for (auto& tl : trackLays) {
+                if (!belowRuler) break;
                 if (PtInRect(&tl.delRc, p) && doc.project().tracks.size() > 1) {
                     doc.removeTrack(tl.trackId); afterHistory(); return;
                 }
@@ -3686,7 +3689,7 @@ struct App {
                     std::wstring nm = t?t->name:L""; if (dlg::promptText(hwnd,L"Rename track",L"Track name:",nm)){doc.renameTrack(tl.trackId,nm);refresh();} return;
                 }
             }
-            const PlacedLayout* pl = placedAt(p);
+            const PlacedLayout* pl = belowRuler ? placedAt(p) : nullptr;
             if (pl) {
                 mode = Mode::ClipMove; moveTrackId = pl->trackId; moveIndex = pl->index; dragClipId = pl->clipId;
                 // Ripple or plain move? See the rippleDrag declaration for the
@@ -3883,16 +3886,33 @@ struct App {
     static bool isVolumeDrag(Mode m) {
         return m == Mode::ClipVolume || m == Mode::TrackVolume || m == Mode::MixVolume;
     }
+    // The volume a drag of kind `m` is moving, live in the project; null when `m` is
+    // no volume drag or its clip or track is gone.
+    float* draggedVolume(Mode m) {
+        if (m == Mode::ClipVolume) { if (Clip* c = doc.project().findClip(dragClipId)) return &c->gain; }
+        else if (m == Mode::TrackVolume) { if (Track* t = doc.project().findTrack(volTrackId)) return &t->gain; }
+        else if (m == Mode::MixVolume) return &doc.project().mixGain;
+        return nullptr;
+    }
+    // Save the project as its edits have it. A volume drag under way (Ctrl+S held
+    // mid-drag) is live in the project but not an edit yet -- not in the history the
+    // file also holds, and Esc can still take it back -- so the file gets the volume
+    // the drag started from, and the drag carries on.
+    bool saveDocument(const std::wstring& path) {
+        float* live = draggedVolume(mode);
+        const float now = live ? *live : 0.0f;
+        if (live) *live = volDragFrom;
+        const bool ok = doc.saveProject(path, saveHistory);
+        if (live) *live = now;
+        return ok;
+    }
 
     // End a volume slider drag. The drag moves the volume live so it is heard and
     // seen as it goes; this puts the volume it started from back and, when the drag
     // is kept, sets the one it ended on through the Document -- so a drag is one undo
     // step, and a click that leaves the volume where it was is none.
     void finishVolumeDrag(Mode m, bool keep) {
-        float* live = nullptr;
-        if (m == Mode::ClipVolume) { if (Clip* c = doc.project().findClip(dragClipId)) live = &c->gain; }
-        else if (m == Mode::TrackVolume) { if (Track* t = doc.project().findTrack(volTrackId)) live = &t->gain; }
-        else if (m == Mode::MixVolume) live = &doc.project().mixGain;
+        float* live = draggedVolume(m);
         if (!live) return;
         const float to = *live;
         *live = volDragFrom;
@@ -3966,7 +3986,8 @@ struct App {
             if (cl) { clipContextMenu(cl->clipId, p); return; }
             libraryContextMenu(p); return;
         }
-        if (PtInRect(&rcTimeline, p)) {
+        // Below the ruler only, as in onLDown: a track scrolled up under it isn't there.
+        if (PtInRect(&rcTimeline, p) && p.y >= rcTimeline.top + rulerH) {
             const PlacedLayout* pl = placedAt(p);
             if (pl) {
                 // Read the identity out now: the menu is modal, and acting on it
@@ -4523,7 +4544,10 @@ struct App {
     // with no button held -- a volume drag audibly. It is cancelled as Esc would
     // cancel it, and one that can't be (zoom, scrolling: nothing to take back) just ends.
     void onCaptureLost(HWND to) {
-        if (to == hwnd || mode == Mode::None) return;
+        if (to == hwnd) return;
+        // The full-window editor keeps its gestures in editDrag, not in `mode`.
+        if (editorActive()) { if (editDrag != 0) cancelDrag(); return; }
+        if (mode == Mode::None) return;
         if (!cancelDrag()) { mode = Mode::None; dragged = false; refresh(); }
     }
 

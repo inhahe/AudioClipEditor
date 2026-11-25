@@ -153,4 +153,21 @@ struct Project {
                 mx = std::max(mx, pc.endFrame());
         return mx;
     }
+
+    // Every placement the mix plays -- on an unmuted track, of a clip that exists and
+    // has audio -- in track order, then placement order: `f(track, placement, clip)`
+    // once each. The one walk Play All's segments, Export Mixdown and the selftest all
+    // go through, so what plays, what is written and what is tested can't drift apart.
+    template <class F> void forEachInMix(F&& f) const {
+        for (const Track& t : tracks) {
+            if (t.muted) continue;
+            for (const PlacedClip& pc : t.clips) {
+                const Clip* c = findClip(pc.clipId);
+                if (c && c->buffer) f(t, pc, *c);
+            }
+        }
+    }
+    // A placement's volume in the mix: its clip's, times its track's, times the mix
+    // volume -- in that order, so playback and the exported file round alike.
+    float mixGainOf(const Track& t, const Clip& c) const { return c.gain * t.gain * mixGain; }
 };

@@ -11,7 +11,7 @@ sync with behavior changes.
 | File | Role |
 |---|---|
 | `audio_buffer.h` | `AudioBuffer` (interleaved float PCM, `sampleRate`/`channels`/`samples`), `AudioBufferPtr` (`shared_ptr`), `sliceBuffer` (the one range copy that crop, new clip, export and split-out all use), `PeakCache` min/max bucket envelope for waveform drawing |
-| `model.h` | `Clip` (id, name, `buffer` = its own audio, `eq` = its timbre EQ curve and `eqBuffer` the audio through it, `heard()`, peaks of what is heard, gain, **timestamp**), `ClipEq`, `Track` (id, name, gain, placed clips, plus the pure lane arithmetic `gapBefore`/`ripple`/`overlaps`), `PlacedClip` (clipId + start frame), `Project` (library order = display order; `mixGain`, the mix volume) |
+| `model.h` | `Clip` (id, name, `buffer` = its own audio, `eq` = its timbre EQ curve and `eqBuffer` the audio through it, `heard()`, peaks of what is heard, gain, **timestamp**), `ClipEq`, `Track` (id, name, gain, placed clips, plus the pure lane arithmetic `gapBefore`/`ripple`/`overlaps`), `PlacedClip` (clipId + start frame), `Project` (library order = display order; `mixGain`, the mix volume; `forEachInMix`, the one walk over what the mix plays, and `mixGainOf`, a placement's volume in it — shared by Play All, Export Mixdown and the selftest) |
 | `decoder.{h,cpp}` | MF Source Reader → stereo float at the project rate |
 | `encoder.{h,cpp}` | WAV writer (manual RIFF; 16/24-bit PCM, 32-bit float) + MF Sink Writer (MP3/AAC/WMA); output-rate resampling |
 | `engine.{h,cpp}` | WASAPI shared-mode render thread, which owns the device's COM objects in its own apartment (opens, renders, closes); `BufferSource` (single-clip preview) and `TimelineSource` (all-tracks mix), whose volumes can be changed while they play (`LiveGain`, ramped over 512 frames); linear resample project→device rate on the audio thread |
@@ -21,7 +21,7 @@ sync with behavior changes.
 | `match.{h,cpp}` | Making clips alike, shared by the volume and timbre matchers: which clips a command involves (`ClipSet` — a track, all tracks, the library, or one clip to the rest), what they are matched to, and each matcher's compute-and-measure pass (`matchVolume`, `matchTimbre`); pure, so the selftest reaches it |
 | `waveform.{h,cpp}` | GDI oscilloscope: per-column min/max envelope (one `PolyPolyline`) zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner, remove-non-voice, match-timbre and match-volume options, a volume typed in (`volume`), history list, file/project pickers |
-| `volume.h` | Pure: a volume as text — the readouts' `percent` and `decibels`, and `parse` for what is typed into the volume box (a percentage or dB, refused past 0% … +24 dB) |
+| `volume.h` | Pure: a volume as text — the readouts' `percent` and `decibels`, and `parse` for what is typed into the volume box (a percentage or dB, refused past 0% … +24 dB, and a "1,600" that could be read two ways asked about rather than guessed) |
 | `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`), toolbar row wrapping (`flowButtons` for the editor toolbar, `flowTransport` for the main transport bar, whose widths are `transportMetrics`), scrollbar sizing (`scrollBarsNeeded`, `scrollThumb`, `scrollFromThumb`), `scrollToReveal`, and the volume slider's scale (`volumeToFrac` / `fracToVolume`: 0–100% linear on the left half, 100% → +24 dB on the right with dB rising as the square of the distance, so every volume a clip or track can have — including what volume matching sets — has a position, and 100–200% keeps half of that side for fine work) |
 | `transport.h` | Pure play/pause decision logic, likewise split out to be testable: `decide(State, Press)` → pause / resume / restart-from-where, for both the single combined control and the editor's labelled button pair |
 | `selhistory.h` | Pure undo/redo state machine for the waveform selection, kept out of the document's snapshot tree; a `base` token ties the stack to a point in the document history |
@@ -1038,8 +1038,9 @@ non-destructive settings rather than rewritten audio:
 | **Track** (`Track::gain`) | the slider in its header, under a "Volume 100%" line | its placements, in the mix |
 | **Mix** (`Project::mixGain`) | **Mix volume** on the toolbar, by Play All | the whole mix — Play All and *Export Mixdown* — on top of the other two |
 
-In the mix a placement is heard at clip × track × mix (`App::segmentGain` for
-playback, `Document::renderMix` for the file, the same product in the same order).
+In the mix a placement is heard at clip × track × mix (`Project::mixGainOf`, which
+playback's segments and `Document::renderMix`'s file both take, over the same walk,
+`Project::forEachInMix`).
 The mix volume deliberately does **not** reach a clip heard on its own: the card's
 play button and *Export clip* play the clip at its own volume, which is what keeps
 "the card plays what Export clip writes" true; a mix volume there would be a second,
@@ -1063,7 +1064,9 @@ in the history.
   so the first click of the double-click that opens the box doesn't move it. A
   project replaced mid-drag (another copy handing one over) drops the drag *without*
   putting anything back: the clip, track or mix it would write to is the new
-  project's.
+  project's. A save mid-drag (Ctrl+S) writes the volume the drag started from
+  (`App::saveDocument`): the drag isn't an edit yet — not in the history the file
+  also holds, and Esc can still take it back — and it carries on afterwards.
 - **Type it in** (`dlg::volume`): right-click a card → *Set volume (now 150%)…*, a
   placed clip → *Set this clip's volume…*, a track header → *Set track volume…* or
   *Mix volume — all tracks…*, or *Track ▸ Mix volume…* — or double-click the % readout
@@ -1212,6 +1215,11 @@ no indication of how much arrangement lay off-screen or where in it you were, an
 during playback the playhead simply left the window and never came back.
 
 Three things address that, all keyed off `tlScrollX` (which already existed):
+
+(Scrolled vertically, a track can sit partly under the ruler, where it isn't drawn:
+the lanes are clipped to start below it. Clicks there go to the ruler, not to the
+hidden header's ✕, name, volume or lane — `onLDown` and `onRDown` hit-test tracks
+only below the ruler.)
 
 - **A horizontal scrollbar** along the bottom of the tracks pane. It spans the
   *lane* area only, starting at `trackHeaderW`, so it sits under exactly the
@@ -1703,11 +1711,13 @@ anything — which matters, since the arrangement can change from clip drags,
 ripples, mutes, deletions, destructive edits, undo, redo and history jumps.
 
 **Volumes are not in it.** Each segment's gain (clip × track × mix,
-`App::segmentGain`, the product `renderMix` applies too) is a `LiveGain` the UI
-can set while the source plays: `syncPlaybackGains` walks the placements in the
-same order the segments were built (`forEachTimelineSegment`, the one walk both
-use) and hands each its volume — from every timer tick while playing, from each step
-of a slider drag, and before a resume. Re-arming for a volume would restart from the
+`Project::mixGainOf`, which `renderMix` applies too) is a `LiveGain` the UI can set
+while the source plays: `syncPlaybackGains` walks the placements in the same order
+the segments were built (`Project::forEachInMix`, the one walk both use) and hands
+each its volume — from every timer tick while playing, from each step of a slider
+drag, and before a resume. A source that isn't sounding (paused) takes it at once
+rather than ramping (`LiveGain::set(g, now)`): resumed, a ramp would start from the
+volume it was paused at, which the user has since changed. Re-arming for a volume would restart from the
 *heard* position on every step of a drag, repeating the audio already queued each
 time. A `LiveGain` ramps a change over `kRampFrames` (512) frames, since a step is a
 click and a dragged slider is a run of steps. The ramp is counted in frames, not
@@ -1773,7 +1783,10 @@ Three functions own all of it:
   immediately (staying inside the selection audition only while the target is
   still within it); while stopped or paused it just records `previewCursor` and
   sets `previewSeekPending`, so clicking the waveform decides where the next
-  play/resume picks up.
+  play/resume picks up. Whatever else the engine holds — the timeline, or another
+  clip's preview — is stopped first: left going, it went on driving this clip's
+  cursor (`onTimer` reads the engine's position as the preview's) with audio that
+  wasn't this clip, while the playhead froze and nothing reached it any more.
 
 `onTimer` tracks the cursor as `previewBegin + engine.position()` and `onPlayEnd`
 parks it at `previewEnd` — neither reads the live selection, so editing the
