@@ -3195,6 +3195,50 @@ int runSelfTest() {
               L"volume slider: louder all the way along, and clamped at both ends");
     }
 
+    // ---- a card's volume row (layout::cardMetrics / cardVolumeRow)
+    // A card is as wide as its clip is long, but its volume slider is one length on
+    // every card, so the same drag is the same change whichever clip it is on, and a
+    // short clip's is long enough to set. The narrowest card holds that row and the
+    // selection's Crop / New clip buttons.
+    {
+        bool same = true, fits = true, buttons = true;
+        std::wstring bad;
+        for (float sc : { 1.0f, 1.25f, 1.5f, 2.0f }) {
+            const layout::CardMetrics m = layout::cardMetrics(sc);
+            for (int w = m.minW; w <= 3000; w += 37) {
+                const RECT card = { 50, 200, 50 + w, 320 };
+                const layout::CardVolumeRow r = layout::cardVolumeRow(m, card);
+                if (r.slider.right - r.slider.left != m.volW || r.slider.left != card.left + m.volLeft) {
+                    same = false; bad = std::to_wstring(w) + L" px card";
+                }
+                if (r.readout.right > card.right - m.rightPad) fits = false;
+            }
+            if (m.minW - 2 * m.waveInset < m.selInset + m.saveW + m.selGap + m.cropW) buttons = false;
+        }
+        check(same, L"card volume: the slider is the same length on every card, however long its clip", bad);
+        check(fits, L"card volume: ...and it and its readout fit on the narrowest card");
+        check(buttons, L"card: the narrowest card's waveform holds the Crop and New clip buttons");
+        // The readout is drawn in the small font, unclipped: at its widest, and the
+        // smallest volume it shows.
+        int spare = 100000;
+        for (float sc : { 1.0f, 1.5f }) {
+            auto S = [&](int v) { return (int)(v * sc + 0.5f); };
+            const layout::CardMetrics m = layout::cardMetrics(sc);
+            HDC sdc = GetDC(nullptr);
+            HFONT fs = CreateFontW(-S(12), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                                   OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                   VARIABLE_PITCH, L"Segoe UI");
+            HGDIOBJ of = SelectObject(sdc, fs);
+            for (const wchar_t* t : { L"1600%", L"<0.1%" }) {
+                SIZE sz{}; GetTextExtentPoint32W(sdc, t, (int)wcslen(t), &sz);
+                spare = std::min(spare, (int)(m.pctW - sz.cx));
+            }
+            SelectObject(sdc, of); DeleteObject(fs); ReleaseDC(nullptr, sdc);
+        }
+        check(spare >= 2, L"card volume: the readout fits its widest value at 100% and 150% DPI",
+              std::to_wstring(spare) + L" px spare");
+    }
+
     // ---- a volume as text (volume.h): what the readouts say and the box reads
     // Both units, since people think of a volume both ways; refused rather than quietly
     // clamped past the limits, since a typed number that silently became another is

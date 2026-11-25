@@ -13,8 +13,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   Foundation can decode (WAV, MP3, M4A/AAC, FLAC, WMA, …). Clips show in a
   word-wrapped grid of cards, each with an **oscilloscope waveform** (a min/max
   envelope that turns into a real sample-accurate scope trace as you zoom in). Card widths
-  are **proportional to clip length** at the same scale as the timeline, and a
-  global **Scale** slider in the toolbar zooms both together.
+  are **proportional to clip length** at the same scale as the timeline (down to a
+  minimum that fits the card's controls), and a global **Scale** slider in the
+  toolbar zooms both together.
 - **Rearrange the clip library.** Drag a card by its title bar and drop it in a
   new spot to reorder the grid (a caret shows where it will land), or **right-click
   the empty library area** to sort every clip **by name (A–Z)** or **by time
@@ -161,7 +162,8 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   than the one you paused.
 - **Clip, track and mix volume.** Three volumes, each with a slider and its value
   beside it:
-  - a **clip's**, along the bottom of its card — it applies wherever the clip plays:
+  - a **clip's**, along the bottom of its card (the same length on every card, however
+    long the clip) — it applies wherever the clip plays:
     its card, *Export clip*, and every place it is on the timeline;
   - a **track's**, in its header under the *Volume* line;
   - the **mix volume**, on the toolbar by *Play All* — the whole mix, *Play All* and

@@ -764,8 +764,10 @@ struct App {
         int cardH = S(120);
         // Card widths are proportional to clip duration at the shared timeline
         // scale (pxPerSec), so a clip is drawn the same length here as it is on a
-        // track. Floored so the controls stay usable, capped to the viewport.
-        int minW = S(120);
+        // track. Floored so the controls fit (layout::cardMetrics), capped to the
+        // viewport.
+        const layout::CardMetrics cm = layout::cardMetrics(sc);
+        int minW = cm.minW;
         int maxRight = rcLibrary.right - pad;
         int maxW = std::max(minW, (int)(rcLibrary.right - rcLibrary.left) - 2 * pad);
         int x = rcLibrary.left + pad;
@@ -783,17 +785,17 @@ struct App {
             cl.top = { x, y, x + cardW, y + S(24) };
             cl.play = { x + S(6), y + S(4), x + S(6) + S(16), y + S(4) + S(16) };
             cl.del = { x + cardW - S(20), y + S(4), x + cardW - S(4), y + S(20) };
-            cl.wave = { x + S(8), y + S(28), x + cardW - S(8), y + cardH - S(30) };
-            cl.vol  = { x + S(40), y + cardH - S(24), x + cardW - S(44), y + cardH - S(8) };
-            cl.volPct = { cl.vol.right + S(4), cl.vol.top - S(2), x + cardW - S(6), cl.vol.bottom + S(2) };
+            cl.wave = { x + cm.waveInset, y + S(28), x + cardW - cm.waveInset, y + cardH - S(30) };
+            const layout::CardVolumeRow vr = layout::cardVolumeRow(cm, cl.card);
+            cl.vol = vr.slider;
+            cl.volPct = vr.readout;
             // Selection-action buttons overlaid at the top-right of the waveform;
-            // only drawn / hit-tested while this clip has an active selection.
+            // only drawn / hit-tested while this clip has an active selection. The
+            // narrowest card is wide enough for both (cardMetrics).
             { int bh = S(17), by0 = cl.wave.top + S(3);
-              int savW = S(58), crpW = S(42), inset = S(4), gap2 = S(4);
-              int bx1 = cl.wave.right - inset;
-              cl.savesel = { bx1 - savW, by0, bx1, by0 + bh };
-              cl.crop    = { cl.savesel.left - gap2 - crpW, by0, cl.savesel.left - gap2, by0 + bh };
-              if (cl.crop.left < cl.wave.left) cl.crop.left = cl.wave.left; }
+              int bx1 = cl.wave.right - cm.selInset;
+              cl.savesel = { bx1 - cm.saveW, by0, bx1, by0 + bh };
+              cl.crop    = { cl.savesel.left - cm.selGap - cm.cropW, by0, cl.savesel.left - cm.selGap, by0 + bh }; }
             cards.push_back(cl);
             x += cardW + pad;
         }
@@ -1297,7 +1299,7 @@ struct App {
             RECT spk = { cl.card.left + S(8), cl.vol.top - S(2), cl.vol.left - S(2), cl.vol.bottom + S(2) };
             textOut(h, spk, L"\U0001F509", col::dim, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             drawSlider(h, cl.vol, c->gain);
-            textOut(h, cl.volPct, gainLabel(c->gain), col::dim, fSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            textOut(h, cl.volPct, gainLabel(c->gain), col::dim, fSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
         // insertion caret while reordering a clip within the library
         if (mode == Mode::CardDrag && dragged && !cards.empty()) {

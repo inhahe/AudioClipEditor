@@ -260,6 +260,49 @@ inline int scrollToReveal(int scrollPos, int visLen, int x0, int x1,
     return want;
 }
 
+// A library card's volume row, and the narrowest a card may be, at UI scale `sc`
+// (S as in transportMetrics). A card is as wide as its clip is long, but its volume
+// slider is one length on every card -- the length of the track headers' -- so the
+// same drag is the same change of volume whichever clip it is on, and a short clip's
+// slider is not too short to set. The narrowest card is the one that holds that row
+// (the speaker, the slider, and the readout after it at its widest, "1600%") and the
+// Crop / New clip buttons a selection puts over the waveform.
+struct CardMetrics {
+    int volLeft = 0;          // the slider's left edge, from the card's; the speaker is before it
+    int volW = 0;             // the slider's length, on every card
+    int pctGap = 0, pctW = 0; // the readout, right after the slider
+    int rightPad = 0;         // from the readout to the card's right edge, at its narrowest
+    int rowTop = 0, rowBottom = 0;   // the slider's band, measured up from the card's bottom
+    int readoutOverhang = 0;  // the readout's band reaches this far past the slider's
+    int waveInset = 0;        // the waveform's inset from the card's sides
+    int selInset = 0, selGap = 0, saveW = 0, cropW = 0;   // the selection buttons
+    int minW = 0;             // the narrowest card
+};
+
+inline CardMetrics cardMetrics(float sc) {
+    auto S = [sc](int v) { return (int)(v * sc + 0.5f); };
+    CardMetrics m;
+    m.volLeft = S(34); m.volW = S(84); m.pctGap = S(6); m.pctW = S(40); m.rightPad = S(8);
+    m.rowTop = S(24); m.rowBottom = S(8); m.readoutOverhang = S(2);
+    m.waveInset = S(8); m.selInset = S(4); m.selGap = S(4); m.saveW = S(58); m.cropW = S(42);
+    const int volumeRow = m.volLeft + m.volW + m.pctGap + m.pctW + m.rightPad;
+    const int buttons = 2 * m.waveInset + m.selInset + m.saveW + m.selGap + m.cropW;
+    m.minW = std::max(volumeRow, buttons);
+    return m;
+}
+
+// The slider and its readout on `card`: the same length and the same place on every
+// card, whatever its width.
+struct CardVolumeRow { RECT slider, readout; };
+inline CardVolumeRow cardVolumeRow(const CardMetrics& m, const RECT& card) {
+    CardVolumeRow r;
+    r.slider = { card.left + m.volLeft, card.bottom - m.rowTop,
+                 card.left + m.volLeft + m.volW, card.bottom - m.rowBottom };
+    r.readout = { r.slider.right + m.pctGap, r.slider.top - m.readoutOverhang,
+                  r.slider.right + m.pctGap + m.pctW, r.slider.bottom + m.readoutOverhang };
+    return r;
+}
+
 // The volume slider's scale, on cards and track headers alike: slider position
 // 0..1 <-> linear gain. The left half is 0..100%, linear. The right half runs from
 // 100% up to `maxGain` (the most a volume can be, +24 dB), with dB rising as the
