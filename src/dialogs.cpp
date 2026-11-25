@@ -160,7 +160,9 @@ struct ScopeLine {
         // Wraps onto the second line it may have. No SS_ENDELLIPSIS: that makes a
         // static single-line whatever else is set, so the second line would never
         // be used. SS_EDITCONTROL keeps a partly-visible third line from showing.
-        HWND lbl = ui.label(text.c_str(), ui.margin, y, contentW, height, SS_EDITCONTROL);
+        // SS_NOPREFIX: the line quotes clip and track names, and an & in one is a
+        // character to show, not a mnemonic to underline the next letter with.
+        HWND lbl = ui.label(text.c_str(), ui.margin, y, contentW, height, SS_EDITCONTROL | SS_NOPREFIX);
         y += step(ui);
         return lbl;
     }
@@ -626,7 +628,7 @@ bool voiceCleaner(HWND parent, VoiceCleanerContext& ctx) {
     EnableWindow(st.btnProfile, ctx.noiseSelection != nullptr);
     y += step;
 
-    st.stStatus = ui.label(L"", ui.margin, y, contentW, statusSz.cy);
+    st.stStatus = ui.label(L"", ui.margin, y, contentW, statusSz.cy, SS_NOPREFIX);   // quotes a clip name
     y += statusSz.cy + ui.S(8);
 
     wchar_t num[64];
