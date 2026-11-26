@@ -170,10 +170,8 @@ struct PlaybackEngine::Impl {
 
     std::vector<float> mixbuf;      // stereo scratch
 
-    // format info
-    bool isFloat = false;
-    int bits = 32;
-    int dchannels = 2;
+    // The open device's format, as deviceFormatOf read it; the audio thread's alone.
+    DeviceFormat fmt;
 
     // resampler (source/project rate -> device rate), active only when they differ
     bool rsActive = false;
@@ -311,31 +309,28 @@ std::wstring PlaybackEngine::openStream(bool& none) {
         (void**)d_->client.GetAddressOf());
     if (FAILED(hr)) return L"Could not activate audio client.";
 
+    // Its name, for what the user is told: where the sound goes, or why it can't.
+    std::wstring name;
+    ComPtr<IPropertyStore> props;
+    if (SUCCEEDED(d_->device->OpenPropertyStore(STGM_READ, props.GetAddressOf()))) {
+        PROPVARIANT v;
+        PropVariantInit(&v);
+        if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &v)) && v.vt == VT_LPWSTR && v.pwszVal)
+            name = v.pwszVal;
+        PropVariantClear(&v);
+    }
+
     hr = d_->client->GetMixFormat(&d_->mix);
     if (FAILED(hr)) return L"Could not get device mix format.";
 
-    // The format is the audio thread's alone (writeFrames), so it needs no lock.
-    WAVEFORMATEX* wf = d_->mix;
-    d_->dchannels = wf->nChannels;
-    d_->bits = wf->wBitsPerSample;   // the container: a 24-in-32 format is written as 32
-    bool pcm = false;
-    if (wf->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
-        d_->isFloat = true;
-    } else if (wf->wFormatTag == WAVE_FORMAT_PCM) {
-        d_->isFloat = false; pcm = true;
-    } else if (wf->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-        auto* ext = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(wf);
-        d_->isFloat = (ext->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
-        pcm = (ext->SubFormat == KSDATAFORMAT_SUBTYPE_PCM);
-    }
     // Windows mixes in 32-bit float, so that is what a shared stream is all but always
-    // given; anything this can't write is said, not written in the wrong width.
-    if ((!d_->isFloat && !pcm) || !writableDeviceFormat(d_->isFloat, d_->bits) || d_->dchannels < 1) {
-        wchar_t why[160];
-        swprintf(why, 160, L"The output device's format (%d-bit %s, %d channels) isn't one this app can play to.",
-                 d_->bits, d_->isFloat ? L"float" : pcm ? L"integer" : L"non-PCM", d_->dchannels);
-        return why;
-    }
+    // given; a format this can't write is said, not written in the wrong width. The
+    // format is the audio thread's alone (renderLoop), so it needs no lock.
+    WAVEFORMATEX* wf = d_->mix;
+    d_->fmt = deviceFormatOf(*wf);
+    if (!d_->fmt.ok)
+        return (name.empty() ? std::wstring(L"The output device") : L"“" + name + L"”") +
+               L" uses a format this app can't play to: " + d_->fmt.problem + L".";
     const int rate = (int)wf->nSamplesPerSec;
 
     REFERENCE_TIME dur = 30 * 10000; // 30 ms
@@ -363,15 +358,6 @@ std::wstring PlaybackEngine::openStream(bool& none) {
     }
 
     d_->mixbuf.resize((size_t)d_->bufferFrames * 2);
-    std::wstring name;
-    ComPtr<IPropertyStore> props;
-    if (SUCCEEDED(d_->device->OpenPropertyStore(STGM_READ, props.GetAddressOf()))) {
-        PROPVARIANT v;
-        PropVariantInit(&v);
-        if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &v)) && v.vt == VT_LPWSTR && v.pwszVal)
-            name = v.pwszVal;
-        PropVariantClear(&v);
-    }
     {
         // What the UI thread reads as well -- the rate, the resampler, the clock, the
         // heard timeline and where the sound goes -- under the lock: on a reopen it may
@@ -550,11 +536,40 @@ void PlaybackEngine::shutdown() {
     d_.reset();
 }
 
-bool writableDeviceFormat(bool isFloat, int bits) {
-    return isFloat ? bits == 32 : (bits == 16 || bits == 24 || bits == 32);
+DeviceFormat deviceFormatOf(const WAVEFORMATEX& wf) {
+    DeviceFormat f;
+    f.channels = wf.nChannels;
+    f.bits = wf.wBitsPerSample;
+    bool pcm = false;
+    if (wf.wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+        f.isFloat = true;
+    } else if (wf.wFormatTag == WAVE_FORMAT_PCM) {
+        pcm = true;
+    } else if (wf.wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+               wf.cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+        const auto& ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE&>(wf);
+        f.isFloat = ext.SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+        pcm = ext.SubFormat == KSDATAFORMAT_SUBTYPE_PCM;
+    }
+    wchar_t why[160] = L"";
+    if (!f.isFloat && !pcm)
+        swprintf(why, 160, L"its samples are neither PCM nor float (format tag %u)", (unsigned)wf.wFormatTag);
+    else if (f.isFloat ? f.bits != 32 : (f.bits != 16 && f.bits != 24 && f.bits != 32))
+        swprintf(why, 160, L"%d-bit %s samples", f.bits, f.isFloat ? L"float" : L"integer");
+    else if (f.channels < 1)
+        swprintf(why, 160, L"no channels");
+    else if (wf.nBlockAlign != f.channels * (f.bits / 8))
+        swprintf(why, 160, L"%u-byte frames, where %d channels of %d-bit samples take %d",
+                 (unsigned)wf.nBlockAlign, f.channels, f.bits, f.channels * (f.bits / 8));
+    f.problem = why;
+    f.ok = f.problem.empty();
+    return f;
 }
 
-void writeDeviceFrames(void* dst, const float* stereo, int frames, int dch, bool isFloat, int bits) {
+bool writeDeviceFrames(void* dst, const float* stereo, int frames, const DeviceFormat& f) {
+    if (!f.ok) return false;
+    const int dch = f.channels, bits = f.bits;
+    const bool isFloat = f.isFloat;
     auto sampleFor = [&](int i, int c) {
         const float l = stereo[i * 2], r = stereo[i * 2 + 1];
         return (dch == 1) ? 0.5f * (l + r) : (c == 0 ? l : c == 1 ? r : 0.0f);
@@ -577,16 +592,12 @@ void writeDeviceFrames(void* dst, const float* stereo, int frames, int dch, bool
                 uint8_t* s = o + ((size_t)i * dch + c) * 3;
                 s[0] = (uint8_t)(q & 0xFF); s[1] = (uint8_t)((q >> 8) & 0xFF); s[2] = (uint8_t)((q >> 16) & 0xFF);
             }
-    } else if (bits == 32) {
+    } else {   // 32-bit: the only integer width left that deviceFormatOf accepts
         int32_t* o = (int32_t*)dst;
         for (int i = 0; i < frames; ++i)
             for (int c = 0; c < dch; ++c) o[i * dch + c] = (int32_t)llrint((double)clamp(sampleFor(i, c)) * 2147483647.0);
     }
-    // Any other format was refused by openStream (writableDeviceFormat): nothing is written.
-}
-
-void PlaybackEngine::writeFrames(void* dst, const float* stereo, int frames) {
-    writeDeviceFrames(dst, stereo, frames, d_->dchannels, d_->isFloat, d_->bits);
+    return true;
 }
 
 void PlaybackEngine::threadMain() {
@@ -649,7 +660,7 @@ void PlaybackEngine::renderLoop() {
         if (streamLost(hr)) { reopenStream(); continue; }
         if (FAILED(hr)) continue;
 
-        bool endReached = false;
+        bool endReached = false, silent = false;
         int produced = 0;
         {
             std::lock_guard<std::mutex> lk(d_->mtx);
@@ -673,11 +684,14 @@ void PlaybackEngine::renderLoop() {
             } else {
                 std::memset(d_->mixbuf.data(), 0, sizeof(float) * 2 * avail);
             }
-            writeFrames(pData, d_->mixbuf.data(), (int)avail);
+            // A format that can't be written was refused when the device was opened; were
+            // one to get here regardless, the buffer is let go as silence -- never as
+            // whatever it held.
+            silent = !writeDeviceFrames(pData, d_->mixbuf.data(), (int)avail, d_->fmt);
             const int64_t srcAfter = d_->source ? d_->source->position() : srcBefore;
             d_->heard.push((int32_t)avail, (int32_t)(srcAfter - srcBefore), srcAfter);
         }
-        d_->render->ReleaseBuffer(avail, 0);
+        d_->render->ReleaseBuffer(avail, silent ? AUDCLNT_BUFFERFLAGS_SILENT : 0);
 
         if (endReached) fire(&PlaybackEngine::endCb_);
     }

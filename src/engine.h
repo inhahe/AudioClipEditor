@@ -1,5 +1,7 @@
 #pragma once
 #include "audio_buffer.h"
+#include <windows.h>
+#include <mmreg.h>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -22,16 +24,25 @@ public:
     virtual int64_t total() const = 0;
 };
 
-// The output device's sample format, as the engine writes it (its shared-mode mix
-// format): 32-bit float, or 16-, 24- (packed, 3 bytes) or 32-bit integer PCM, in
-// `channels` channels. Anything else is refused when the device is opened rather than
-// written in the wrong width -- a narrower container than written would overrun the
-// device's buffer.
-bool writableDeviceFormat(bool isFloat, int bits);
-// Write `frames` stereo frames into a device buffer of that format: left and right on
+// An output device's sample format, as the engine writes it.
+struct DeviceFormat {
+    bool ok = false;           // one the engine can write
+    bool isFloat = false;
+    int bits = 0;              // the container's width: a 24-in-32 format is 32
+    int channels = 0;
+    std::wstring problem;      // when not ok: what about it can't be written
+};
+// What the engine makes of a device's shared-mode (mix) format. Writable: 32-bit float,
+// or 16-, 24- (packed, 3 bytes) or 32-bit integer PCM, in any number of channels, with a
+// frame (nBlockAlign) of exactly channels x bits/8 bytes -- the stride the device's
+// buffer is sized by. Anything else is refused, said why, rather than written in a
+// width or stride the buffer doesn't have: a wider one would overrun it.
+DeviceFormat deviceFormatOf(const WAVEFORMATEX& wf);
+// Write `frames` stereo frames into a device buffer of format `f`: left and right on
 // the first two channels, their average on a mono device, silence on any further
-// channel. Integer formats are clamped to full scale; float is written as it is.
-void writeDeviceFrames(void* dst, const float* stereo, int frames, int channels, bool isFloat, int bits);
+// channel; integer formats clamped to full scale, float written as it is. Returns
+// false, writing nothing, for a format deviceFormatOf didn't accept.
+bool writeDeviceFrames(void* dst, const float* stereo, int frames, const DeviceFormat& f);
 
 // A volume that may be changed while it plays: set from the UI thread, read by
 // render() on the audio thread. A change is ramped over kRampFrames frames rather
@@ -284,7 +295,6 @@ private:
     void keepHeardPosition();
     bool onDefaultDevice();
     void renderLoop();
-    void writeFrames(void* dst, const float* stereo, int frames);
 
     struct Impl;
     std::unique_ptr<Impl> d_;

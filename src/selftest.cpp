@@ -26,6 +26,8 @@
 #include <mmdeviceapi.h>
 #include <audiopolicy.h>
 #include <endpointvolume.h>
+#include <mmreg.h>
+#include <ksmedia.h>
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <wrl/client.h>
@@ -1369,15 +1371,60 @@ int runSelfTest() {
     // meant: left and right, their average on a mono device, silence on any further
     // channel, integers clamped to full scale.
     {
+        // A device's format as Windows describes it: the plain form, or the extensible
+        // one, whose SubFormat says float or integer and whose container may be wider
+        // than its valid bits. `align` < 0: a frame of channels x bits/8, as it should be.
+        auto plain = [](WORD tag, int bits, int ch, int align = -1) {
+            WAVEFORMATEX w{};
+            w.wFormatTag = tag; w.nChannels = (WORD)ch; w.nSamplesPerSec = 48000;
+            w.wBitsPerSample = (WORD)bits;
+            w.nBlockAlign = (WORD)(align < 0 ? ch * bits / 8 : align);
+            w.nAvgBytesPerSec = 48000 * w.nBlockAlign;
+            return w;
+        };
+        auto ext = [&](const GUID& sub, int bits, int valid, int ch, int align = -1) {
+            WAVEFORMATEXTENSIBLE w{};
+            w.Format = plain(WAVE_FORMAT_EXTENSIBLE, bits, ch, align);
+            w.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+            w.Samples.wValidBitsPerSample = (WORD)valid;
+            w.SubFormat = sub;
+            return w;
+        };
+        const GUID kFloat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, kPcm = KSDATAFORMAT_SUBTYPE_PCM;
+
+        // What deviceFormatOf accepts, and what it refuses.
+        bool accepts = true, refuses = true;
+        std::wstring which;
+        const WAVEFORMATEXTENSIBLE good[] = {
+            ext(kFloat, 32, 32, 2), ext(kPcm, 16, 16, 2), ext(kPcm, 24, 24, 1), ext(kPcm, 32, 24, 6),
+        };
+        for (const auto& w : good) if (!deviceFormatOf(w.Format).ok) { accepts = false; which = deviceFormatOf(w.Format).problem; }
+        for (const auto& w : { plain(WAVE_FORMAT_IEEE_FLOAT, 32, 2), plain(WAVE_FORMAT_PCM, 16, 2), plain(WAVE_FORMAT_PCM, 24, 2) })
+            if (!deviceFormatOf(w).ok) { accepts = false; which = deviceFormatOf(w).problem; }
+        check(accepts, L"device format: 32-bit float and 16-, 24- and 32-bit integer devices are played to", which);
+        const WAVEFORMATEX bad1[] = {
+            plain(WAVE_FORMAT_PCM, 8, 2), plain(WAVE_FORMAT_IEEE_FLOAT, 64, 2), plain(WAVE_FORMAT_IEEE_FLOAT, 16, 2),
+            plain(6 /* A-law */, 32, 2), plain(WAVE_FORMAT_PCM, 16, 0),
+            plain(WAVE_FORMAT_PCM, 32, 2, 6),   // a 32-bit container in 3-byte frames: the stride the buffer has
+        };
+        for (const auto& w : bad1) { const DeviceFormat f = deviceFormatOf(w); if (f.ok || f.problem.empty()) refuses = false; }
+        // An unknown format after a float one: nothing carries over from what was read before.
+        const WAVEFORMATEXTENSIBLE odd = ext(GUID{ 0x12345678 }, 32, 32, 2);
+        if (deviceFormatOf(good[0].Format).ok && deviceFormatOf(odd.Format).ok) refuses = false;
+        if (deviceFormatOf(ext(kPcm, 32, 24, 2, 6).Format).ok) refuses = false;
+        check(refuses, L"device format: any other -- 8-bit, 64-bit float, not PCM, a frame that doesn't "
+                       L"match its samples -- is refused, saying why");
+
         const float stereo[] = { 0.5f, -0.25f, 1.5f, -2.0f };   // two frames, the second past full scale
-        struct Fmt { bool isFloat; int bits; };
         bool exact = true, fenced = true;
         std::wstring bad;
-        for (const Fmt f : { Fmt{ true, 32 }, Fmt{ false, 16 }, Fmt{ false, 24 }, Fmt{ false, 32 } })
+        const std::pair<GUID, int> kinds[] = { { kFloat, 32 }, { kPcm, 16 }, { kPcm, 24 }, { kPcm, 32 } };
+        for (const auto& [sub, bits] : kinds)
             for (int ch : { 1, 2, 6 }) {
+                const DeviceFormat f = deviceFormatOf(ext(sub, bits, bits, ch).Format);
                 const size_t width = (size_t)f.bits / 8, bytes = 2 * (size_t)ch * width;
                 std::vector<uint8_t> buf(bytes + 16, 0xAB);
-                writeDeviceFrames(buf.data(), stereo, 2, ch, f.isFloat, f.bits);
+                if (!writeDeviceFrames(buf.data(), stereo, 2, f)) exact = false;
                 for (size_t k = bytes; k < buf.size(); ++k) if (buf[k] != 0xAB) fenced = false;
                 auto read = [&](int i, int c) -> double {
                     const uint8_t* s = buf.data() + ((size_t)i * ch + c) * width;
@@ -1405,9 +1452,12 @@ int runSelfTest() {
             }
         check(exact, L"device format: float, 16-, 24- and 32-bit devices get each sample as meant", bad);
         check(fenced, L"device format: ...and nothing past the frames given (a 24-bit device's buffer isn't overrun)");
-        check(writableDeviceFormat(false, 24) && !writableDeviceFormat(false, 8) &&
-              !writableDeviceFormat(true, 64) && !writableDeviceFormat(true, 16),
-              L"device format: one the engine can't write is refused, not written in the wrong width");
+        // A refused format is written nothing at all, and says so, so the device's buffer
+        // can be let go as silence.
+        std::vector<uint8_t> untouched(64, 0xAB);
+        const bool wrote = writeDeviceFrames(untouched.data(), stereo, 2, deviceFormatOf(bad1[0]));
+        check(!wrote && std::all_of(untouched.begin(), untouched.end(), [](uint8_t b) { return b == 0xAB; }),
+              L"device format: a refused one is written nothing, and says so");
     }
 
     // ---- playback position (device frames played -> source frames heard)
