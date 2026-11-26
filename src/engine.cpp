@@ -320,34 +320,38 @@ std::wstring PlaybackEngine::openStream(bool& none) {
         PropVariantClear(&v);
     }
 
+    // A failure from here on is said with the device's name after it: the reason first,
+    // so a toast too narrow for both keeps what went wrong.
+    auto failed = [&](const std::wstring& why) {
+        return name.empty() ? why : why + L" (" + name + L")";
+    };
+
     hr = d_->client->GetMixFormat(&d_->mix);
-    if (FAILED(hr)) return L"Could not get device mix format.";
+    if (FAILED(hr)) return failed(L"Could not get the device's mix format");
 
     // Windows mixes in 32-bit float, so that is what a shared stream is all but always
     // given; a format this can't write is said, not written in the wrong width. The
     // format is the audio thread's alone (renderLoop), so it needs no lock.
     WAVEFORMATEX* wf = d_->mix;
     d_->fmt = deviceFormatOf(*wf);
-    if (!d_->fmt.ok)
-        return (name.empty() ? std::wstring(L"The output device") : L"“" + name + L"”") +
-               L" uses a format this app can't play to: " + d_->fmt.problem + L".";
+    if (!d_->fmt.ok) return failed(L"This app can't play to its format: " + d_->fmt.problem);
     const int rate = (int)wf->nSamplesPerSec;
 
     REFERENCE_TIME dur = 30 * 10000; // 30 ms
     hr = d_->client->Initialize(AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK, dur, 0, wf, nullptr);
-    if (FAILED(hr)) return L"Could not initialize audio client.";
+    if (FAILED(hr)) return failed(L"Could not initialize the audio client");
 
     // Without it renderLoop would only wake on its 200 ms timeout, far slower than the
     // 30 ms buffer drains: playback would stutter without a word.
-    if (FAILED(d_->client->SetEventHandle(d_->hEvent))) return L"Could not set the audio event.";
+    if (FAILED(d_->client->SetEventHandle(d_->hEvent))) return failed(L"Could not set the audio event");
 
     hr = d_->client->GetBufferSize(&d_->bufferFrames);
-    if (FAILED(hr)) return L"Could not get buffer size.";
+    if (FAILED(hr)) return failed(L"Could not get the buffer size");
 
     hr = d_->client->GetService(__uuidof(IAudioRenderClient),
         (void**)d_->render.GetAddressOf());
-    if (FAILED(hr)) return L"Could not get render client.";
+    if (FAILED(hr)) return failed(L"Could not get the render client");
 
     // Optional: without it position() falls back to the render position, which
     // is what it always used to report -- less smooth, but playback still works.
@@ -541,18 +545,29 @@ DeviceFormat deviceFormatOf(const WAVEFORMATEX& wf) {
     f.channels = wf.nChannels;
     f.bits = wf.wBitsPerSample;
     bool pcm = false;
+    wchar_t why[160] = L"";
     if (wf.wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
         f.isFloat = true;
     } else if (wf.wFormatTag == WAVE_FORMAT_PCM) {
         pcm = true;
-    } else if (wf.wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
-               wf.cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
-        const auto& ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE&>(wf);
-        f.isFloat = ext.SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-        pcm = ext.SubFormat == KSDATAFORMAT_SUBTYPE_PCM;
+    } else if (wf.wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+        // Its SubFormat lies past the plain header; one too short to hold it is not
+        // read beyond its end.
+        if (wf.cbSize < sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+            swprintf(why, 160, L"an extensible format description %u bytes short",
+                     (unsigned)(sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX) - wf.cbSize));
+        } else {
+            const auto& ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE&>(wf);
+            f.isFloat = ext.SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+            pcm = ext.SubFormat == KSDATAFORMAT_SUBTYPE_PCM;
+            if (!f.isFloat && !pcm)
+                swprintf(why, 160, L"its samples are neither PCM nor float (subformat %08lX)",
+                         (unsigned long)ext.SubFormat.Data1);
+        }
     }
-    wchar_t why[160] = L"";
-    if (!f.isFloat && !pcm)
+    if (why[0])
+        ;   // said above
+    else if (!f.isFloat && !pcm)
         swprintf(why, 160, L"its samples are neither PCM nor float (format tag %u)", (unsigned)wf.wFormatTag);
     else if (f.isFloat ? f.bits != 32 : (f.bits != 16 && f.bits != 24 && f.bits != 32))
         swprintf(why, 160, L"%d-bit %s samples", f.bits, f.isFloat ? L"float" : L"integer");
@@ -575,10 +590,14 @@ bool writeDeviceFrames(void* dst, const float* stereo, int frames, const DeviceF
         return (dch == 1) ? 0.5f * (l + r) : (c == 0 ? l : c == 1 ? r : 0.0f);
     };
     auto clamp = [](float v) { return std::max(-1.0f, std::min(1.0f, v)); };
-    if (isFloat) {
+    // Each width is matched here too, not taken on trust from `ok`: a width this has no
+    // branch for is written nothing, rather than written in another's.
+    if (isFloat && bits == 32) {
         float* o = (float*)dst;
         for (int i = 0; i < frames; ++i)
             for (int c = 0; c < dch; ++c) o[i * dch + c] = sampleFor(i, c);
+    } else if (isFloat) {
+        return false;
     } else if (bits == 16) {
         int16_t* o = (int16_t*)dst;
         for (int i = 0; i < frames; ++i)
@@ -592,10 +611,12 @@ bool writeDeviceFrames(void* dst, const float* stereo, int frames, const DeviceF
                 uint8_t* s = o + ((size_t)i * dch + c) * 3;
                 s[0] = (uint8_t)(q & 0xFF); s[1] = (uint8_t)((q >> 8) & 0xFF); s[2] = (uint8_t)((q >> 16) & 0xFF);
             }
-    } else {   // 32-bit: the only integer width left that deviceFormatOf accepts
+    } else if (bits == 32) {
         int32_t* o = (int32_t*)dst;
         for (int i = 0; i < frames; ++i)
             for (int c = 0; c < dch; ++c) o[i * dch + c] = (int32_t)llrint((double)clamp(sampleFor(i, c)) * 2147483647.0);
+    } else {
+        return false;
     }
     return true;
 }
@@ -671,7 +692,11 @@ void PlaybackEngine::renderLoop() {
                 if (SUCCEEDED(d_->clock->GetPosition(&cp, &cq))) { d_->clkPos = cp; d_->clkQpc = cq; }
             }
             const int64_t srcBefore = d_->source ? d_->source->position() : 0;
-            if (d_->source && !d_->paused && !d_->drained) {
+            // A format that can't be written was refused when the device was opened.
+            // Were one to get here regardless, nothing is taken from the source -- the
+            // playhead holds, as for a device that is not there -- and the buffer is let
+            // go as silence, never as whatever it held.
+            if (d_->fmt.ok && d_->source && !d_->paused && !d_->drained) {
                 produced = d_->rsActive ? d_->renderResampled(d_->mixbuf.data(), (int)avail)
                                         : d_->source->render(d_->mixbuf.data(), (int)avail);
                 if (produced < (int)avail) {
@@ -684,9 +709,6 @@ void PlaybackEngine::renderLoop() {
             } else {
                 std::memset(d_->mixbuf.data(), 0, sizeof(float) * 2 * avail);
             }
-            // A format that can't be written was refused when the device was opened; were
-            // one to get here regardless, the buffer is let go as silence -- never as
-            // whatever it held.
             silent = !writeDeviceFrames(pData, d_->mixbuf.data(), (int)avail, d_->fmt);
             const int64_t srcAfter = d_->source ? d_->source->position() : srcBefore;
             d_->heard.push((int32_t)avail, (int32_t)(srcAfter - srcBefore), srcAfter);

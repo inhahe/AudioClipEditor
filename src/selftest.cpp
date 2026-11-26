@@ -1408,10 +1408,17 @@ int runSelfTest() {
             plain(WAVE_FORMAT_PCM, 32, 2, 6),   // a 32-bit container in 3-byte frames: the stride the buffer has
         };
         for (const auto& w : bad1) { const DeviceFormat f = deviceFormatOf(w); if (f.ok || f.problem.empty()) refuses = false; }
-        // An unknown format after a float one: nothing carries over from what was read before.
+        // An extensible one: a SubFormat that is neither PCM nor float; a 32-bit
+        // container in 3-byte frames; and a header too short to hold its SubFormat,
+        // which mustn't be read past its end (this one's SubFormat says PCM, so only
+        // the length check refuses it).
         const WAVEFORMATEXTENSIBLE odd = ext(GUID{ 0x12345678 }, 32, 32, 2);
-        if (deviceFormatOf(good[0].Format).ok && deviceFormatOf(odd.Format).ok) refuses = false;
-        if (deviceFormatOf(ext(kPcm, 32, 24, 2, 6).Format).ok) refuses = false;
+        WAVEFORMATEXTENSIBLE shortHeader = ext(kPcm, 16, 16, 2);
+        shortHeader.Format.cbSize = 0;
+        for (const auto& w : { odd, ext(kPcm, 32, 24, 2, 6), shortHeader }) {
+            const DeviceFormat f = deviceFormatOf(w.Format);
+            if (f.ok || f.problem.empty()) refuses = false;
+        }
         check(refuses, L"device format: any other -- 8-bit, 64-bit float, not PCM, a frame that doesn't "
                        L"match its samples -- is refused, saying why");
 
@@ -1454,8 +1461,14 @@ int runSelfTest() {
         check(fenced, L"device format: ...and nothing past the frames given (a 24-bit device's buffer isn't overrun)");
         // A refused format is written nothing at all, and says so, so the device's buffer
         // can be let go as silence.
+        // So is one marked writable that the writer has no width for: it doesn't take
+        // `ok` on trust.
         std::vector<uint8_t> untouched(64, 0xAB);
-        const bool wrote = writeDeviceFrames(untouched.data(), stereo, 2, deviceFormatOf(bad1[0]));
+        bool wrote = writeDeviceFrames(untouched.data(), stereo, 2, deviceFormatOf(bad1[0]));
+        DeviceFormat handMade; handMade.ok = true; handMade.bits = 8; handMade.channels = 2;
+        wrote = writeDeviceFrames(untouched.data(), stereo, 2, handMade) || wrote;
+        handMade.isFloat = true; handMade.bits = 64;
+        wrote = writeDeviceFrames(untouched.data(), stereo, 2, handMade) || wrote;
         check(!wrote && std::all_of(untouched.begin(), untouched.end(), [](uint8_t b) { return b == 0xAB; }),
               L"device format: a refused one is written nothing, and says so");
     }
