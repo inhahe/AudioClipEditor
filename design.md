@@ -22,7 +22,7 @@ sync with behavior changes.
 | `waveform.{h,cpp}` | GDI oscilloscope: per-column min/max envelope (one `PolyPolyline`) zoomed out, per-sample trace zoomed in |
 | `dialogs.{h,cpp}` | Manual modal dialogs: text prompt, export options, voice-cleaner, remove-non-voice, match-timbre and match-volume options, a volume typed in (`volume`), history list, file/project pickers |
 | `volume.h` | Pure: a volume as text — the readouts' `percent` and `decibels`, and `parse` for what is typed into the volume box (a percentage or dB, refused past 0% … +24 dB, and a "1,600" that could be read two ways asked about rather than guessed) |
-| `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`), toolbar row wrapping (`flowButtons` for the editor toolbar, `flowTransport` for the main transport bar, whose widths are `transportMetrics`), a library card's layout and narrowest width (`cardMetrics`, `cardRects`: one volume slider length on every card and in every track header, and the narrowest card holds it and the selection buttons — the window's minimum width holds the narrowest card), scrollbar sizing (`scrollBarsNeeded`, `scrollThumb`, `scrollFromThumb`), `scrollToReveal`, and the volume slider's scale (`volumeToFrac` / `fracToVolume`: 0–100% linear on the left half, 100% → +24 dB on the right with dB rising as the square of the distance, so every volume a clip or track can have — including what volume matching sets — has a position, and 100–200% keeps half of that side for fine work) |
+| `layout.h` | Pure geometry split out of `ui.cpp` so it is headlessly testable: the reflowing library grid's drop targets (`insertIndex`, `caretAnchor`), toolbar row wrapping (`flowButtons` for the editor toolbar, `flowTransport` for the main transport bar, whose widths are `transportMetrics`), a library card's layout and narrowest width (`cardMetrics`, `cardRects`: one volume slider length on every card and in every track header, and the narrowest card holds it, the selection buttons, and the title row of play, stop, name and x — the window's minimum width holds the narrowest card), scrollbar sizing (`scrollBarsNeeded`, `scrollThumb`, `scrollFromThumb`), `scrollToReveal`, and the volume slider's scale (`volumeToFrac` / `fracToVolume`: 0–100% linear on the left half, 100% → +24 dB on the right with dB rising as the square of the distance, so every volume a clip or track can have — including what volume matching sets — has a position, and 100–200% keeps half of that side for fine work) |
 | `transport.h` | Pure play/pause decision logic, likewise split out to be testable: `decide(State, Press)` → pause / resume / restart-from-where, for both the single combined control and the editor's labelled button pair |
 | `selhistory.h` | Pure undo/redo state machine for the waveform selection, kept out of the document's snapshot tree; a `base` token ties the stack to a point in the document history |
 | `snap.h` | Pure directional-snapping state machine for dragging clips along a lane: pulls only when moving *away* from a target, so snapping stays convenient without making near-miss positions unreachable |
@@ -1806,6 +1806,12 @@ Three functions own all of it:
   clip's preview — is stopped first: left going, it went on driving this clip's
   cursor (`onTimer` reads the engine's position as the preview's) with audio that
   wasn't this clip, while the playhead froze and nothing reached it any more.
+
+- **`stopClip(clipId)`** is the card's ■ button (and *Stop* in its menu): while the
+  clip has a cursor (`canStopClip`: it is the previewed clip and the timeline isn't
+  playing), `stopAll()`, which drops the cursor, so the next play starts from the
+  beginning — or the selection — as the toolbar's Stop does for whatever plays. Drawn
+  dimmed when there is nothing to stop.
 
 `onTimer` tracks the cursor as `previewBegin + engine.position()` and `onPlayEnd`
 parks it at `previewEnd` — neither reads the live selection, so editing the

@@ -21,7 +21,9 @@ of clips, audition them, trim/crop, and arrange them on tracks.
   the empty library area** to sort every clip **by name (A–Z)** or **by time
   (oldest first)** — the time being the source file's date, or when a derived clip
   was created. Reorders and sorts are each a single undo step.
-- **Play any clip** with a per-card play/pause button. Click the waveform to
+- **Play any clip** with a per-card play/pause button, and **stop** it with the
+  ■ button beside it, which also takes it back to the start (or to the selection,
+  if it has one) for the next play. Click the waveform to
   seek / skip around — the yellow cursor is always where playback will pick up,
   so clicking while paused (or stopped) moves the restart point. Pause always
   pauses, including in the middle of a selection audition, and play continues
@@ -454,6 +456,7 @@ bin/AudioClipEditor.exe --selftest    # writes bin/selftest.log
 |---|---|
 | Add clips | **+ Add Files** (multi-select) |
 | Play / pause a clip | green button on the card, or `Space` on the active clip (plays only the selection when one is active) |
+| Stop a clip and go back to its start | the ■ button beside the card's play button, or right-click the card → **Stop** |
 | Audition the whole clip vs. the selection | in the editor, **▶ Play** and **▶ Play selection** are separate transports — each becomes its own **Pause**, and pressing one while the other plays switches over |
 | Seek within a clip | click the waveform |
 | Make a selection | drag across the waveform |

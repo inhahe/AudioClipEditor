@@ -266,13 +266,16 @@ inline int scrollToReveal(int scrollPos, int visLen, int x0, int x1,
 // of the track headers', which are placed from the same numbers -- so the same drag
 // is the same change of volume whichever clip or track it is on, and a short clip's
 // slider is not too short to set. The narrowest card is the one that holds that row
-// (the speaker, the slider, and the readout after it at its widest, "1600%") and the
-// Crop / New clip buttons a selection puts over the waveform.
+// (the speaker, the slider, and the readout after it at its widest, "1600%"), the
+// Crop / New clip buttons a selection puts over the waveform, and the title row (play,
+// stop, the start of the name, the x).
 struct CardMetrics {
     int h = 0, pad = 0;       // every card's height, and the space between cards
     int titleH = 0;           // the title row along the top (name; where a drag starts)
     int playInset = 0, delInset = 0;  // the play button (left) and the x (right), in from the sides
+    int stopGap = 0;                  // the stop button, this far right of play
     int btnTop = 0, btnSize = 0;      // ...down from the top, and their size
+    int nameGap = 0, nameTop = 0;     // the name, this far right of stop, and down from the top
     int waveTop = 0, waveBottom = 0;   // the waveform, down from the top / up from the bottom
     int waveInset = 0;        // ...and in from the sides
     int volLeft = 0;          // the slider's left edge, from the card's; the speaker is before it
@@ -294,7 +297,8 @@ inline CardMetrics cardMetrics(float sc) {
     auto S = [sc](int v) { return (int)(v * sc + 0.5f); };
     CardMetrics m;
     m.h = S(120); m.pad = S(12); m.titleH = S(24);
-    m.playInset = S(6); m.delInset = S(4); m.btnTop = S(4); m.btnSize = S(16);
+    m.playInset = S(6); m.stopGap = S(4); m.delInset = S(4); m.btnTop = S(4); m.btnSize = S(16);
+    m.nameGap = S(6); m.nameTop = S(2);
     m.waveTop = S(28); m.waveBottom = S(30); m.waveInset = S(8);
     m.volLeft = S(34); m.volW = S(84); m.pctGap = S(6); m.pctW = S(40); m.rightPad = S(8);
     m.rowTop = S(24); m.rowBottom = S(8); m.readoutOverhang = S(2);
@@ -302,7 +306,10 @@ inline CardMetrics cardMetrics(float sc) {
     m.saveW = S(58); m.cropW = S(42);
     const int volumeRow = m.volLeft + m.volW + m.pctGap + m.pctW + m.rightPad;
     const int buttons = 2 * m.waveInset + m.selInset + m.saveW + m.selGap + m.cropW;
-    m.minW = std::max(volumeRow, buttons);
+    // play, stop, a name's beginning (S(40), enough to tell clips apart), and the x
+    const int titleRow = m.playInset + m.btnSize + m.stopGap + m.btnSize + m.nameGap + S(40) +
+                         m.nameGap + m.btnSize + m.delInset;
+    m.minW = std::max(volumeRow, std::max(buttons, titleRow));
     m.headerW = m.volLeft + m.volW + S(10);
     return m;
 }
@@ -310,7 +317,8 @@ inline CardMetrics cardMetrics(float sc) {
 // Where everything on `card` goes. The volume slider and its readout are the same
 // length and in the same place on every card, whatever its width.
 struct CardRects {
-    RECT top, play, del, wave;
+    RECT top, play, stop, del, wave;
+    RECT name;                 // the clip's name, between the stop button and the x
     RECT vol, volPct;          // the volume slider, and its readout
     RECT crop, savesel;        // the selection's Crop and New clip buttons
 };
@@ -319,7 +327,9 @@ inline CardRects cardRects(const CardMetrics& m, const RECT& card) {
     const int x = card.left, y = card.top, right = card.right, bottom = card.bottom;
     r.top  = { x, y, right, y + m.titleH };
     r.play = { x + m.playInset, y + m.btnTop, x + m.playInset + m.btnSize, y + m.btnTop + m.btnSize };
+    r.stop = { r.play.right + m.stopGap, r.play.top, r.play.right + m.stopGap + m.btnSize, r.play.bottom };
     r.del  = { right - m.delInset - m.btnSize, y + m.btnTop, right - m.delInset, y + m.btnTop + m.btnSize };
+    r.name = { r.stop.right + m.nameGap, y + m.nameTop, r.del.left - m.nameGap, y + m.titleH };
     r.wave = { x + m.waveInset, y + m.waveTop, right - m.waveInset, bottom - m.waveBottom };
     r.vol  = { x + m.volLeft, bottom - m.rowTop, x + m.volLeft + m.volW, bottom - m.rowBottom };
     r.volPct = { r.vol.right + m.pctGap, r.vol.top - m.readoutOverhang,

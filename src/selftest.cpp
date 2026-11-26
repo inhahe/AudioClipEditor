@@ -3206,7 +3206,7 @@ int runSelfTest() {
     // laid out with, on cards of every width.
     {
         const float scales[] = { 1.0f, 1.25f, 1.5f, 1.75f, 2.0f };
-        bool same = true, fits = true, buttons = true;
+        bool same = true, fits = true, buttons = true, title = true;
         std::wstring bad;
         for (float sc : scales) {
             const layout::CardMetrics m = layout::cardMetrics(sc);
@@ -3218,13 +3218,20 @@ int runSelfTest() {
                 }
                 if (r.volPct.right > card.right - m.rightPad || r.volPct.left < r.vol.right) fits = false;
                 if (r.crop.left < r.wave.left || r.savesel.right > r.wave.right ||
-                    r.crop.right > r.savesel.left || r.del.left < r.play.right)
+                    r.crop.right > r.savesel.left)
                     buttons = false;
+                // The title row, left to right: play, stop, the name -- with room for
+                // its beginning -- and the x, none over another.
+                if (r.stop.left < r.play.right || r.name.left < r.stop.right ||
+                    r.name.right - r.name.left < (int)(40 * sc + 0.5f) || r.del.left < r.name.right ||
+                    r.stop.top != r.play.top || r.stop.bottom != r.play.bottom)
+                    title = false;
             }
         }
         check(same, L"card volume: the slider is the same length on every card, however long its clip", bad);
         check(fits, L"card volume: ...and it and its readout fit on the narrowest card");
         check(buttons, L"card: the narrowest card's waveform holds the Crop and New clip buttons");
+        check(title, L"card: play, stop, the name and the x sit side by side, the name with room, on every card");
         // A track header holds the same slider, its grab margin (S(6), App::sliderHit)
         // short of the lanes, where a click is meant for a clip.
         bool header = true;

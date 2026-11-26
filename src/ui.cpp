@@ -115,6 +115,7 @@ enum {
     IDM_EXPORTCLIP, IDM_EXPORTSEL,
     IDM_SILENCESEL, IDM_DELETESEL, IDM_SPLITOUTSEL,
     IDM_SETVOL,             // type the clip's volume in
+    IDM_STOPCLIP,           // stop the clip and take its cursor back to the start
     IDM_ADDTL_BASE = 200,   // + track index
     IDM_TL_REMOVE = 300, IDM_TL_REMOVE_TRACK, IDM_TL_GAP, IDM_TL_CLOSEGAP, IDM_TL_RIPPLE,
     IDM_TL_TIMBRE, IDM_TL_VOLUME, IDM_TL_SETVOL,
@@ -408,7 +409,7 @@ struct App {
     bool overCardDragHandle(POINT p) const {
         if (editorActive() || !PtInRect(&rcLibrary, p)) return false;
         for (auto& c : cards) if (PtInRect(&c.top, p)) {
-            if (PtInRect(&c.play, p) || PtInRect(&c.del, p)) return false;
+            if (PtInRect(&c.play, p) || PtInRect(&c.stop, p) || PtInRect(&c.del, p)) return false;
             return true;
         }
         return false;
@@ -1251,13 +1252,13 @@ struct App {
             roundFill(h, cl.card, selHere ? col::cardSel : col::card,
                       dragThis ? col::accent : col::cardEdge, S(8));
 
-            // play/pause button
+            // play/pause and stop buttons
             bool playingThis = (previewClipId == cl.clipId) && engine.isPlaying();
             paintPlayIcon(h, cl.play, playingThis);
+            paintStopIcon(h, cl.stop, canStopClip(cl.clipId));
 
             // name + duration
-            RECT nameRc = { cl.play.right + S(6), cl.top.top + S(2), cl.del.left - S(6), cl.top.bottom };
-            textOut(h, nameRc, c->name, col::text, fBold, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            textOut(h, cl.name, c->name, col::text, fBold, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             // delete x
             textOut(h, cl.del, L"\u2715", col::dim, fSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
@@ -1324,6 +1325,17 @@ struct App {
             Polygon(h, tri, 3);
         }
         SelectObject(h, ob); SelectObject(h, op); DeleteObject(b); DeleteObject(pen);
+    }
+    // A card's stop button: a square on the play button's green while there is
+    // something to stop, and dimmed otherwise, as the toolbar dims Play All when there
+    // is nothing to play.
+    void paintStopIcon(HDC h, const RECT& r, bool enabled) {
+        roundFill(h, r, enabled ? col::accent : col::btn, enabled ? col::accentDk : col::cardEdge, S(4));
+        const int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2, s = (r.right - r.left) / 4;
+        const RECT sq = { cx - s, cy - s, cx + s, cy + s };
+        HBRUSH b = CreateSolidBrush(enabled ? col::bg : col::dim);
+        FillRect(h, &sq, b);
+        DeleteObject(b);
     }
 
     // One clip block on a lane: rounded body, waveform, name. Shared by the clips
@@ -1728,6 +1740,14 @@ struct App {
     }
     // The library card's play button auditions the selection when there is one.
     void togglePlayClip(int clipId) { togglePreview(clipId, true); }
+    // Whether a clip's stop button has anything to do: the clip is playing, paused,
+    // finished, or has had its cursor moved -- it has a cursor on its waveform. The
+    // timeline playing is not the clip's to stop.
+    bool canStopClip(int clipId) const { return !timelinePlaying && previewClipId == clipId; }
+    // A card's stop button: stop the clip and take its cursor back to the start, so
+    // the next play starts from the beginning (or the selection) -- what the
+    // toolbar's Stop does for whatever is playing, for this one clip only.
+    void stopClip(int clipId) { if (canStopClip(clipId)) stopAll(); }
 
     // (Re)arm a preview source for `clipId` and start it at `startFrame`.
     void startPreview(int clipId, int64_t startFrame, bool useSel) {
@@ -3116,7 +3136,8 @@ struct App {
     void showControls() {
         MessageBoxW(hwnd,
             L"Library clips:\n"
-            L"  \u2022 Click the \u25B6 button to play/pause a clip\n"
+            L"  \u2022 Click the \u25B6 button to play/pause a clip, and the \u25A0 beside it\n"
+            L"    to stop it and go back to the start\n"
             L"  \u2022 Click-drag across the waveform to select a section\n"
             L"  \u2022 With a selection, the card grows Crop and New clip buttons;\n"
             L"    New clip slices the selection out as its own library clip\n"
@@ -3624,6 +3645,7 @@ struct App {
                 if (PtInRect(&cl->savesel, p)) { saveSelectionAsClip(); return; }
             }
             if (PtInRect(&cl->play, p)) { togglePlayClip(cl->clipId); return; }
+            if (PtInRect(&cl->stop, p)) { stopClip(cl->clipId); return; }
             if (PtInRect(&cl->del, p)) { deleteClipConfirm(cl->clipId); return; }
             // Before the slider, whose grab area reaches S(6) past its end -- just to
             // where this begins (cardMetrics' pctGap) -- so a click here is never a
@@ -4266,6 +4288,7 @@ struct App {
         AppendMenuW(m, MF_STRING, IDM_EDIT, L"Open in editor (full window)\u2026");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_PLAY, L"Play / Pause");
+        AppendMenuW(m, MF_STRING | (canStopClip(clipId) ? 0 : MF_GRAYED), IDM_STOPCLIP, L"Stop");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_PLAYSEL, L"Play selection");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_SAVESEL, L"New clip from selection");
         AppendMenuW(m, MF_STRING | (sel ? 0 : MF_GRAYED), IDM_CROP, L"Crop to selection\u2026");
@@ -4385,6 +4408,7 @@ struct App {
         if (cmd == 0) return;
         if (cmd == IDM_EDIT) openClipEditor(clipId);
         else if (cmd == IDM_PLAY) togglePlayClip(clipId);
+        else if (cmd == IDM_STOPCLIP) stopClip(clipId);
         else if (cmd == IDM_PLAYSEL) { selClipId = clipId; playSelection(); }
         else if (cmd == IDM_SAVESEL) { selClipId = clipId; saveSelectionAsClip(); }
         else if (cmd == IDM_CROP) { selClipId = clipId; cropSelection(); }
