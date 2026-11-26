@@ -22,6 +22,17 @@ public:
     virtual int64_t total() const = 0;
 };
 
+// The output device's sample format, as the engine writes it (its shared-mode mix
+// format): 32-bit float, or 16-, 24- (packed, 3 bytes) or 32-bit integer PCM, in
+// `channels` channels. Anything else is refused when the device is opened rather than
+// written in the wrong width -- a narrower container than written would overrun the
+// device's buffer.
+bool writableDeviceFormat(bool isFloat, int bits);
+// Write `frames` stereo frames into a device buffer of that format: left and right on
+// the first two channels, their average on a mono device, silence on any further
+// channel. Integer formats are clamped to full scale; float is written as it is.
+void writeDeviceFrames(void* dst, const float* stereo, int frames, int channels, bool isFloat, int bits);
+
 // A volume that may be changed while it plays: set from the UI thread, read by
 // render() on the audio thread. A change is ramped over kRampFrames frames rather
 // than applied as a step, which on a slider being dragged would be heard as a run of

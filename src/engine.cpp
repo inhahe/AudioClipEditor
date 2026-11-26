@@ -317,14 +317,24 @@ std::wstring PlaybackEngine::openStream(bool& none) {
     // The format is the audio thread's alone (writeFrames), so it needs no lock.
     WAVEFORMATEX* wf = d_->mix;
     d_->dchannels = wf->nChannels;
-    d_->bits = wf->wBitsPerSample;
+    d_->bits = wf->wBitsPerSample;   // the container: a 24-in-32 format is written as 32
+    bool pcm = false;
     if (wf->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
         d_->isFloat = true;
+    } else if (wf->wFormatTag == WAVE_FORMAT_PCM) {
+        d_->isFloat = false; pcm = true;
     } else if (wf->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
         auto* ext = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(wf);
         d_->isFloat = (ext->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
-    } else {
-        d_->isFloat = false; // assume PCM int
+        pcm = (ext->SubFormat == KSDATAFORMAT_SUBTYPE_PCM);
+    }
+    // Windows mixes in 32-bit float, so that is what a shared stream is all but always
+    // given; anything this can't write is said, not written in the wrong width.
+    if ((!d_->isFloat && !pcm) || !writableDeviceFormat(d_->isFloat, d_->bits) || d_->dchannels < 1) {
+        wchar_t why[160];
+        swprintf(why, 160, L"The output device's format (%d-bit %s, %d channels) isn't one this app can play to.",
+                 d_->bits, d_->isFloat ? L"float" : pcm ? L"integer" : L"non-PCM", d_->dchannels);
+        return why;
     }
     const int rate = (int)wf->nSamplesPerSec;
 
@@ -540,36 +550,43 @@ void PlaybackEngine::shutdown() {
     d_.reset();
 }
 
-void PlaybackEngine::writeFrames(void* dst, const float* stereo, int frames) {
-    const int dch = d_->dchannels;
-    if (d_->isFloat) {
+bool writableDeviceFormat(bool isFloat, int bits) {
+    return isFloat ? bits == 32 : (bits == 16 || bits == 24 || bits == 32);
+}
+
+void writeDeviceFrames(void* dst, const float* stereo, int frames, int dch, bool isFloat, int bits) {
+    auto sampleFor = [&](int i, int c) {
+        const float l = stereo[i * 2], r = stereo[i * 2 + 1];
+        return (dch == 1) ? 0.5f * (l + r) : (c == 0 ? l : c == 1 ? r : 0.0f);
+    };
+    auto clamp = [](float v) { return std::max(-1.0f, std::min(1.0f, v)); };
+    if (isFloat) {
         float* o = (float*)dst;
-        for (int i = 0; i < frames; ++i) {
-            float l = stereo[i * 2], r = stereo[i * 2 + 1];
-            for (int c = 0; c < dch; ++c)
-                o[i * dch + c] = (dch == 1) ? 0.5f * (l + r) : (c == 0 ? l : c == 1 ? r : 0.0f);
-        }
-    } else if (d_->bits == 16) {
+        for (int i = 0; i < frames; ++i)
+            for (int c = 0; c < dch; ++c) o[i * dch + c] = sampleFor(i, c);
+    } else if (bits == 16) {
         int16_t* o = (int16_t*)dst;
-        for (int i = 0; i < frames; ++i) {
-            float l = stereo[i * 2], r = stereo[i * 2 + 1];
+        for (int i = 0; i < frames; ++i)
+            for (int c = 0; c < dch; ++c) o[i * dch + c] = (int16_t)lrintf(clamp(sampleFor(i, c)) * 32767.0f);
+    } else if (bits == 24) {
+        // Packed: three bytes a sample, little-endian.
+        uint8_t* o = (uint8_t*)dst;
+        for (int i = 0; i < frames; ++i)
             for (int c = 0; c < dch; ++c) {
-                float v = (dch == 1) ? 0.5f * (l + r) : (c == 0 ? l : c == 1 ? r : 0.0f);
-                v = std::max(-1.0f, std::min(1.0f, v));
-                o[i * dch + c] = (int16_t)lrintf(v * 32767.0f);
+                const int32_t q = (int32_t)lrintf(clamp(sampleFor(i, c)) * 8388607.0f);
+                uint8_t* s = o + ((size_t)i * dch + c) * 3;
+                s[0] = (uint8_t)(q & 0xFF); s[1] = (uint8_t)((q >> 8) & 0xFF); s[2] = (uint8_t)((q >> 16) & 0xFF);
             }
-        }
-    } else { // 32-bit int
+    } else if (bits == 32) {
         int32_t* o = (int32_t*)dst;
-        for (int i = 0; i < frames; ++i) {
-            float l = stereo[i * 2], r = stereo[i * 2 + 1];
-            for (int c = 0; c < dch; ++c) {
-                float v = (dch == 1) ? 0.5f * (l + r) : (c == 0 ? l : c == 1 ? r : 0.0f);
-                v = std::max(-1.0f, std::min(1.0f, v));
-                o[i * dch + c] = (int32_t)llrint((double)v * 2147483647.0);
-            }
-        }
+        for (int i = 0; i < frames; ++i)
+            for (int c = 0; c < dch; ++c) o[i * dch + c] = (int32_t)llrint((double)clamp(sampleFor(i, c)) * 2147483647.0);
     }
+    // Any other format was refused by openStream (writableDeviceFormat): nothing is written.
+}
+
+void PlaybackEngine::writeFrames(void* dst, const float* stereo, int frames) {
+    writeDeviceFrames(dst, stereo, frames, d_->dchannels, d_->isFloat, d_->bits);
 }
 
 void PlaybackEngine::threadMain() {

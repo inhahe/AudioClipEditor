@@ -1362,6 +1362,54 @@ int runSelfTest() {
         }
     }
 
+    // ---- writing in the output device's format (writeDeviceFrames)
+    // Each format the engine accepts is written in its own width -- a packed 24-bit
+    // device gets three bytes a sample, not four -- and nothing past the frames given:
+    // the device's buffer is exactly that long. Read back, each sample is what was
+    // meant: left and right, their average on a mono device, silence on any further
+    // channel, integers clamped to full scale.
+    {
+        const float stereo[] = { 0.5f, -0.25f, 1.5f, -2.0f };   // two frames, the second past full scale
+        struct Fmt { bool isFloat; int bits; };
+        bool exact = true, fenced = true;
+        std::wstring bad;
+        for (const Fmt f : { Fmt{ true, 32 }, Fmt{ false, 16 }, Fmt{ false, 24 }, Fmt{ false, 32 } })
+            for (int ch : { 1, 2, 6 }) {
+                const size_t width = (size_t)f.bits / 8, bytes = 2 * (size_t)ch * width;
+                std::vector<uint8_t> buf(bytes + 16, 0xAB);
+                writeDeviceFrames(buf.data(), stereo, 2, ch, f.isFloat, f.bits);
+                for (size_t k = bytes; k < buf.size(); ++k) if (buf[k] != 0xAB) fenced = false;
+                auto read = [&](int i, int c) -> double {
+                    const uint8_t* s = buf.data() + ((size_t)i * ch + c) * width;
+                    if (f.isFloat) { float v; memcpy(&v, s, 4); return v; }
+                    if (f.bits == 16) { int16_t v; memcpy(&v, s, 2); return v / 32767.0; }
+                    if (f.bits == 24) {
+                        int32_t v = (int32_t)((uint32_t)s[0] | ((uint32_t)s[1] << 8) | ((uint32_t)s[2] << 16));
+                        if (v & 0x800000) v -= 0x1000000;
+                        return v / 8388607.0;
+                    }
+                    int32_t v; memcpy(&v, s, 4); return v / 2147483647.0;
+                };
+                for (int i = 0; i < 2; ++i)
+                    for (int c = 0; c < ch; ++c) {
+                        const double l = stereo[i * 2], r = stereo[i * 2 + 1];
+                        double want = ch == 1 ? 0.5 * (l + r) : c == 0 ? l : c == 1 ? r : 0.0;
+                        if (!f.isFloat) want = std::max(-1.0, std::min(1.0, want));
+                        const double tol = f.isFloat ? 0.0 : f.bits == 16 ? 1.0 / 32767 : 1e-6;
+                        if (std::fabs(read(i, c) - want) > tol) {
+                            exact = false;
+                            bad = std::to_wstring(f.bits) + (f.isFloat ? L"-bit float, " : L"-bit, ") +
+                                  std::to_wstring(ch) + L" ch";
+                        }
+                    }
+            }
+        check(exact, L"device format: float, 16-, 24- and 32-bit devices get each sample as meant", bad);
+        check(fenced, L"device format: ...and nothing past the frames given (a 24-bit device's buffer isn't overrun)");
+        check(writableDeviceFormat(false, 24) && !writableDeviceFormat(false, 8) &&
+              !writableDeviceFormat(true, 64) && !writableDeviceFormat(true, 16),
+              L"device format: one the engine can't write is refused, not written in the wrong width");
+    }
+
     // ---- playback position (device frames played -> source frames heard)
     {
         // A 48 kHz device fed in 480-frame (10 ms) chunks, no resampling.
