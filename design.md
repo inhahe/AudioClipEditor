@@ -1786,7 +1786,7 @@ it is what the yellow cursor is drawn at, and what play/resume starts from.
 - `previewSeekPending` — the cursor was moved while stopped/paused, so the next
   play must re-arm the source instead of resuming the engine in place.
 
-Three functions own all of it:
+Four functions own all of it:
 
 - **`startPreview(clipId, startFrame, useSel)`** arms a `BufferSource` over the
   chosen range and starts it at `startFrame - previewBegin` (the source's
@@ -1807,11 +1807,13 @@ Three functions own all of it:
   cursor (`onTimer` reads the engine's position as the preview's) with audio that
   wasn't this clip, while the playhead froze and nothing reached it any more.
 
-- **`stopClip(clipId)`** is the card's ■ button (and *Stop* in its menu): while the
-  clip has a cursor (`canStopClip`: it is the previewed clip and the timeline isn't
-  playing), `stopAll()`, which drops the cursor, so the next play starts from the
-  beginning — or the selection — as the toolbar's Stop does for whatever plays. Drawn
-  dimmed when there is nothing to stop.
+- **`stopClip(clipId)`** is the card's ■ button (and *Stop* in its menu): it stops
+  the engine and puts the cursor back where the next play starts (`clipHome`: the
+  selection's head if the clip has one, else 0), with `previewSeekPending` so that play
+  arms afresh from there. The clip stays the active one — its cursor shows, and Space
+  and its play button start it from there — unlike the toolbar's Stop (`stopAll`),
+  which leaves no clip active. Lit (`canStopClip`) while the clip is playing, paused or
+  finished, or its cursor is anywhere else; dimmed otherwise.
 
 `onTimer` tracks the cursor as `previewBegin + engine.position()` and `onPlayEnd`
 parks it at `previewEnd` — neither reads the live selection, so editing the

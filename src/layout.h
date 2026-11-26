@@ -273,8 +273,8 @@ struct CardMetrics {
     int h = 0, pad = 0;       // every card's height, and the space between cards
     int titleH = 0;           // the title row along the top (name; where a drag starts)
     int playInset = 0, delInset = 0;  // the play button (left) and the x (right), in from the sides
+    int btnTop = 0, btnSize = 0;      // all three buttons (play, stop, x): down from the top, and their size
     int stopGap = 0;                  // the stop button, this far right of play
-    int btnTop = 0, btnSize = 0;      // ...down from the top, and their size
     int nameGap = 0, nameTop = 0;     // the name, this far right of stop, and down from the top
     int waveTop = 0, waveBottom = 0;   // the waveform, down from the top / up from the bottom
     int waveInset = 0;        // ...and in from the sides

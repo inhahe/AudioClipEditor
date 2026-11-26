@@ -405,7 +405,7 @@ struct App {
     // A card is being dragged to reorder / place it.
     bool draggingCard() const { return mode == Mode::CardDrag && dragged; }
     // Is p over a card's title-bar drag handle (the grab area for reordering /
-    // dragging to a track), excluding the play / delete buttons that sit in it?
+    // dragging to a track), excluding the play, stop and delete buttons that sit in it?
     bool overCardDragHandle(POINT p) const {
         if (editorActive() || !PtInRect(&rcLibrary, p)) return false;
         for (auto& c : cards) if (PtInRect(&c.top, p)) {
@@ -1740,14 +1740,29 @@ struct App {
     }
     // The library card's play button auditions the selection when there is one.
     void togglePlayClip(int clipId) { togglePreview(clipId, true); }
-    // Whether a clip's stop button has anything to do: the clip is playing, paused,
-    // finished, or has had its cursor moved -- it has a cursor on its waveform. The
-    // timeline playing is not the clip's to stop.
-    bool canStopClip(int clipId) const { return !timelinePlaying && previewClipId == clipId; }
-    // A card's stop button: stop the clip and take its cursor back to the start, so
-    // the next play starts from the beginning (or the selection) -- what the
-    // toolbar's Stop does for whatever is playing, for this one clip only.
-    void stopClip(int clipId) { if (canStopClip(clipId)) stopAll(); }
+    // Where a stopped clip's cursor rests: the start of its selection, if it has one --
+    // the card's play auditions the selection -- else the start of the clip.
+    int64_t clipHome(int clipId) const { return selectionCovers(clipId) ? selStart : 0; }
+    // Whether a clip's stop button has anything to do: the clip is playing, paused or
+    // has finished (the engine holds its preview), or its cursor is somewhere other
+    // than where a stop would put it. (A previewed clip is never the timeline's:
+    // playAll and the preview paths each clear the other.)
+    bool canStopClip(int clipId) const {
+        return previewClipId == clipId && (engine.hasSource() || previewCursor != clipHome(clipId));
+    }
+    // A card's stop button: stop the clip and put its cursor back where the next play
+    // starts (clipHome). The clip stays the active one -- its cursor shows, and Space
+    // and its play button start it from there -- unlike the toolbar's Stop, which
+    // stops whatever is playing and leaves no clip active.
+    void stopClip(int clipId) {
+        if (!canStopClip(clipId)) return;
+        engine.stop();
+        armedPreview.reset(); armedPreviewClipId = -1;
+        previewIsSel = false; previewBegin = previewEnd = 0;
+        previewCursor = clipHome(clipId);
+        previewSeekPending = true;   // the next play arms afresh, from the cursor
+        refresh();
+    }
 
     // (Re)arm a preview source for `clipId` and start it at `startFrame`.
     void startPreview(int clipId, int64_t startFrame, bool useSel) {
@@ -3137,7 +3152,7 @@ struct App {
         MessageBoxW(hwnd,
             L"Library clips:\n"
             L"  \u2022 Click the \u25B6 button to play/pause a clip, and the \u25A0 beside it\n"
-            L"    to stop it and go back to the start\n"
+            L"    to stop it and go back to the start (or the selection's)\n"
             L"  \u2022 Click-drag across the waveform to select a section\n"
             L"  \u2022 With a selection, the card grows Crop and New clip buttons;\n"
             L"    New clip slices the selection out as its own library clip\n"

@@ -3201,9 +3201,10 @@ int runSelfTest() {
     // ---- a card's layout (layout::cardMetrics / cardRects)
     // A card is as wide as its clip is long, but its volume slider is one length on
     // every card, so the same drag is the same change whichever clip it is on, and a
-    // short clip's is long enough to set. The narrowest card holds that row and the
-    // selection's Crop / New clip buttons. Checked on the rectangles the library is
-    // laid out with, on cards of every width.
+    // short clip's is long enough to set. The narrowest card holds that row, the
+    // selection's Crop / New clip buttons, and the title row (play, stop, the start of
+    // the name, the x). Checked on the rectangles the library is laid out with, on
+    // cards of every width from the narrowest up.
     {
         const float scales[] = { 1.0f, 1.25f, 1.5f, 1.75f, 2.0f };
         bool same = true, fits = true, buttons = true, title = true;
